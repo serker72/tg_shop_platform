@@ -1,0 +1,162 @@
+name: ${PROJECT_NAME:-tg_shop_platform}
+
+# One image for db_update/master_bot/bot_worker (same build + image name).
+x-app: &app
+  build:
+    context: .
+    args:
+      APP_UID: ${APP_UID:-1000}
+      APP_GID: ${APP_GID:-1000}
+  image: ${PROJECT_NAME:-tg_shop_platform}-app
+  env_file: ${APP_ENV_FILE:-.env}
+  restart: unless-stopped
+
+services:
+  postgres:
+    build: ./ops/postgres
+    image: ${PROJECT_NAME:-tg_shop_platform}-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER не задан}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD не задан}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB не задан}
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_partman_bgw"
+      - "-c"
+      - "pg_partman_bgw.interval=3600"
+      - "-c"
+      - "pg_partman_bgw.role=${POSTGRES_USER}"
+      - "-c"
+      - "pg_partman_bgw.dbname=${POSTGRES_DB}"
+    volumes:
+      - type: bind
+        source: ${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT_HOST:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:8.10.3-alpine
+    restart: unless-stopped
+    # Password is passed via env and written to a config file, so it is not visible
+    # in `docker inspect` Cmd/Args or `ps`. REDISCLI_AUTH is also used by the healthcheck.
+    # `\` and `"` are escaped for the redis config quoted string. The official
+    # docker-entrypoint.sh drops privileges to the redis user only for `redis-server`.
+    command:
+      - "sh"
+      - "-c"
+      - >-
+        umask 077
+        && printf 'requirepass "%s"\nappendonly yes\n'
+        "$$(printf '%s' "$$REDISCLI_AUTH" | sed 's/[\\"]/\\&/g')" > /tmp/redis.conf
+        && chown redis:redis /tmp/redis.conf
+        && exec docker-entrypoint.sh redis-server /tmp/redis.conf
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD не задан}
+    volumes:
+      - type: bind
+        source: ${REDIS_DATA_DIR:?REDIS_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /data
+    ports:
+      - "127.0.0.1:${REDIS_PORT_HOST:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  rabbitmq:
+    image: rabbitmq:4.3-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER не задан}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD не задан}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    volumes:
+      - type: bind
+        source: ${RABBITMQ_DATA_DIR:?RABBITMQ_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT_HOST:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MGMT_PORT_HOST:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  minio:
+    # Upstream minio/minio images are no longer published/maintained and the MinIO community
+    # edition is source-only, so we use the pgsty community fork pinned by tag + digest.
+    # The image contains curl (used by the healthcheck) and mc.
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY не задан}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY не задан}
+    volumes:
+      - type: bind
+        source: ${MINIO_DATA_DIR:?MINIO_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /data
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT_HOST:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT_HOST:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  db_update:
+    <<: *app
+    command: ["sh", "ops/scripts/migrate.sh"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  master_bot:
+    <<: *app
+    command: ["python", "-m", "app.entrypoints.master_bot"]
+    depends_on:
+      db_update:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${LOGS_DATA_DIR:?LOGS_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /app/logs
+
+  bot_worker:
+    <<: *app
+    command: ["python", "-m", "app.entrypoints.bot_worker"]
+    depends_on:
+      db_update:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${LOGS_DATA_DIR:?LOGS_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /app/logs
