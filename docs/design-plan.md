@@ -250,7 +250,7 @@ app/modules/catalog/
 
 
 8. `tenant_settings`: Настройки магазинов.
-* `id` (uuid), tenant_id (Unique, uuid), is_store_open (boolean), is_buy_enabled (boolean), is_refill_enabled (boolean), is_referral_enabled (boolean), is_notifications_enabled (boolean), 
+* `id` (uuid), tenant_id (Unique, uuid), is_store_open (boolean), is_buy_enabled (boolean), is_refill_enabled (boolean), is_referral_enabled (boolean), is_notifications_enabled (boolean),
 default_language_code (String), support_chat_id (bigint), news_chat_id (bigint), faq (jsonb), extra (jsonb).
 
 
@@ -568,9 +568,9 @@ UPDATE partman.part_config pc
     *   Развернуть **GlitchTip** (включая его зависимости: Redis, PostgreSQL в рамках `docker-compose.obs.yml`) для сбора ошибок.
 
 4.  **Безопасность сетевого взаимодействия:**
-    *   Учесть, что связь между VPS 1 и VPS 2 будет идти через защищенный VPN-туннель (WireGuard/Tailscale) по внутренним IP-адресам (например, `10.x.x.x`). 
+    *   Учесть, что связь между VPS 1 и VPS 2 будет идти через защищенный VPN-туннель (WireGuard/Tailscale) по внутренним IP-адресам (например, `10.x.x.x`).
     *   Эндпоинты `/metrics` и интерфейсы Alloy/Loki не должны публиковаться на публичных интерфейсах (ограничить `ports: ["127.0.0.1:9090:9090"]` или биндить на IP VPN). В публичный интернет (на порты 80/443) выдаются только Web-интерфейсы Grafana и GlitchTip через reverse proxy.
-    
+
 #### Этап 3. Master Bot и Панель управления (aiogram-dialog)
 
 * **Auth Middleware:** При каждом апдейте извлекает пользователя, проверяет `is_deleted == False` и `is_active == True`, внедряет в Dishka-контекст объект пользователя и плоский список его полномочий (`set[str]`).
@@ -631,4 +631,3 @@ UPDATE partman.part_config pc
 
 
 * **Разрешение конфликтов связей:** При восстановлении сущностей из состояния мягкого удаления обновлять флаг `is_deleted = False`, сохраняя консистентность Foreign Keys для уже существующих транзакций.
-
