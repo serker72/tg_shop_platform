@@ -5,7 +5,9 @@
 # Rules:
 #   source must be a dev file: PROJECT_DATA_DIR absolute and PROJECT_DATA_DIR/PROJECT_NAME
 #   must not already end with "_test" (otherwise test and dev would share data);
-#   PROJECT_ENVIRONMENT=test; PROJECT_NAME/PROJECT_DATA_DIR get a "_test" suffix;
+#   POSTGRES_DB must be set and must not end with "_test" either;
+#   PROJECT_ENVIRONMENT=test; PROJECT_NAME/PROJECT_DATA_DIR/POSTGRES_DB get a "_test" suffix
+#   (integration fixtures refuse any database whose name does not end with "_test");
 #   *_DATA_DIR are written as literal paths under the test PROJECT_DATA_DIR (order-independent);
 #   *_PORT_HOST are shifted by PORT_OFFSET (default 20000), result must be within 1..65535;
 #   MASTER_BOT_TOKEN -> mock; ENCRYPTION_KEYS_OLD -> empty;
@@ -51,7 +53,8 @@ trap 'rm -f "$tmp"' EXIT
 awk -v key="$key" -v tenv="$dst" -v off="$port_offset" '
 function norm(s) { gsub(/\r/, "", s); sub(/^[[:space:]]+/, "", s); sub(/^export[[:space:]]+/, "", s); return s }
 function unq(s) { if (s ~ /^".*"$/ || s ~ /^\047.*\047$/) return substr(s, 2, length(s) - 2); return s }
-function strip(s) { s = unq(s); sub(/\/+$/, "", s); return s }
+function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+function strip(s) { s = trim(unq(trim(s))); sub(/\/+$/, "", s); return s }
 function fail(msg) { print "ERROR: " msg > "/dev/stderr"; err = 1; exit 2 }
 function port(k, v,  p, r) {
     p = unq(v); if (p == "") p = pd[k]
@@ -73,6 +76,7 @@ FNR == NR {
     k = substr(line, 1, index(line, "=") - 1); v = strip(substr(line, index(line, "=") + 1))
     if (k == "PROJECT_DATA_DIR") { pdir = v; has_pdir = 1 }
     if (k == "PROJECT_NAME") pname = v
+    if (k == "POSTGRES_DB") { pgdb = v; has_pgdb = 1 }
     next
 }
 FNR == 1 {
@@ -80,6 +84,8 @@ FNR == 1 {
     if (pdir !~ /^\// || pdir ~ /\$/) fail("PROJECT_DATA_DIR must be an absolute literal path, got: " pdir)
     if (pdir ~ /_test$/) fail("PROJECT_DATA_DIR already ends with _test; source must be the dev env file")
     if (pname ~ /_test$/) fail("PROJECT_NAME already ends with _test; source must be the dev env file")
+    if (!has_pgdb || pgdb == "") fail("POSTGRES_DB is empty or missing in source env")
+    if (pgdb ~ /_test$/) fail("POSTGRES_DB already ends with _test; source must be the dev env file")
     tdir = pdir "_test"
 }
 # Pass 2: write the test env.
@@ -91,6 +97,7 @@ FNR == 1 {
 k == "PROJECT_ENVIRONMENT"  { print k "=test"; next }
 k == "PROJECT_NAME"         { print k "=\"" strip(v) "_test\""; next }
 k == "PROJECT_DATA_DIR"     { print k "=\"" tdir "\""; next }
+k == "POSTGRES_DB"          { print k "=\"" pgdb "_test\""; next }
 k in dd                     { print k "=\"" tdir "/" dd[k] "\""; next }
 k in pd                     { print k "=" port(k, v); next }
 k == "MASTER_BOT_TOKEN"     { print k "=123456789:TEST-mock-master-bot-token"; next }

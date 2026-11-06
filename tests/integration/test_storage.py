@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import os
 import uuid
 from collections.abc import AsyncIterator
 
@@ -26,17 +25,11 @@ from app.shared_kernel.domain.storage import (
     StorageUnavailableError,
 )
 from app.shared_kernel.infrastructure.storage.minio import MinIOStorage, build_minio_client
+from tests.integration.conftest import infra_unavailable as _infra_unavailable
 
 pytestmark = pytest.mark.integration
 
 PREFIX = "test"
-
-
-def _infra_unavailable(reason: str) -> None:
-    """Skip, or fail when ``REQUIRE_INFRA=1`` (``make test-integration``) demands the infra."""
-    if os.environ.get("REQUIRE_INFRA") == "1":
-        pytest.fail(f"REQUIRE_INFRA=1 but {reason}")
-    pytest.skip(reason)
 
 
 @pytest.fixture(scope="module")

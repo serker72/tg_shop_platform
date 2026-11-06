@@ -11,6 +11,7 @@ from app.shared_kernel.domain import (
     SoftDeleteMixin,
     StorageError,
     TenantIsolationError,
+    TenantScope,
     TimestampMixin,
     ValidationError,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "SoftDeleteMixin",
     "StorageError",
     "TenantIsolationError",
+    "TenantScope",
     "TimestampMixin",
     "ValidationError",
 ]

@@ -8,10 +8,28 @@ names that differ between environments and migrations start to churn.
 
 from __future__ import annotations
 
-from sqlalchemy import MetaData
-from sqlalchemy.orm import DeclarativeBase
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["NAMING_CONVENTION", "Base", "metadata"]
+from sqlalchemy import MetaData
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import Pool, QueuePool
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
+
+__all__ = [
+    "NAMING_CONVENTION",
+    "Base",
+    "build_engine",
+    "build_session_factory",
+    "metadata",
+]
 
 #: Naming convention for generated constraint / index names.
 #:
@@ -35,3 +53,30 @@ class Base(DeclarativeBase):
     """Root declarative class shared by all models of the project."""
 
     metadata = metadata
+
+
+def build_engine(settings: Settings, *, poolclass: type[Pool] | None = None) -> AsyncEngine:
+    """Create the async ``postgresql+psycopg`` engine from the application settings.
+
+    ``pool_size`` / ``max_overflow`` (``SQLALCHEMY_*``) are passed only to queue pools: the
+    default async pool (``AsyncAdaptedQueuePool``) or an explicit ``QueuePool`` subclass.
+    Other pools (``NullPool`` in tests, ``StaticPool``) reject these arguments.
+    """
+    kwargs: dict[str, Any] = {"echo": settings.sqlalchemy.echo, "pool_pre_ping": True}
+    if poolclass is not None:
+        kwargs["poolclass"] = poolclass
+    if poolclass is None or issubclass(poolclass, QueuePool):
+        kwargs["pool_size"] = settings.sqlalchemy.pool_size
+        kwargs["max_overflow"] = settings.sqlalchemy.max_overflow
+    return create_async_engine(settings.database_url, **kwargs)
+
+
+def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """Create the project-wide ``AsyncSession`` factory.
+
+    ``expire_on_commit=False`` is mandatory: with expiring commits every attribute of a
+    managed entity is expired after ``commit()``, and reloading it lazily is implicit IO,
+    which async SQLAlchemy forbids (``MissingGreenlet``). ``BaseRepository.update`` inspects
+    the loaded state without IO and would refuse such an entity with ``entity_state_unknown``.
+    """
+    return async_sessionmaker(engine, expire_on_commit=False, autoflush=True)

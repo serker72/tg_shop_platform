@@ -23,6 +23,7 @@ from app.shared_kernel.domain.storage import (
     StorageUnavailableError,
     StoredObject,
 )
+from app.shared_kernel.domain.tenant import TenantScope
 
 __all__ = [
     "BaseEntity",
@@ -40,6 +41,7 @@ __all__ = [
     "StorageUnavailableError",
     "StoredObject",
     "TenantIsolationError",
+    "TenantScope",
     "TimestampMixin",
     "ValidationError",
 ]

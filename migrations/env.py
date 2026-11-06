@@ -45,7 +45,14 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """Return the async ``postgresql+psycopg`` DSN from the application settings."""
+    """Return the async ``postgresql+psycopg`` DSN.
+
+    Programmatic callers (tests) may pass it in memory via
+    ``Config.attributes["sqlalchemy.url"]``; the CLI falls back to the application settings.
+    """
+    url = config.attributes.get("sqlalchemy.url")
+    if url:
+        return str(url)
     return get_settings().database_url
 
 
@@ -99,8 +106,13 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    """Entry point for the online mode: drives the async migration coroutine."""
-    configure_logging(json_logs=False)
+    """Entry point for the online mode: drives the async migration coroutine.
+
+    ``Config.attributes["configure_logger"] = False`` (Alembic cookbook, programmatic use)
+    keeps an embedding process - e.g. pytest - in charge of its own logging.
+    """
+    if config.attributes.get("configure_logger", True):
+        configure_logging(json_logs=False)
     asyncio.run(run_async_migrations())
 
 
