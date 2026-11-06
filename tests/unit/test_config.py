@@ -44,6 +44,10 @@ _ENV_KEYS = [
     "STORAGE_ENDPOINT",
     "STORAGE_REGION",
     "STORAGE_BUCKET",
+    "LOGS_DIR",
+    "LOGS_BUFFER_QUEUE_SIZE",
+    "LOGS_BUFFER_BATCH_SIZE",
+    "LOGS_FILE_MAX_BYTES",
 ]
 
 # Unknown env variables from ``.env.example`` that must never break validation.
@@ -56,6 +60,7 @@ _FOREIGN_ENV_KEYS = [
     "RABBITMQ_MGMT_PORT_HOST",
     "APP_UID",
     "APP_ENV_FILE",
+    "LOGS_DATA_DIR",
 ]
 
 
@@ -102,6 +107,43 @@ def test_defaults_without_env() -> None:
     assert settings.minio.endpoint == "minio:9000"
     assert settings.encryption.key is None
     assert settings.encryption_key_list == []
+
+
+def test_logs_defaults() -> None:
+    logs = make_settings(env_file=None).logs
+
+    assert str(logs.dir) == "/app/logs"
+    assert logs.buffer_queue_size == 10_000
+    assert logs.buffer_batch_size == 500
+    assert logs.buffer_flush_interval_seconds == 1.0
+    assert logs.buffer_db_retry_attempts == 3
+    assert logs.file_max_open == 256
+    assert logs.file_max_bytes == 50 * 1024 * 1024
+
+
+def test_logs_dir_env_and_host_dir_not_mixed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOGS_DATA_DIR", "/srv/host/logs")
+    assert str(make_settings(env_file=None).logs.dir) == "/app/logs"
+
+    monkeypatch.setenv("LOGS_DIR", "/custom/logs")
+    monkeypatch.setenv("LOGS_BUFFER_QUEUE_SIZE", "7")
+    logs = make_settings(env_file=None).logs
+    assert str(logs.dir) == "/custom/logs"
+    assert logs.buffer_queue_size == 7
+
+
+def test_logs_dotenv_is_read(tmp_path: Any) -> None:
+    env_file = write_env_file(tmp_path, "LOGS_DIR=/from/dotenv\nLOGS_FILE_MAX_BYTES=1024\n")
+    logs = make_settings(env_file).logs
+    assert str(logs.dir) == "/from/dotenv"
+    assert logs.file_max_bytes == 1024
+
+
+@pytest.mark.parametrize("key", ["LOGS_BUFFER_QUEUE_SIZE", "LOGS_BUFFER_BATCH_SIZE"])
+def test_logs_non_positive_rejected(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+    monkeypatch.setenv(key, "0")
+    with pytest.raises(ValidationError):
+        make_settings(env_file=None)
 
 
 def test_env_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

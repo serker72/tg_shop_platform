@@ -680,6 +680,43 @@ class TestStorageProvider:
 
         return make_container(StorageProvider(), context={Settings: settings})
 
+    @pytest.mark.parametrize("backend", ["minio", "s3"])
+    def test_audit_archive_storage_shares_client(
+        self, fake_clients: list[_FakeClient], backend: str
+    ) -> None:
+        from app.shared_kernel.infrastructure.providers import AuditArchiveStorage
+
+        settings = Settings(
+            _env_file=None,
+            storage={"backend": backend, "bucket": BUCKET, "audit_archive_bucket": "arch-s3"},
+            minio={"audit_archive_bucket": "arch-minio"},
+        )
+        container = self._container(settings)
+
+        main = container.get(StorageService)
+        archive = container.get(AuditArchiveStorage)
+
+        assert archive is not main
+        assert isinstance(archive, type(main))
+        assert main.bucket == BUCKET
+        assert archive.bucket == ("arch-minio" if backend == "minio" else "arch-s3")
+        assert len(fake_clients) == 1
+        container.close()
+        assert fake_clients[0].close_calls == 1
+
+    def test_audit_archive_storage_falls_back_to_main_bucket(
+        self, fake_clients: list[_FakeClient]
+    ) -> None:
+        from app.shared_kernel.infrastructure.providers import AuditArchiveStorage
+
+        settings = Settings(
+            _env_file=None, storage={"bucket": BUCKET}, minio={"audit_archive_bucket": ""}
+        )
+        container = self._container(settings)
+
+        assert container.get(AuditArchiveStorage).bucket == BUCKET
+        container.close()
+
     def test_minio_backend_is_default(self) -> None:
         settings = Settings(_env_file=None, storage={"bucket": BUCKET})
 

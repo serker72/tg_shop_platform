@@ -13,6 +13,9 @@ from app.shared_kernel.infrastructure.database import Base
 
 __all__ = [
     "DEFAULT_AUDIT_LOGS_RETENTION_MONTHS",
+    "DEFAULT_FILE_LOGS_RETENTION_DAYS",
+    "FILE_LOGS_RETENTION_DAYS_MAX",
+    "FILE_LOGS_RETENTION_DAYS_MIN",
     "DEFAULT_IAM_CACHE_TTL_SECONDS",
     "DEFAULT_USER_ACTIVITY_RETENTION_MONTHS",
     "RETENTION_MONTHS_MAX",
@@ -28,6 +31,10 @@ DEFAULT_USER_ACTIVITY_RETENTION_MONTHS = 3
 DEFAULT_AUDIT_LOGS_RETENTION_MONTHS = 24
 RETENTION_MONTHS_MIN = 1
 RETENTION_MONTHS_MAX = 120
+#: Text click-log retention (TZ 47.9); mirrored by the ``file_logs_retention`` revision.
+DEFAULT_FILE_LOGS_RETENTION_DAYS = 90
+FILE_LOGS_RETENTION_DAYS_MIN = 1
+FILE_LOGS_RETENTION_DAYS_MAX = 3650
 
 
 class SystemSettings(TimestampMixin, Base):
@@ -53,6 +60,11 @@ class SystemSettings(TimestampMixin, Base):
             f"audit_logs_retention_months BETWEEN {RETENTION_MONTHS_MIN} "
             f"AND {RETENTION_MONTHS_MAX}",
             name="audit_logs_retention_range",
+        ),
+        CheckConstraint(
+            f"file_logs_retention_days BETWEEN {FILE_LOGS_RETENTION_DAYS_MIN} "
+            f"AND {FILE_LOGS_RETENTION_DAYS_MAX}",
+            name="file_logs_retention_range",
         ),
     )
 
@@ -82,4 +94,10 @@ class SystemSettings(TimestampMixin, Base):
         nullable=False,
         default=DEFAULT_AUDIT_LOGS_RETENTION_MONTHS,
         server_default=text(str(DEFAULT_AUDIT_LOGS_RETENTION_MONTHS)),
+    )
+    file_logs_retention_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=DEFAULT_FILE_LOGS_RETENTION_DAYS,
+        server_default=text(str(DEFAULT_FILE_LOGS_RETENTION_DAYS)),
     )

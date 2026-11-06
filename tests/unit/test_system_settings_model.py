@@ -28,6 +28,9 @@ def test_checks() -> None:
         "ck_system_settings_audit_logs_retention_range": (
             "audit_logs_retention_months BETWEEN 1 AND 120"
         ),
+        "ck_system_settings_file_logs_retention_range": (
+            "file_logs_retention_days BETWEEN 1 AND 3650"
+        ),
     }
 
 
@@ -48,6 +51,7 @@ def test_server_defaults() -> None:
     assert server_default("extra_config") == "'{}'::jsonb"
     assert server_default("user_activity_retention_months") == "3"
     assert server_default("audit_logs_retention_months") == "24"
+    assert server_default("file_logs_retention_days") == "90"
     assert DEFAULT_USER_ACTIVITY_RETENTION_MONTHS == 3
     assert DEFAULT_AUDIT_LOGS_RETENTION_MONTHS == 24
     for name in TABLE.c.keys():

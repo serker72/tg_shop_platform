@@ -55,11 +55,14 @@ def build_minio_client(settings: Settings) -> Any:
 
 
 class MinIOStorage(Boto3StorageService):
-    """``StorageService`` bound to a MinIO bucket (``MINIO_*`` settings)."""
+    """``StorageService`` bound to a MinIO bucket (``MINIO_*`` settings).
 
-    def __init__(self, *, client: Any, settings: Settings) -> None:
+    ``bucket`` overrides the configured main bucket (e.g. the audit archive bucket).
+    """
+
+    def __init__(self, *, client: Any, settings: Settings, bucket: str | None = None) -> None:
         super().__init__(
             client=client,
-            bucket=settings.storage.resolved_bucket(settings.minio),
+            bucket=bucket or settings.storage.resolved_bucket(settings.minio),
             endpoint_url=settings.minio_endpoint_url,
         )

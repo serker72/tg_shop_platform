@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Final, Literal
 from urllib.parse import quote, urlsplit
 
@@ -25,6 +26,7 @@ from sqlalchemy.engine import URL
 
 __all__ = [
     "EncryptionSettings",
+    "LogsSettings",
     "MinioSettings",
     "PostgresSettings",
     "RabbitMQSettings",
@@ -220,8 +222,19 @@ class StorageSettings(BaseSettings):
     # S3 credentials (``s3`` only); ``None`` means "use the boto3 credential chain".
     access_key: str | None = None
     secret_key: SecretStr | None = None
+    # Audit archive bucket of the ``s3`` backend (``minio`` uses ``MINIO_AUDIT_ARCHIVE_BUCKET``);
+    # ``None`` falls back to the main bucket. Keys always live under ``audit/``.
+    audit_archive_bucket: str | None = None
 
-    @field_validator("endpoint", "region", "bucket", "access_key", "secret_key", mode="before")
+    @field_validator(
+        "endpoint",
+        "region",
+        "bucket",
+        "access_key",
+        "secret_key",
+        "audit_archive_bucket",
+        mode="before",
+    )
     @classmethod
     def _empty_storage_field_to_none(cls, value: object) -> object:
         return _normalise_empty_secret(value)
@@ -248,6 +261,40 @@ class StorageSettings(BaseSettings):
         """Return ``STORAGE_BUCKET`` when set, otherwise ``MINIO_BUCKET`` of ``minio``."""
         return self.bucket if self.bucket else minio.bucket
 
+    def resolved_audit_archive_bucket(self, minio: MinioSettings) -> str:
+        """Return the audit archive bucket of the active backend.
+
+        ``minio`` -> ``MINIO_AUDIT_ARCHIVE_BUCKET``, ``s3`` -> ``STORAGE_AUDIT_ARCHIVE_BUCKET``;
+        unset or blank -> the main bucket (:meth:`resolved_bucket`).
+        """
+        explicit = (
+            minio.audit_archive_bucket if self.backend == "minio" else self.audit_archive_bucket
+        )
+        if explicit is not None and explicit.strip():
+            return explicit.strip()
+        return self.resolved_bucket(minio)
+
+
+class LogsSettings(BaseSettings):
+    """Click-log buffer and text files (``LOGS_*`` env variables).
+
+    ``LOGS_DIR`` is the path *inside* the container (``/app/logs``). ``LOGS_DATA_DIR`` is a
+    different variable: the *host* directory bind-mounted there by docker compose; it also
+    reaches the container env through ``env_file`` but there is no ``data_dir`` field, so
+    ``extra="ignore"`` drops it.
+    """
+
+    model_config = _base_config("LOGS_")
+
+    dir: Path = Path("/app/logs")
+    buffer_queue_size: int = Field(default=10_000, gt=0)
+    buffer_batch_size: int = Field(default=500, gt=0)
+    buffer_flush_interval_seconds: float = Field(default=1.0, gt=0)
+    buffer_db_retry_attempts: int = Field(default=3, gt=0)
+    buffer_shutdown_timeout_seconds: float = Field(default=10.0, gt=0)
+    file_max_open: int = Field(default=256, gt=0)
+    file_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
+
 
 # ``Settings`` field name -> nested section class.
 _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
@@ -258,6 +305,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "minio": MinioSettings,
     "encryption": EncryptionSettings,
     "storage": StorageSettings,
+    "logs": LogsSettings,
 }
 
 
@@ -282,6 +330,7 @@ class Settings(BaseSettings):
     minio: MinioSettings = Field(default_factory=MinioSettings)
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    logs: LogsSettings = Field(default_factory=LogsSettings)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.

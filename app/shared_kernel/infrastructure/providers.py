@@ -7,7 +7,7 @@ so any container can be assembled with a custom settings instance in tests.
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, Iterable
-from typing import NewType, assert_never
+from typing import NewType, Protocol, assert_never, runtime_checkable
 
 from dishka import Provider, Scope, provide
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -18,11 +18,21 @@ from app.shared_kernel.infrastructure.database import build_engine, build_sessio
 from app.shared_kernel.infrastructure.storage.minio import MinIOStorage, build_minio_client
 from app.shared_kernel.infrastructure.storage.s3 import S3Storage, build_s3_client
 
-__all__ = ["DatabaseProvider", "StorageClient", "StorageProvider"]
+__all__ = ["AuditArchiveStorage", "DatabaseProvider", "StorageClient", "StorageProvider"]
 
 # Explicit DI key of the raw ``boto3`` S3 client. ``botocore`` ships no type stubs, so the
 # client has no importable type; a ``NewType`` gives dishka a dedicated key instead of ``Any``.
 StorageClient = NewType("StorageClient", object)
+
+
+@runtime_checkable
+class AuditArchiveStorage(StorageService, Protocol):
+    """DI key of the audit archive storage (``StorageService`` on the archive bucket).
+
+    A sub-protocol rather than ``NewType``: mypy forbids ``NewType`` over a protocol. Any
+    ``StorageService`` implementation satisfies it structurally, while dishka sees a
+    distinct key, so the main ``StorageService`` binding is unaffected.
+    """
 
 
 class StorageProvider(Provider):
@@ -60,6 +70,25 @@ class StorageProvider(Provider):
                 return MinIOStorage(client=client, settings=settings)
             case "s3":
                 return S3Storage(client=client, settings=settings)
+            case _:
+                assert_never(backend)
+
+    @provide
+    def provide_audit_archive_storage(
+        self, settings: Settings, client: StorageClient
+    ) -> AuditArchiveStorage:
+        """Second storage instance on the shared client, bound to the audit archive bucket.
+
+        Bucket: ``MINIO_AUDIT_ARCHIVE_BUCKET`` (minio) / ``STORAGE_AUDIT_ARCHIVE_BUCKET`` (s3),
+        falling back to the main bucket; keys are always prefixed with ``audit/``.
+        """
+        bucket = settings.storage.resolved_audit_archive_bucket(settings.minio)
+        backend = settings.storage.backend
+        match backend:
+            case "minio":
+                return MinIOStorage(client=client, settings=settings, bucket=bucket)
+            case "s3":
+                return S3Storage(client=client, settings=settings, bucket=bucket)
             case _:
                 assert_never(backend)
 

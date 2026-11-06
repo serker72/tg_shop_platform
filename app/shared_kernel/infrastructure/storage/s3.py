@@ -60,11 +60,14 @@ def build_s3_client(settings: Settings) -> Any:
 
 
 class S3Storage(Boto3StorageService):
-    """``StorageService`` bound to an AWS S3 (or S3-compatible) bucket."""
+    """``StorageService`` bound to an AWS S3 (or S3-compatible) bucket.
 
-    def __init__(self, *, client: Any, settings: Settings) -> None:
+    ``bucket`` overrides the configured main bucket (e.g. the audit archive bucket).
+    """
+
+    def __init__(self, *, client: Any, settings: Settings, bucket: str | None = None) -> None:
         super().__init__(
             client=client,
-            bucket=settings.storage.resolved_bucket(settings.minio),
+            bucket=bucket or settings.storage.resolved_bucket(settings.minio),
             endpoint_url=settings.storage.endpoint_url,
         )
