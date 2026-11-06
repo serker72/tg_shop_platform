@@ -58,6 +58,7 @@ MODEL_MODULES: tuple[str, ...] = (
     "app.modules.marketing.models",
     "app.modules.support.models",
     "app.modules.logging.models",
+    "app.modules.system.models",
 )
 
 #: Schemas autogenerate is allowed to inspect. ``None`` is the connection default schema.

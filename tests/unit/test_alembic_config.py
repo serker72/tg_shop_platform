@@ -65,10 +65,13 @@ def test_single_head_with_empty_base_revision(alembic_config: Config) -> None:
     heads = script.get_heads()
     assert len(heads) == 1, heads
 
-    base = list(script.walk_revisions(base="base", head="heads"))
-    assert len(base) == 1, [(rev.revision, rev.down_revision) for rev in base]
-    assert base[0].down_revision is None
-    assert base[0].revision == heads[0]
+    history = list(script.walk_revisions(base="base", head="heads"))
+    roots = [rev for rev in history if rev.down_revision is None]
+    assert [rev.revision for rev in roots] == ["initial"], [
+        (rev.revision, rev.down_revision) for rev in history
+    ]
+    assert history[0].revision == heads[0]
+    assert all(not rev.is_merge_point for rev in history)
 
 
 def test_revision_files_are_readable(alembic_config: Config) -> None:

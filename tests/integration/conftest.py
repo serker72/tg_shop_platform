@@ -10,6 +10,8 @@ Fixture overview:
   savepoint, everything disappears after the test.
 * ``clean_db`` (function) - raw engine for tests that need a real commit, DDL or
   pg_partman maintenance; model tables are truncated after the test.
+* ``scratch_db`` (function) - empty temporary ``<POSTGRES_DB>_mig_<hex8>_test`` database
+  (no migrations), dropped with FORCE afterwards; ``migrated_scratch_db`` - the same at head.
 
 Every database fixture depends on ``migrated_db``, which refuses non-test settings before
 connecting and verifies ``current_database()`` after connecting (see ``_guards``).
@@ -19,16 +21,18 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import AsyncIterator, Iterator
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import Table, make_url, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -45,10 +49,25 @@ from tests.integration._guards import (
     infra_unavailable,
 )
 
-__all__ = ["ALEMBIC_INI", "ROOT", "MigrationRun", "infra_unavailable"]
+__all__ = [
+    "ALEMBIC_INI",
+    "CLEAN_DB_PRESERVED_TABLES",
+    "ROOT",
+    "MigrationRun",
+    "Query",
+    "infra_unavailable",
+    "run_alembic",
+]
+
+#: Tables ``clean_db`` never truncates: Alembic bookkeeping and the ``system_settings``
+#: singleton row inserted by the migration (TRUNCATE would delete it for good).
+CLEAN_DB_PRESERVED_TABLES: frozenset[str] = frozenset({"alembic_version", "system_settings"})
 
 ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = ROOT / "alembic.ini"
+
+#: ``query(sql)`` on a scratch database (autocommit); returns fetched rows or ``[]``.
+Query = Callable[..., list[tuple[Any, ...]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +228,9 @@ async def clean_db(
     ``SET LOCAL lock_timeout = '5s'`` (``LockNotAvailable`` instead of a hang).
 
     ``TRUNCATE ... RESTART IDENTITY CASCADE`` covers every ``public`` table of
-    ``Base.metadata`` except ``alembic_version``. On a partitioned parent PostgreSQL
+    ``Base.metadata`` except :data:`CLEAN_DB_PRESERVED_TABLES`; the ``system_settings``
+    singleton is reset to its defaults instead (:func:`reset_system_settings_sql`). On a
+    partitioned parent PostgreSQL
     truncates all its partitions as well, so pg_partman children need no separate handling.
     Tables created by the test itself are the test's responsibility. No model tables ->
     no-op.
@@ -220,7 +241,7 @@ async def clean_db(
     tables = [
         table
         for table in Base.metadata.sorted_tables
-        if table.schema in (None, "public") and table.name != "alembic_version"
+        if table.schema in (None, "public") and table.name not in CLEAN_DB_PRESERVED_TABLES
     ]
     if not tables:
         return
@@ -229,3 +250,65 @@ async def clean_db(
     async with engine.begin() as connection:
         await connection.execute(text("SET LOCAL lock_timeout = '5s'"))
         await connection.execute(text(f"TRUNCATE TABLE {names} RESTART IDENTITY CASCADE"))
+        await connection.execute(text(reset_system_settings_sql()))
+
+
+def reset_system_settings_sql() -> str:
+    """``UPDATE`` restoring every ``system_settings`` column except ``id`` / ``created_at``
+    to its server default (``updated_at`` included), so values changed by one ``clean_db``
+    test never leak into the next one. Built from ``SystemSettings.__table__``.
+    """
+    from app.modules.system.models import SINGLETON_ID, SystemSettings
+
+    table = cast(Table, SystemSettings.__table__)
+    columns = [c.name for c in table.columns if c.name not in {"id", "created_at"}]
+    assignments = ", ".join(f'"{name}" = DEFAULT' for name in columns)
+    return f"UPDATE system_settings SET {assignments} WHERE id = {SINGLETON_ID}"  # noqa: S608
+
+
+def run_alembic(url: str, action: Callable[[Config, str], None], revision: str) -> None:
+    """Run an Alembic command against ``url`` in a worker thread (see ``migrated_db``)."""
+    config = Config(str(ALEMBIC_INI))
+    config.attributes["sqlalchemy.url"] = url
+    config.attributes["configure_logger"] = False
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="alembic") as pool:
+        pool.submit(action, config, revision).result()
+
+
+@pytest.fixture
+def scratch_db(settings: Settings, migrated_db: MigrationRun) -> Iterator[tuple[str, Query]]:
+    """Temporary ``<POSTGRES_DB>_mig_<hex8>_test`` database, dropped with FORCE afterwards."""
+    assert_test_database(settings)
+    pg = settings.postgres
+    assert pg.password is not None
+    name = f"{pg.db}_mig_{uuid.uuid4().hex[:8]}_test"
+    assert_test_database_name(name)
+    params: dict[str, Any] = {
+        "host": pg.host,
+        "port": pg.port,
+        "user": pg.user,
+        "password": pg.password.get_secret_value(),
+        "autocommit": True,
+    }
+    with psycopg.connect(dbname=pg.db, **params) as admin:
+        admin.execute(f'CREATE DATABASE "{name}"')
+    url = make_url(settings.database_url).set(database=name).render_as_string(False)
+
+    def query(sql: str) -> list[tuple[Any, ...]]:
+        with psycopg.connect(dbname=name, **params) as connection:
+            cursor = connection.execute(sql)
+            return list(cursor.fetchall()) if cursor.description else []
+
+    try:
+        yield url, query
+    finally:
+        with psycopg.connect(dbname=pg.db, **params) as admin:
+            admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+@pytest.fixture
+def migrated_scratch_db(scratch_db: tuple[str, Query]) -> tuple[str, Query]:
+    """``scratch_db`` upgraded to ``head``."""
+    url, _ = scratch_db
+    run_alembic(url, command.upgrade, "head")
+    return scratch_db

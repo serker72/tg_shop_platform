@@ -112,7 +112,7 @@ def test_include_object_skips_service_schemas() -> None:
 
 
 def test_model_modules_cover_all_business_modules() -> None:
-    assert len(MODEL_MODULES) == 8
+    assert len(MODEL_MODULES) == 9
     assert all(name.startswith("app.modules.") for name in MODEL_MODULES)
 
 
