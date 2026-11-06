@@ -84,7 +84,8 @@ test-integration: env-test ## Start test infra (TEST_SERVICES) and run integrati
 	export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT="$${POSTGRES_PORT_HOST:-5432}" \
 		REDIS_HOST=127.0.0.1 REDIS_PORT="$${REDIS_PORT_HOST:-6379}" \
 		RABBITMQ_HOST=127.0.0.1 RABBITMQ_PORT="$${RABBITMQ_PORT_HOST:-5672}" \
-		MINIO_ENDPOINT="127.0.0.1:$${MINIO_API_PORT_HOST:-9000}"; \
+		MINIO_ENDPOINT="127.0.0.1:$${MINIO_API_PORT_HOST:-9000}" \
+		REQUIRE_INFRA=1; \
 	rc=0; uv run pytest -m integration tests/integration || rc=$$?; \
 	if [ $$rc -eq 5 ]; then echo "No integration tests collected — treated as success"; rc=0; fi; \
 	echo "Test stack is left running; stop it with: make test-integration-down [PURGE=1]"; \

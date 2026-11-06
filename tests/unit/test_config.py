@@ -40,6 +40,10 @@ _ENV_KEYS = [
     "MINIO_AUDIT_ARCHIVE_BUCKET",
     "ENCRYPTION_KEY",
     "ENCRYPTION_KEYS_OLD",
+    "STORAGE_BACKEND",
+    "STORAGE_ENDPOINT",
+    "STORAGE_REGION",
+    "STORAGE_BUCKET",
 ]
 
 # Unknown env variables from ``.env.example`` that must never break validation.
@@ -388,3 +392,107 @@ def test_redis_url_without_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REDIS_DB", "1")
 
     assert make_settings().redis_url == "redis://redis:6379/1"
+
+
+def test_storage_backend_defaults_to_minio() -> None:
+    settings = make_settings(env_file=None)
+
+    assert settings.storage.backend == "minio"
+    assert settings.storage.endpoint is None
+    assert settings.storage.region is None
+    assert settings.storage.bucket is None
+
+
+def test_storage_backend_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_BACKEND", "s3")
+
+    assert make_settings().storage.backend == "s3"
+
+
+def test_storage_backend_from_dotenv(tmp_path: Any) -> None:
+    env_file = write_env_file(
+        tmp_path,
+        "STORAGE_BACKEND=s3\nSTORAGE_REGION=eu-central-1\n"
+        "STORAGE_ENDPOINT=https://s3.example.com\n",
+    )
+
+    storage = make_settings(env_file).storage
+
+    assert storage.backend == "s3"
+    assert storage.region == "eu-central-1"
+    assert storage.endpoint_url == "https://s3.example.com"
+
+
+def test_storage_backend_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_BACKEND", "gcs")
+
+    with pytest.raises(ValidationError, match="backend"):
+        make_settings()
+
+
+def test_storage_bucket_falls_back_to_minio_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINIO_BUCKET", "custom-bucket")
+    monkeypatch.setenv("STORAGE_BUCKET", "")
+
+    settings = make_settings()
+
+    assert settings.storage.bucket is None
+    assert settings.storage.resolved_bucket(settings.minio) == "custom-bucket"
+
+
+def test_storage_bucket_overrides_minio_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINIO_BUCKET", "minio-bucket")
+    monkeypatch.setenv("STORAGE_BUCKET", "storage-bucket")
+
+    settings = make_settings()
+
+    assert settings.storage.resolved_bucket(settings.minio) == "storage-bucket"
+
+
+def test_default_minio_bucket_used_when_storage_bucket_empty() -> None:
+    settings = make_settings(env_file=None)
+
+    assert settings.storage.resolved_bucket(settings.minio) == settings.minio.bucket == "tg-shop"
+
+
+def test_storage_endpoint_without_scheme_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_ENDPOINT", "minio:9000")
+
+    with pytest.raises(ValidationError, match="STORAGE_ENDPOINT must be a full URL"):
+        make_settings(env_file=None)
+
+
+def test_storage_endpoint_without_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_ENDPOINT", "https://")
+
+    with pytest.raises(ValidationError, match="STORAGE_ENDPOINT"):
+        make_settings(env_file=None)
+
+
+def test_storage_endpoint_full_url_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_ENDPOINT", "https://s3.example.com")
+
+    settings = make_settings(env_file=None)
+
+    assert settings.storage.endpoint_url == "https://s3.example.com"
+
+
+def test_empty_storage_credentials_become_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_ACCESS_KEY", "")
+    monkeypatch.setenv("STORAGE_SECRET_KEY", "  ")
+
+    settings = make_settings(env_file=None)
+
+    assert settings.storage.access_key is None
+    assert settings.storage.secret_key is None
+
+
+def test_storage_credentials_are_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STORAGE_ACCESS_KEY", "AKIA")
+    monkeypatch.setenv("STORAGE_SECRET_KEY", "s3-secret")
+
+    settings = make_settings(env_file=None)
+
+    assert settings.storage.access_key == "AKIA"
+    assert settings.storage.secret_key is not None
+    assert settings.storage.secret_key.get_secret_value() == "s3-secret"

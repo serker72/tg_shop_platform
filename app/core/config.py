@@ -17,7 +17,7 @@ import re
 from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any, Final, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,6 +31,7 @@ __all__ = [
     "RedisSettings",
     "SQLAlchemySettings",
     "Settings",
+    "StorageSettings",
     "get_settings",
 ]
 
@@ -46,6 +47,7 @@ _ENDPOINT_RE = re.compile(
 _UNSET: Final = object()
 
 ProjectEnvironment = Literal["loc", "test", "stage", "prod"]
+StorageBackend = Literal["minio", "s3"]
 
 
 def _base_config(prefix: str, *, env_file: str | None = None) -> SettingsConfigDict:
@@ -183,7 +185,7 @@ class EncryptionSettings(BaseSettings):
 
     @field_validator("key", "keys_old", mode="before")
     @classmethod
-    def _empty_to_none(cls, value: object) -> object:
+    def _empty_encryption_to_none(cls, value: object) -> object:
         return _normalise_empty_secret(value)
 
     @property
@@ -195,6 +197,58 @@ class EncryptionSettings(BaseSettings):
         return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+class StorageSettings(BaseSettings):
+    """Object storage backend selection (``STORAGE_*`` env variables).
+
+    ``minio`` (default) uses the mandatory MinIO service with its ``MINIO_*`` endpoint and
+    credentials; ``MINIO_SECURE`` applies only to this backend. ``s3`` targets AWS S3 or an
+    S3-compatible endpoint; ``STORAGE_ENDPOINT``, ``STORAGE_REGION``, ``STORAGE_ACCESS_KEY``
+    and ``STORAGE_SECRET_KEY`` apply only to ``STORAGE_BACKEND=s3``. Unset S3 credentials
+    (``None``) delegate to the boto3 credential chain (env ``AWS_*``, profile, IAM role).
+    The bucket falls back to ``MINIO_BUCKET`` so a deployment switching the backend keeps
+    its layout.
+    """
+
+    model_config = _base_config("STORAGE_")
+
+    backend: StorageBackend = "minio"
+    # Full ``scheme://host:port`` URL for ``s3``; ``None`` means the AWS default endpoint.
+    # MinIO always uses ``minio_endpoint_url`` and ignores this field.
+    endpoint: str | None = None
+    region: str | None = None
+    bucket: str | None = None
+    # S3 credentials (``s3`` only); ``None`` means "use the boto3 credential chain".
+    access_key: str | None = None
+    secret_key: SecretStr | None = None
+
+    @field_validator("endpoint", "region", "bucket", "access_key", "secret_key", mode="before")
+    @classmethod
+    def _empty_storage_field_to_none(cls, value: object) -> object:
+        return _normalise_empty_secret(value)
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(
+                "STORAGE_ENDPOINT must be a full URL with an http:// or https:// scheme and a "
+                f"host (e.g. 'https://s3.example.com'), got {value!r}"
+            )
+        return value
+
+    @property
+    def endpoint_url(self) -> str | None:
+        """Return the explicit S3 endpoint URL, if configured."""
+        return self.endpoint
+
+    def resolved_bucket(self, minio: MinioSettings) -> str:
+        """Return ``STORAGE_BUCKET`` when set, otherwise ``MINIO_BUCKET`` of ``minio``."""
+        return self.bucket if self.bucket else minio.bucket
+
+
 # ``Settings`` field name -> nested section class.
 _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "postgres": PostgresSettings,
@@ -203,6 +257,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "rabbitmq": RabbitMQSettings,
     "minio": MinioSettings,
     "encryption": EncryptionSettings,
+    "storage": StorageSettings,
 }
 
 
@@ -210,9 +265,9 @@ class Settings(BaseSettings):
     """Root application settings aggregated from the environment.
 
     Nested sections mirror ``POSTGRES_*``, ``SQLALCHEMY_*``, ``REDIS_*``, ``RABBITMQ_*``,
-    ``MINIO_*`` and ``ENCRYPTION_*`` variables. Type errors (e.g. ``POSTGRES_PORT=abc``)
-    surface as ``ValidationError`` naming the offending field, raised when ``Settings()``
-    is constructed — never on import.
+    ``MINIO_*``, ``ENCRYPTION_*`` and ``STORAGE_*`` variables. Type errors (e.g.
+    ``POSTGRES_PORT=abc``) surface as ``ValidationError`` naming the offending field, raised
+    when ``Settings()`` is constructed — never on import.
     """
 
     model_config = _base_config("", env_file=_DEFAULT_ENV_FILE)
@@ -226,6 +281,7 @@ class Settings(BaseSettings):
     rabbitmq: RabbitMQSettings = Field(default_factory=RabbitMQSettings)
     minio: MinioSettings = Field(default_factory=MinioSettings)
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.
