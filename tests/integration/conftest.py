@@ -57,6 +57,7 @@ __all__ = [
     "Query",
     "infra_unavailable",
     "reseed_languages_sql",
+    "reseed_rbac_sql",
     "run_alembic",
 ]
 
@@ -230,8 +231,9 @@ async def clean_db(
 
     ``TRUNCATE ... RESTART IDENTITY CASCADE`` covers every ``public`` table of
     ``Base.metadata`` except :data:`CLEAN_DB_PRESERVED_TABLES`; the ``system_settings``
-    singleton is reset to its defaults instead (:func:`reset_system_settings_sql`) and the
-    ``languages`` reference rows are re-seeded (:func:`reseed_languages_sql`). On a
+    singleton is reset to its defaults instead (:func:`reset_system_settings_sql`), the
+    ``languages`` reference rows are re-seeded (:func:`reseed_languages_sql`) and so are
+    permissions, system roles and their links (:func:`reseed_rbac_sql`). On a
     partitioned parent PostgreSQL
     truncates all its partitions as well, so pg_partman children need no separate handling.
     Tables created by the test itself are the test's responsibility. No model tables ->
@@ -254,6 +256,8 @@ async def clean_db(
         await connection.execute(text(f"TRUNCATE TABLE {names} RESTART IDENTITY CASCADE"))
         await connection.execute(text(reset_system_settings_sql()))
         await connection.execute(text(reseed_languages_sql()))
+        for statement in reseed_rbac_sql():
+            await connection.execute(text(statement))
 
 
 def reseed_languages_sql() -> str:
@@ -275,6 +279,44 @@ def reseed_languages_sql() -> str:
         "INSERT INTO languages (id, code, name, is_default) "  # noqa: S608
         f"VALUES {rows} ON CONFLICT (code) DO NOTHING"
     )
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def reseed_rbac_sql() -> list[str]:
+    """Idempotent ``INSERT``s restoring the seeded permissions, system roles and their
+    links (:mod:`app.modules.iam.permissions`) after ``clean_db`` truncated them."""
+    from app.modules.iam.permissions import (
+        SEED_PERMISSIONS,
+        SEED_ROLE_PERMISSIONS,
+        SEED_ROLES,
+    )
+
+    permissions = ", ".join(
+        f"(gen_random_uuid(), {_sql_literal(slug)}, {_sql_literal(name)})"
+        for slug, name in SEED_PERMISSIONS
+    )
+    roles = ", ".join(
+        f"(gen_random_uuid(), {_sql_literal(slug)}, {_sql_literal(name)}, true)"
+        for slug, name in SEED_ROLES
+    )
+    links = ", ".join(
+        f"({_sql_literal(role)}, {_sql_literal(permission)})"
+        for role, slugs in SEED_ROLE_PERMISSIONS.items()
+        for permission in sorted(slugs)
+    )
+    return [
+        "INSERT INTO permissions (id, slug, name) "  # noqa: S608
+        f"VALUES {permissions} ON CONFLICT (slug) DO NOTHING",
+        "INSERT INTO roles (id, slug, name, is_system) "  # noqa: S608
+        f"VALUES {roles} ON CONFLICT (slug) DO NOTHING",
+        "INSERT INTO role_permissions (role_id, permission_id) "  # noqa: S608
+        f"SELECT r.id, p.id FROM (VALUES {links}) AS v(role, permission) "
+        "JOIN roles r ON r.slug = v.role JOIN permissions p ON p.slug = v.permission "
+        "ON CONFLICT DO NOTHING",
+    ]
 
 
 def reset_system_settings_sql() -> str:

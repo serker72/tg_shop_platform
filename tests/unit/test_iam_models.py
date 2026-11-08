@@ -13,17 +13,57 @@ from sqlalchemy.sql.schema import CallableColumnDefault
 from app.modules.iam.models import (
     DEFAULT_LANGUAGE_CODE,
     LANGUAGE_CODE_PATTERN,
+    PERMISSION_SLUG_PATTERN,
+    ROLE_SLUG_PATTERN,
     SEED_LANGUAGES,
     TENANT_SLUG_PATTERN,
     Language,
+    Permission,
+    Role,
+    RolePermission,
     Tenant,
+    TenantModerator,
     TenantSettings,
+    User,
+    UserPermissionOverride,
+    UserRole,
+)
+from app.modules.iam.permissions import (
+    GLOBAL_PERMISSIONS,
+    ROLE_ADMIN,
+    ROLE_MODERATOR,
+    ROLE_SENIOR_MODERATOR,
+    SEED_PERMISSION_SLUGS,
+    SEED_PERMISSIONS,
+    SEED_ROLE_PERMISSIONS,
+    SEED_ROLES,
+    TENANTS_VIEW_ALL,
 )
 from app.shared_kernel.infrastructure.database import Base
 
 TENANTS = cast(Table, Tenant.__table__)
 LANGUAGES = cast(Table, Language.__table__)
 SETTINGS = cast(Table, TenantSettings.__table__)
+PERMISSIONS = cast(Table, Permission.__table__)
+ROLES = cast(Table, Role.__table__)
+ROLE_PERMISSIONS = cast(Table, RolePermission.__table__)
+USERS = cast(Table, User.__table__)
+USER_ROLES = cast(Table, UserRole.__table__)
+OVERRIDES = cast(Table, UserPermissionOverride.__table__)
+MODERATORS = cast(Table, TenantModerator.__table__)
+RBAC_TABLES = (PERMISSIONS, ROLES, ROLE_PERMISSIONS, USERS, USER_ROLES, OVERRIDES, MODERATORS)
+
+
+def _fks(table: Table) -> dict[str, tuple[list[str], str, str | None]]:
+    return {
+        str(fk.name): (list(fk.column_keys), fk.referred_table.name, fk.ondelete)
+        for fk in table.constraints
+        if isinstance(fk, ForeignKeyConstraint)
+    }
+
+
+def _indexes(table: Table) -> dict[str, tuple[list[str], bool]]:
+    return {str(i.name): ([c.name for c in i.columns], bool(i.unique)) for i in table.indexes}
 
 
 def _checks(table: Table) -> dict[str, str]:
@@ -177,3 +217,239 @@ def test_seed_languages() -> None:
 
 def test_registered_in_metadata() -> None:
     assert {"tenants", "languages", "tenant_settings"} <= set(Base.metadata.tables)
+    assert {t.name for t in RBAC_TABLES} <= set(Base.metadata.tables)
+
+
+# --- RBAC --------------------------------------------------------------------------------
+
+
+def test_rbac_checks() -> None:
+    assert _checks(PERMISSIONS) == {
+        "ck_permissions_slug_format": "slug ~ '^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$'"
+    }
+    assert _checks(ROLES) == {
+        "ck_roles_slug_format": "slug ~ '^[a-z][a-z0-9_]*$'",
+        "ck_roles_system_is_live": "NOT is_system OR (is_active AND NOT is_deleted)",
+    }
+    assert _checks(USERS) == {"ck_users_telegram_user_id_positive": "telegram_user_id > 0"}
+    for table in (ROLE_PERMISSIONS, USER_ROLES, OVERRIDES, MODERATORS):
+        assert _checks(table) == {}, table.name
+
+
+@pytest.mark.parametrize(
+    ("pattern", "value", "ok"),
+    [
+        (PERMISSION_SLUG_PATTERN, "products.view", True),
+        (PERMISSION_SLUG_PATTERN, "tenants.view_all", True),
+        (PERMISSION_SLUG_PATTERN, "products", False),
+        (PERMISSION_SLUG_PATTERN, "products.view.all", False),
+        (PERMISSION_SLUG_PATTERN, "Products.view", False),
+        (PERMISSION_SLUG_PATTERN, "products_view", False),
+        (PERMISSION_SLUG_PATTERN, "1x.view", False),
+        (PERMISSION_SLUG_PATTERN, "products.", False),
+        (ROLE_SLUG_PATTERN, "senior_moderator", True),
+        (ROLE_SLUG_PATTERN, "admin2", True),
+        (ROLE_SLUG_PATTERN, "Admin", False),
+        (ROLE_SLUG_PATTERN, "senior-moderator", False),
+        (ROLE_SLUG_PATTERN, "_admin", False),
+        (ROLE_SLUG_PATTERN, "a.b", False),
+    ],
+)
+def test_rbac_patterns(pattern: str, value: str, ok: bool) -> None:
+    assert (re.fullmatch(pattern, value) is not None) is ok
+
+
+def test_rbac_uniques() -> None:
+    assert _uniques(PERMISSIONS) == {"uq_permissions_slug": ["slug"]}
+    assert _uniques(ROLES) == {"uq_roles_slug": ["slug"]}
+    assert _uniques(USERS) == {"uq_users_telegram_user_id": ["telegram_user_id"]}
+    assert _uniques(USER_ROLES) == {"uq_user_roles_user_id_role_id": ["user_id", "role_id"]}
+    assert _uniques(MODERATORS) == {
+        "uq_tenant_moderators_user_id_tenant_id": ["user_id", "tenant_id"]
+    }
+    name = "uq_user_permission_overrides_user_id_permission_id_tenant_id"
+    assert _uniques(OVERRIDES) == {name: ["user_id", "permission_id", "tenant_id"]}
+    assert _uniques(ROLE_PERMISSIONS) == {}
+    constraint = next(
+        c for c in OVERRIDES.constraints if isinstance(c, UniqueConstraint) and c.name == name
+    )
+    assert constraint.dialect_options["postgresql"]["nulls_not_distinct"] is True
+
+
+def test_role_permissions_primary_key() -> None:
+    assert [c.name for c in ROLE_PERMISSIONS.primary_key.columns] == ["role_id", "permission_id"]
+    assert set(ROLE_PERMISSIONS.c.keys()) == {"role_id", "permission_id"}
+
+
+def test_rbac_foreign_keys() -> None:
+    assert _fks(ROLE_PERMISSIONS) == {
+        "fk_role_permissions_role_id_roles": (["role_id"], "roles", "CASCADE"),
+        "fk_role_permissions_permission_id_permissions": (
+            ["permission_id"],
+            "permissions",
+            "CASCADE",
+        ),
+    }
+    assert _fks(USER_ROLES) == {
+        "fk_user_roles_user_id_users": (["user_id"], "users", "CASCADE"),
+        "fk_user_roles_role_id_roles": (["role_id"], "roles", "RESTRICT"),
+        "fk_user_roles_granted_by_id_users": (["granted_by_id"], "users", "SET NULL"),
+    }
+    assert _fks(OVERRIDES) == {
+        "fk_user_permission_overrides_user_id_users": (["user_id"], "users", "CASCADE"),
+        "fk_user_permission_overrides_permission_id_permissions": (
+            ["permission_id"],
+            "permissions",
+            "CASCADE",
+        ),
+        "fk_user_permission_overrides_tenant_id_tenants": (["tenant_id"], "tenants", "CASCADE"),
+        "fk_user_permission_overrides_granted_by_id_users": (
+            ["granted_by_id"],
+            "users",
+            "SET NULL",
+        ),
+    }
+    assert _fks(MODERATORS) == {
+        "fk_tenant_moderators_user_id_users": (["user_id"], "users", "CASCADE"),
+        "fk_tenant_moderators_tenant_id_tenants": (["tenant_id"], "tenants", "CASCADE"),
+    }
+    for table in (PERMISSIONS, ROLES, USERS):
+        assert _fks(table) == {}, table.name
+
+
+def test_rbac_indexes() -> None:
+    assert _indexes(PERMISSIONS) == {"ix_permissions_is_deleted": (["is_deleted"], False)}
+    assert _indexes(ROLES) == {"ix_roles_is_deleted": (["is_deleted"], False)}
+    assert _indexes(USERS) == {"ix_users_is_deleted": (["is_deleted"], False)}
+    assert _indexes(ROLE_PERMISSIONS) == {
+        "ix_role_permissions_permission_id": (["permission_id"], False)
+    }
+    assert _indexes(USER_ROLES) == {
+        "ix_user_roles_role_id": (["role_id"], False),
+        "ix_user_roles_granted_by_id": (["granted_by_id"], False),
+    }
+    assert _indexes(OVERRIDES) == {
+        "ix_user_permission_overrides_permission_id": (["permission_id"], False),
+        "ix_user_permission_overrides_tenant_id": (["tenant_id"], False),
+        "ix_user_permission_overrides_granted_by_id": (["granted_by_id"], False),
+    }
+    assert _indexes(MODERATORS) == {"ix_tenant_moderators_tenant_id": (["tenant_id"], False)}
+
+
+def test_every_foreign_key_is_indexed() -> None:
+    """In every table of ``Base.metadata`` each FK column leads some index, unique
+    constraint or the primary key (no exceptions so far)."""
+    from app.core.migrations_support import import_all_models
+
+    import_all_models()
+    missing: list[tuple[str, str]] = []
+    for table in Base.metadata.tables.values():
+        leading = {i.columns[0].name for i in table.indexes if i.columns}
+        leading |= {
+            next(iter(c.columns)).name
+            for c in table.constraints
+            if isinstance(c, UniqueConstraint) and c.columns
+        }
+        if table.primary_key.columns:
+            leading.add(next(iter(table.primary_key.columns)).name)
+        missing += [
+            (table.name, fk.parent.name)
+            for fk in table.foreign_keys
+            if fk.parent.name not in leading
+        ]
+    assert missing == []
+    assert {t.name for t in RBAC_TABLES} <= set(Base.metadata.tables)
+
+
+def test_rbac_nullable() -> None:
+    def nullable(table: Table) -> set[str]:
+        return {c.name for c in table.columns if c.nullable}
+
+    assert nullable(PERMISSIONS) == set()
+    assert nullable(ROLES) == set()
+    assert nullable(ROLE_PERMISSIONS) == set()
+    assert nullable(USERS) == {"telegram_user_name"}
+    assert nullable(USER_ROLES) == {"granted_by_id"}
+    assert nullable(OVERRIDES) == {"tenant_id", "expires_at", "granted_by_id", "reason"}
+    assert nullable(MODERATORS) == set()
+
+
+def test_rbac_soft_delete_split() -> None:
+    for table in (PERMISSIONS, ROLES, USERS):
+        assert {"is_deleted", "is_active"} <= set(table.c.keys()), table.name
+    for table in (ROLE_PERMISSIONS, USER_ROLES, OVERRIDES, MODERATORS):
+        assert "is_deleted" not in table.c, table.name
+        assert "is_active" not in table.c, table.name
+
+
+def test_rbac_server_defaults_match_python_defaults() -> None:
+    for table, name in ((ROLES, "is_system"), (USERS, "is_superuser")):
+        assert getattr(table.c[name].default, "arg", None) is False, name
+        assert _server_default(table, name) == "false", name
+    assert OVERRIDES.c.is_granted.default is None
+    assert OVERRIDES.c.is_granted.server_default is None
+
+
+def test_rbac_column_types() -> None:
+    for table, names in (
+        (PERMISSIONS, ("slug", "name")),
+        (ROLES, ("slug", "name")),
+        (USERS, ("telegram_user_name",)),
+        (OVERRIDES, ("reason",)),
+    ):
+        for name in names:
+            assert getattr(table.c[name].type, "length", None) is None
+    assert USERS.c.telegram_user_id.type.__class__.__name__ == "BigInteger"
+    assert OVERRIDES.c.expires_at.type.timezone is True  # type: ignore[attr-defined]
+
+
+def test_rbac_eager_defaults() -> None:
+    for model in (Permission, Role, User, UserRole, UserPermissionOverride, TenantModerator):
+        assert model.__mapper__.eager_defaults is True, model
+        assert {"created_at", "updated_at", "id"} <= set(model.__table__.c.keys())
+    assert "created_at" not in ROLE_PERMISSIONS.c
+
+
+def test_seed_permissions() -> None:
+    slugs = [slug for slug, _ in SEED_PERMISSIONS]
+    # The only place the catalogue size is pinned: 27 TZ 46.7 permissions + tenants.view_all.
+    assert len(slugs) == len(set(slugs)) == len(SEED_PERMISSION_SLUGS) == 28
+    assert GLOBAL_PERMISSIONS <= SEED_PERMISSION_SLUGS
+    assert GLOBAL_PERMISSIONS == {
+        "roles.manage",
+        "settings.manage",
+        "tenants.view_all",
+        "moderators.manage",
+    }
+    assert all(re.fullmatch(PERMISSION_SLUG_PATTERN, s) for s in slugs)
+    assert all(name.strip() for _, name in SEED_PERMISSIONS)
+    assert TENANTS_VIEW_ALL in SEED_PERMISSION_SLUGS
+
+
+def test_seed_roles() -> None:
+    assert [slug for slug, _ in SEED_ROLES] == [ROLE_ADMIN, ROLE_SENIOR_MODERATOR, ROLE_MODERATOR]
+    assert all(re.fullmatch(ROLE_SLUG_PATTERN, slug) for slug, _ in SEED_ROLES)
+    assert set(SEED_ROLE_PERMISSIONS) == {slug for slug, _ in SEED_ROLES}
+    for slugs in SEED_ROLE_PERMISSIONS.values():
+        assert slugs <= SEED_PERMISSION_SLUGS
+    assert SEED_ROLE_PERMISSIONS[ROLE_ADMIN] == SEED_PERMISSION_SLUGS
+    senior = SEED_ROLE_PERMISSIONS[ROLE_SENIOR_MODERATOR]
+    assert TENANTS_VIEW_ALL in senior
+    assert senior.isdisjoint(
+        {
+            "roles.manage",
+            "settings.manage",
+            "accounting.view",
+            "accounting.manage",
+            "payouts.request",
+            "payouts.approve",
+        }
+    )
+    views = {s for s in SEED_PERMISSION_SLUGS if s.endswith(".view")} - {"accounting.view"}
+    assert views <= senior
+    assert len(senior) == 22
+    moderator = SEED_ROLE_PERMISSIONS[ROLE_MODERATOR]
+    assert TENANTS_VIEW_ALL not in moderator
+    assert moderator == senior - {TENANTS_VIEW_ALL}
+    assert len(moderator) == 21
+    assert len(SEED_ROLE_PERMISSIONS[ROLE_ADMIN]) == 28
