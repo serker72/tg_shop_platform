@@ -122,6 +122,9 @@ class RedisSettings(BaseSettings):
     password: SecretStr = SecretStr("")
     # ``REDIS_DB`` is the database *number*, unrelated to ``POSTGRES_DB``.
     db: int = 0
+    #: Connect and read/write timeout, seconds. Redis is only a cache: on a slow or dead
+    #: server the callers fall back to PostgreSQL, so the budget is deliberately tiny.
+    socket_timeout: float = Field(default=0.3, gt=0, le=5)
 
 
 class RabbitMQSettings(BaseSettings):

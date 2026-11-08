@@ -27,6 +27,7 @@ _ENV_KEYS = [
     "REDIS_PORT",
     "REDIS_PASSWORD",
     "REDIS_DB",
+    "REDIS_SOCKET_TIMEOUT",
     "RABBITMQ_HOST",
     "RABBITMQ_PORT",
     "RABBITMQ_USER",
@@ -426,6 +427,19 @@ def test_rabbitmq_url_encodes_root_vhost(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("RABBITMQ_VHOST", "/")
 
     assert make_settings().rabbitmq_url == "amqp://shop:change_me@rabbitmq:5672/%2F"
+
+
+def test_redis_socket_timeout_default_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert make_settings().redis.socket_timeout == 0.3
+    monkeypatch.setenv("REDIS_SOCKET_TIMEOUT", "1.5")
+    assert make_settings().redis.socket_timeout == 1.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_redis_socket_timeout_must_be_positive(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("REDIS_SOCKET_TIMEOUT", value)
+    with pytest.raises(ValidationError):
+        make_settings()
 
 
 def test_redis_url_without_password(monkeypatch: pytest.MonkeyPatch) -> None:

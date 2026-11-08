@@ -10,15 +10,23 @@ from collections.abc import AsyncIterable, Iterable
 from typing import NewType, Protocol, assert_never, runtime_checkable
 
 from dishka import Provider, Scope, provide
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.shared_kernel.domain.storage import StorageService
 from app.shared_kernel.infrastructure.database import build_engine, build_session_factory
+from app.shared_kernel.infrastructure.redis import build_redis
 from app.shared_kernel.infrastructure.storage.minio import MinIOStorage, build_minio_client
 from app.shared_kernel.infrastructure.storage.s3 import S3Storage, build_s3_client
 
-__all__ = ["AuditArchiveStorage", "DatabaseProvider", "StorageClient", "StorageProvider"]
+__all__ = [
+    "AuditArchiveStorage",
+    "DatabaseProvider",
+    "RedisProvider",
+    "StorageClient",
+    "StorageProvider",
+]
 
 # Explicit DI key of the raw ``boto3`` S3 client. ``botocore`` ships no type stubs, so the
 # client has no importable type; a ``NewType`` gives dishka a dedicated key instead of ``Any``.
@@ -91,6 +99,25 @@ class StorageProvider(Provider):
                 return S3Storage(client=client, settings=settings, bucket=bucket)
             case _:
                 assert_never(backend)
+
+
+class RedisProvider(Provider):
+    """Application-wide ``redis.asyncio.Redis`` client (one connection pool per process).
+
+    The client connects lazily on the first command; its pool is closed with ``aclose()``
+    when the container is closed.
+    """
+
+    scope = Scope.APP
+
+    @provide
+    async def provide_redis(self, settings: Settings) -> AsyncIterable[Redis]:
+        """Create the client (see :func:`build_redis`); close it on shutdown."""
+        client = build_redis(settings)
+        try:
+            yield client
+        finally:
+            await client.aclose()
 
 
 class DatabaseProvider(Provider):

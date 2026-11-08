@@ -341,6 +341,57 @@ def run_alembic(url: str, action: Callable[[Config, str], None], revision: str) 
         pool.submit(action, config, revision).result()
 
 
+#: Keys owned by the permission cache - the only keys the fixture ever touches.
+REDIS_TEST_KEY_PATTERN = "user:*"
+#: Redis database reserved for tests; ``ops/scripts/env_test.sh`` writes ``REDIS_DB`` = 15.
+REDIS_TEST_DB = 15
+
+
+async def _drop_permission_keys(client: Any) -> None:
+    from app.modules.iam.cache import GLOBAL_GENERATION_KEY
+
+    keys = [key async for key in client.scan_iter(match=REDIS_TEST_KEY_PATTERN, count=500)]
+    keys.append(GLOBAL_GENERATION_KEY.encode())
+    if keys:
+        await client.unlink(*keys)
+
+
+@pytest.fixture
+async def redis_client(settings: Settings) -> AsyncIterator[Any]:
+    """``redis.asyncio.Redis`` of the test stack (:func:`build_redis`).
+
+    Guards before any connection: ``PROJECT_ENVIRONMENT=test`` + ``*_test`` database (same
+    rule as PostgreSQL) and ``REDIS_DB`` equal to the test database number
+    (:data:`REDIS_TEST_DB`, written by ``ops/scripts/env_test.sh``) - the dev cache is never
+    touched. Only the permission keys (``user:*``, ``perms:gen``) are removed, before and
+    after the test; no ``FLUSHDB`` / ``FLUSHALL``.
+    """
+    from redis.exceptions import RedisError
+
+    from app.shared_kernel.infrastructure.redis import build_redis
+
+    assert_test_database(settings)
+    if settings.redis.db != REDIS_TEST_DB:
+        infra_unavailable(
+            f"REDIS_DB={settings.redis.db} is not the test database {REDIS_TEST_DB}; "
+            "refusing to touch a shared Redis database"
+        )
+    client = build_redis(settings)
+    where = f"{settings.redis.host}:{settings.redis.port}/{settings.redis.db}"
+    try:
+        try:
+            await client.ping()
+        except (RedisError, OSError) as error:
+            infra_unavailable(f"Redis is not reachable at {where} ({type(error).__name__})")
+        await _drop_permission_keys(client)
+        try:
+            yield client
+        finally:
+            await _drop_permission_keys(client)
+    finally:
+        await client.aclose()
+
+
 @pytest.fixture
 def scratch_db(settings: Settings, migrated_db: MigrationRun) -> Iterator[tuple[str, Query]]:
     """Temporary ``<POSTGRES_DB>_mig_<hex8>_test`` database, dropped with FORCE afterwards."""

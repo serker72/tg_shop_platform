@@ -8,6 +8,7 @@
 #   POSTGRES_DB must be set and must not end with "_test" either;
 #   PROJECT_ENVIRONMENT=test; PROJECT_NAME/PROJECT_DATA_DIR/POSTGRES_DB get a "_test" suffix
 #   (integration fixtures refuse any database whose name does not end with "_test");
+#   REDIS_DB is forced to 15 so the test cache never shares keys with the dev cache;
 #   *_DATA_DIR are written as literal paths under the test PROJECT_DATA_DIR (order-independent);
 #   *_PORT_HOST are shifted by PORT_OFFSET (default 20000), result must be within 1..65535;
 #   MASTER_BOT_TOKEN -> mock; ENCRYPTION_KEYS_OLD -> empty;
@@ -98,6 +99,7 @@ k == "PROJECT_ENVIRONMENT"  { print k "=test"; next }
 k == "PROJECT_NAME"         { print k "=\"" strip(v) "_test\""; next }
 k == "PROJECT_DATA_DIR"     { print k "=\"" tdir "\""; next }
 k == "POSTGRES_DB"          { print k "=\"" pgdb "_test\""; next }
+k == "REDIS_DB"             { print k "=15"; next }  # isolated test cache, never the dev one
 k in dd                     { print k "=\"" tdir "/" dd[k] "\""; next }
 k in pd                     { print k "=" port(k, v); next }
 k == "MASTER_BOT_TOKEN"     { print k "=123456789:TEST-mock-master-bot-token"; next }
