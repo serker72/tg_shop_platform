@@ -56,6 +56,7 @@ __all__ = [
     "MigrationRun",
     "Query",
     "infra_unavailable",
+    "reseed_languages_sql",
     "run_alembic",
 ]
 
@@ -229,7 +230,8 @@ async def clean_db(
 
     ``TRUNCATE ... RESTART IDENTITY CASCADE`` covers every ``public`` table of
     ``Base.metadata`` except :data:`CLEAN_DB_PRESERVED_TABLES`; the ``system_settings``
-    singleton is reset to its defaults instead (:func:`reset_system_settings_sql`). On a
+    singleton is reset to its defaults instead (:func:`reset_system_settings_sql`) and the
+    ``languages`` reference rows are re-seeded (:func:`reseed_languages_sql`). On a
     partitioned parent PostgreSQL
     truncates all its partitions as well, so pg_partman children need no separate handling.
     Tables created by the test itself are the test's responsibility. No model tables ->
@@ -251,6 +253,28 @@ async def clean_db(
         await connection.execute(text("SET LOCAL lock_timeout = '5s'"))
         await connection.execute(text(f"TRUNCATE TABLE {names} RESTART IDENTITY CASCADE"))
         await connection.execute(text(reset_system_settings_sql()))
+        await connection.execute(text(reseed_languages_sql()))
+
+
+def reseed_languages_sql() -> str:
+    """``INSERT`` restoring the ``languages`` reference rows seeded by the migration.
+
+    ``languages`` is truncated by ``clean_db`` like any model table (so rows added or
+    changed by a test never leak) and re-seeded from :data:`SEED_LANGUAGES` right after.
+    """
+    from app.modules.iam.models import SEED_LANGUAGES
+
+    def literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    rows = ", ".join(
+        f"(gen_random_uuid(), {literal(code)}, {literal(name)}, {str(default).lower()})"
+        for code, name, default in SEED_LANGUAGES
+    )
+    return (
+        "INSERT INTO languages (id, code, name, is_default) "  # noqa: S608
+        f"VALUES {rows} ON CONFLICT (code) DO NOTHING"
+    )
 
 
 def reset_system_settings_sql() -> str:
