@@ -8,13 +8,11 @@ environment (the password never appears in argv). SQL is composed from ints only
 
 from __future__ import annotations
 
-import os
 import socket
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -26,6 +24,8 @@ from sqlalchemy import make_url
 from app.core.config import Settings
 from app.modules.logging import retention
 from app.modules.logging.retention import PartmanRetentionGuardError, sync_retention
+from tests.integration._cli import cli_env as _env
+from tests.integration._cli import run_cli as _run
 from tests.integration.conftest import ALEMBIC_INI, ROOT, Query
 
 pytestmark = pytest.mark.integration
@@ -36,32 +36,6 @@ RETENTION_SQL = (
     "SELECT parent_table, retention FROM partman.part_config "
     "WHERE parent_table IN ('public.user_activity', 'public.audit_logs') ORDER BY parent_table"
 )
-
-
-def _env(settings: Settings, url: str) -> dict[str, str]:
-    pg = settings.postgres
-    assert pg.password is not None
-    venv_bin = str(Path(sys.executable).parent)
-    env = dict(os.environ)
-    env.update(
-        {
-            "PROJECT_ENVIRONMENT": "test",
-            "POSTGRES_HOST": pg.host,
-            "POSTGRES_PORT": str(pg.port),
-            "POSTGRES_USER": pg.user,
-            "POSTGRES_PASSWORD": pg.password.get_secret_value(),
-            "POSTGRES_DB": str(make_url(url).database),
-            "MIGRATE_WAIT_SECONDS": "10",
-            "PATH": f"{venv_bin}{os.pathsep}{env.get('PATH', '')}",
-        }
-    )
-    return env
-
-
-def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=180, check=False
-    )
 
 
 def _sync(settings: Settings, url: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -201,10 +175,17 @@ def test_migrate_sh_on_empty_database(settings: Settings, scratch_db: tuple[str,
         result = _run(["/bin/sh", str(MIGRATE_SCRIPT)], env)
         assert result.returncode == 0, result.stderr + result.stdout
         assert "[migrate] alembic upgrade head" in result.stderr
+        assert "[migrate] platform setup" in result.stderr
+        assert "platform_setup_done" in result.stdout
         assert "[migrate] done" in result.stderr
     head = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
     assert head is not None
     assert query("SELECT version_num FROM alembic_version") == [(head,)]
+    # Setup re-creates a lost singleton row before the retention sync reads it.
+    query("DELETE FROM system_settings")
+    result = _run(["/bin/sh", str(MIGRATE_SCRIPT)], env)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert query("SELECT id FROM system_settings") == [(1,)]
     _set_settings(query, 7, 36)
     result = _run(["/bin/sh", str(MIGRATE_SCRIPT)], env)
     assert result.returncode == 0, result.stderr + result.stdout

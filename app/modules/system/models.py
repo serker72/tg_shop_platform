@@ -41,8 +41,9 @@ class SystemSettings(TimestampMixin, Base):
     """Singleton row: the CHECK ``id = 1`` makes a second row impossible.
 
     Built on ``TimestampMixin`` instead of :class:`BaseEntity`, because ``BaseEntity``
-    brings a UUID key while this table has the fixed integer key ``1``. The row is inserted
-    by the migration.
+    brings a UUID key while this table has the fixed integer key ``1``. The row is created
+    by the migration and guaranteed by ``python -m app.entrypoints.cli.setup`` on every
+    ``db_update`` run (``INSERT ... ON CONFLICT DO NOTHING``: stored values are kept).
     ``*_retention_months`` are the source of truth for ``partman.part_config.retention``
     (applied by ``ops/scripts/sync_partman_retention.py``).
     """

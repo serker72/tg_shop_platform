@@ -1,5 +1,6 @@
 #!/bin/sh
-# db_update: wait for PostgreSQL -> alembic upgrade head -> sync pg_partman retention.
+# db_update: wait for PostgreSQL -> alembic upgrade head -> platform setup
+# (system_settings singleton, never overwritten) -> sync pg_partman retention.
 # POSIX sh only (docker-compose: command ["sh", "ops/scripts/migrate.sh"]).
 # Any failing step stops the script with a non-zero exit code.
 set -eu
@@ -15,6 +16,10 @@ python ops/scripts/wait_for_db.py
 
 log "alembic upgrade head"
 alembic upgrade head
+
+# cwd is the project root (cd above), so "python -m app..." resolves the package.
+log "platform setup"
+python -m app.entrypoints.cli.setup
 
 log "sync partman retention"
 python ops/scripts/sync_partman_retention.py
