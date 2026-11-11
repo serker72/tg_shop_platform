@@ -1,6 +1,6 @@
 [project]
 name = "tg-shop-platform"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-tenant SaaS platform for Telegram shop bots (master bot + bot worker)"
 readme = "README.md"
 authors = [

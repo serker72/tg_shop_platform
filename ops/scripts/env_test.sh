@@ -14,7 +14,7 @@
 #   MASTER_BOT_TOKEN -> mock; ENCRYPTION_KEYS_OLD -> empty;
 #   ENCRYPTION_KEY is kept from an existing target file if valid, otherwise a new one is generated;
 #   GLITCHTIP_ADMIN_PASSWORD / GLITCHTIP_PROJECT_PUBLIC_KEY of the test obs stack are own values
-#   (kept from an existing target file, otherwise generated); SENTRY_DSN -> empty.
+#   (kept from an existing target file, otherwise generated); SENTRY_DSN, SENTRY_RELEASE -> empty.
 # Lines are normalized: CR, leading whitespace and "export " are stripped.
 set -euo pipefail
 
@@ -131,6 +131,7 @@ k == "APP_ENV_FILE"         { print k "=" tenv; next }
 k == "GLITCHTIP_ADMIN_PASSWORD"     { print k "=" gtpw; next }  # own test obs stack values
 k == "GLITCHTIP_PROJECT_PUBLIC_KEY" { print k "=" gtpk; next }
 k == "SENTRY_DSN"           { print k "="; next }  # test app never reports to GlitchTip
+k == "SENTRY_RELEASE"       { print k "="; next }  # computed from the app version
 { print line }
 END {
     if (err) exit 2
@@ -142,6 +143,7 @@ END {
     if (!("GLITCHTIP_ADMIN_PASSWORD" in seen)) print "GLITCHTIP_ADMIN_PASSWORD=" gtpw
     if (!("GLITCHTIP_PROJECT_PUBLIC_KEY" in seen)) print "GLITCHTIP_PROJECT_PUBLIC_KEY=" gtpk
     if (!("SENTRY_DSN" in seen)) print "SENTRY_DSN="
+    if (!("SENTRY_RELEASE" in seen)) print "SENTRY_RELEASE="
     if (!("APP_ENV_FILE" in seen)) { print "# Env file passed to app containers (docker-compose env_file)"; print "APP_ENV_FILE=" tenv }
 }
 ' "$src" "$src" >"$tmp"

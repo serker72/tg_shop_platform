@@ -37,7 +37,7 @@ async def run_service(name: str) -> None:
     from app.core.logging import configure_logging
     from app.core.observability.health import HealthChecker
     from app.core.observability.http_server import create_app, serve_observability
-    from app.core.observability.metrics import AppMetrics
+    from app.core.observability.metrics import AppMetrics, set_build_info
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
     from app.modules.logging.ioc import LoggingProvider
@@ -60,9 +60,16 @@ async def run_service(name: str) -> None:
     try:
         checker = await container.get(HealthChecker)
         metrics = await container.get(AppMetrics)
+        set_build_info(metrics, component=name)
         obs = settings.observability
         async with serve_observability(
-            create_app(checker, metrics.registry, ready_cache_ttl=obs.ready_cache_ttl_seconds),
+            create_app(
+                checker,
+                metrics.registry,
+                ready_cache_ttl=obs.ready_cache_ttl_seconds,
+                component=name,
+                environment=obs.sentry_environment or settings.project_environment,
+            ),
             host=obs.http_host,
             port=obs.http_port,
         ):

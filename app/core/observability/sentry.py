@@ -16,8 +16,9 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.types import Event, Hint
 
 from app.core.config import Settings
+from app.core.version import PROJECT_SLUG, get_version
 
-__all__ = ["FILTERED", "before_send", "init_sentry", "is_secret_key", "scrub"]
+__all__ = ["FILTERED", "before_send", "init_sentry", "is_secret_key", "resolve_release", "scrub"]
 
 FILTERED = "[Filtered]"
 
@@ -90,6 +91,11 @@ def before_send(event: Event, hint: Hint) -> Event | None:
     return cast(Event, scrub(event))
 
 
+def resolve_release(settings: Settings) -> str:
+    """``SENTRY_RELEASE`` if set, otherwise ``tg-shop-platform@<version>``."""
+    return settings.observability.sentry_release or f"{PROJECT_SLUG}@{get_version()}"
+
+
 def init_sentry(settings: Settings, *, component: str) -> bool:
     """Initialise the SDK; an empty ``SENTRY_DSN`` is a no-op. Return whether enabled."""
     obs = settings.observability
@@ -97,6 +103,7 @@ def init_sentry(settings: Settings, *, component: str) -> bool:
         return False
     sentry_sdk.init(
         dsn=obs.sentry_dsn.get_secret_value(),
+        release=resolve_release(settings),
         environment=obs.sentry_environment or settings.project_environment,
         traces_sample_rate=obs.sentry_traces_sample_rate,
         send_default_pii=False,

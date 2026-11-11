@@ -24,7 +24,14 @@ if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ]; then files="$$files -f $(ALLOY_SINGLE_H
 $(COMPOSE) $$files --env-file $(ENV_FILE) --profile observability
 endef
 
-.PHONY: help install init-dirs env-test up down migrate lint format format-check check test \
+# Exports APP_VERSION/APP_COMMIT/APP_BUILD_TIME (image build args) into the recipe shell.
+# A missing milestone tag fails the recipe with a hint (see docs/ops/versioning.md).
+define version_env
+vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
+export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
+endef
+
+.PHONY: help install init-dirs env-test version up down migrate lint format format-check check test \
 	test-integration test-integration-down clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset \
 	agent-config agent-up agent-down agent-logs
@@ -102,13 +109,18 @@ init-dirs: ## Create bind-mount data directories from ENV_FILE
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
 	@bash ops/scripts/env_test.sh "$(ENV_FILE)" "$(TEST_ENV_FILE)"
 
-up: ## Build and start the stack in background
+version: ## Print the application version (0.1.<milestone>.<commit>[+dirty])
+	@sh ops/scripts/version.sh
+
+up: ## Build and start the stack in background (image gets the current version)
+	@$(version_env); \
 	$(COMPOSE) --env-file $(ENV_FILE) up -d --build
 
 down: ## Stop the stack
 	$(COMPOSE) --env-file $(ENV_FILE) down
 
 migrate: init-dirs ## Apply DB migrations (db_update service); creates bind-mount dirs first
+	@$(version_env); \
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update
 
 lint: ## Run ruff and mypy
@@ -127,6 +139,7 @@ test: ## Run unit tests
 
 test-integration: env-test ## Start test infra (TEST_SERVICES) and run integration tests; stack stays up
 	@$(MAKE) --no-print-directory init-dirs ENV_FILE=$(TEST_ENV_FILE)
+	@$(version_env); \
 	$(COMPOSE) --env-file $(TEST_ENV_FILE) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT) $(TEST_SERVICES)
 	@$(call load_env,$(TEST_ENV_FILE)); \
 	export POSTGRES_HOST=127.0.0.1 POSTGRES_PORT="$${POSTGRES_PORT_HOST:-5432}" \
@@ -191,7 +204,8 @@ agent-config: ## Validate main compose with the observability profile (Alloy)
 	@$(agent_compose) config --quiet && echo "docker-compose.yml + profile observability OK ($(ENV_FILE))"
 
 agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
-	@$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
+	@$(version_env); \
+	$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 
 agent-down: ## Stop only Alloy + docker-socket-proxy (the main stack keeps running)
 	@$(agent_compose) rm -s -f alloy docker-socket-proxy

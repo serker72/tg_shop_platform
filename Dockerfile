@@ -34,6 +34,16 @@ RUN groupadd --system --non-unique --gid "${APP_GID}" app \
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Build version (ops/scripts/version.sh --env via Makefile/compose build.args); read by
+# app/core/version.py. Declared last: changing them does not invalidate the layers above.
+# Empty values -> the app reports "<pyproject base>+unknown".
+ARG APP_VERSION=""
+ARG APP_COMMIT=""
+ARG APP_BUILD_TIME=""
+ENV APP_VERSION="${APP_VERSION}" \
+    APP_COMMIT="${APP_COMMIT}" \
+    APP_BUILD_TIME="${APP_BUILD_TIME}"
+
 USER app
 
 CMD ["python", "-m", "app.entrypoints.master_bot"]

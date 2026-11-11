@@ -11,11 +11,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Info, generate_latest
 from prometheus_client.core import CounterMetricFamily
 from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
+from app.core.version import VersionInfo, get_version_info
 from app.modules.logging.metrics import DROP_REASONS, LogsDroppedCounter, logs_dropped_total
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "LogsDroppedCollector",
     "build_metrics",
     "render_metrics",
+    "set_build_info",
 ]
 
 #: Content type of the text exposition format produced by :func:`generate_latest`.
@@ -74,17 +76,32 @@ class AppMetrics:
     update_duration_seconds: Histogram
     active_bots: Gauge
     logs_dropped: LogsDroppedCounter
+    #: ``app_build_info{version, commit, component} 1`` (one series per process).
+    build_info: Info
 
 
-def build_metrics(dropped: LogsDroppedCounter | None = None) -> AppMetrics:
+def set_build_info(
+    metrics: AppMetrics, *, component: str, version_info: VersionInfo | None = None
+) -> None:
+    """(Re)set ``app_build_info`` labels; low cardinality: one series per running build."""
+    info = version_info if version_info is not None else get_version_info()
+    metrics.build_info.info(
+        {"version": info.version, "commit": info.commit or "", "component": component}
+    )
+
+
+def build_metrics(
+    dropped: LogsDroppedCounter | None = None, *, component: str = "unknown"
+) -> AppMetrics:
     """Create a fresh registry with all application metrics.
 
-    ``dropped`` defaults to the process-wide :data:`logs_dropped_total` counter.
+    ``dropped`` defaults to the process-wide :data:`logs_dropped_total` counter;
+    ``component`` labels ``app_build_info`` (``run_service`` sets the service name).
     """
     counter = dropped if dropped is not None else logs_dropped_total
     registry = CollectorRegistry(auto_describe=False)
     registry.register(LogsDroppedCollector(counter))
-    return AppMetrics(
+    metrics = AppMetrics(
         registry=registry,
         logs_dropped=counter,
         app_errors_total=Counter(
@@ -103,7 +120,12 @@ def build_metrics(dropped: LogsDroppedCounter | None = None) -> AppMetrics:
             "Tenant bots currently running in this process.",
             registry=registry,
         ),
+        build_info=Info(
+            "app_build", "Version of the running application build.", registry=registry
+        ),
     )
+    set_build_info(metrics, component=component)
+    return metrics
 
 
 def render_metrics(registry: CollectorRegistry) -> bytes:

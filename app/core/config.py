@@ -307,7 +307,8 @@ class ObservabilitySettings(BaseSettings):
     timeout ``OBSERVABILITY_HEALTH_TIMEOUT_SECONDS``, heartbeat TTL
     ``OBSERVABILITY_HEARTBEAT_TTL_SECONDS``. Sentry uses the conventional names
     ``SENTRY_DSN`` (empty = disabled), ``SENTRY_ENVIRONMENT`` (empty = ``PROJECT_ENVIRONMENT``)
-    and ``SENTRY_TRACES_SAMPLE_RATE``. The prefix never clashes with ``OBS_*_DATA_DIR``
+    , ``SENTRY_TRACES_SAMPLE_RATE`` and ``SENTRY_RELEASE`` (empty = ``tg-shop-platform@<version>``,
+    see :mod:`app.core.version`). The prefix never clashes with ``OBS_*_DATA_DIR``
     (host directories of the observability stack, not read by the application).
     """
 
@@ -333,8 +334,12 @@ class ObservabilitySettings(BaseSettings):
         le=1,
         validation_alias=AliasChoices("SENTRY_TRACES_SAMPLE_RATE", "sentry_traces_sample_rate"),
     )
+    sentry_release: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SENTRY_RELEASE", "sentry_release"),
+    )
 
-    @field_validator("sentry_dsn", "sentry_environment", mode="before")
+    @field_validator("sentry_dsn", "sentry_environment", "sentry_release", mode="before")
     @classmethod
     def _empty_sentry_to_none(cls, value: object) -> object:
         return _normalise_empty_secret(value)
