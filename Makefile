@@ -43,13 +43,28 @@ install: ## Install dependencies (uv sync) and pre-commit hooks
 	uv sync
 	uv run pre-commit install
 
+# Service dirs (db, redis, ...) are re-owned by their containers; the logs dir is written by
+# app containers running as APP_UID, so it must be writable by us or owned by APP_UID.
+# A permission problem ends with a chown hint instead of a raw `mkdir: Permission denied`.
 init-dirs: ## Create bind-mount data directories from ENV_FILE
 	@$(call load_env,$(ENV_FILE)); \
+	deny() { \
+		echo "ERROR: $$1 is not writable for uid=$$(id -u) gid=$$(id -g)." >&2; \
+		echo "       Host data dirs must belong to APP_UID:APP_GID. Fix once on the host:" >&2; \
+		echo "       sudo chown -R $${APP_UID:-$$(id -u)}:$${APP_GID:-$$(id -g)} $$1 && make init-dirs" >&2; \
+		exit 1; \
+	}; \
 	for var in POSTGRES_DATA_DIR REDIS_DATA_DIR RABBITMQ_DATA_DIR MINIO_DATA_DIR LOGS_DATA_DIR; do \
 		[ -n "$${!var:-}" ] || { echo "ERROR: $$var is empty in $(ENV_FILE)"; exit 1; }; \
-		mkdir -p "$${!var}" && echo "OK $$var=$${!var}"; \
+		mkdir -p "$${!var}" 2>/dev/null || deny "$${!var}"; \
+		echo "OK $$var=$${!var}"; \
 	done; \
-	mkdir -p "$$LOGS_DATA_DIR"/{users,bots,system}
+	if [ ! -w "$$LOGS_DATA_DIR" ] && [ "$$(stat -c %u "$$LOGS_DATA_DIR")" != "$${APP_UID:-}" ]; then \
+		deny "$$LOGS_DATA_DIR"; \
+	fi; \
+	for sub in users bots system system/tmp; do \
+		mkdir -p "$$LOGS_DATA_DIR/$$sub" 2>/dev/null || deny "$$LOGS_DATA_DIR"; \
+	done
 
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
 	@bash ops/scripts/env_test.sh "$(ENV_FILE)" "$(TEST_ENV_FILE)"
@@ -60,7 +75,7 @@ up: ## Build and start the stack in background
 down: ## Stop the stack
 	$(COMPOSE) --env-file $(ENV_FILE) down
 
-migrate: ## Apply DB migrations (db_update service)
+migrate: init-dirs ## Apply DB migrations (db_update service); creates bind-mount dirs first
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update
 
 lint: ## Run ruff and mypy
@@ -102,8 +117,15 @@ clean: ## Stop test stack, remove test data dir and caches
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
 
+# --tmp-dir must be a path *inside* the container: the script runs in ``db_update``, where
+# ``LOGS_DATA_DIR`` (host path) is mounted at ``${LOGS_DIR}`` (``/app/logs``). Temporary
+# archives live in ``system/tmp`` (not next to users/bots/system). ``abspath``
+# here would produce a host path the container cannot see (RC-4).
 archive-audit: ## Archive old audit partitions to MinIO inside app container (DRY_RUN=1 for dry run)
 	@test -f ops/scripts/archive_audit_partitions.py || { \
 		echo "ERROR: ops/scripts/archive_audit_partitions.py не найден — появится в задаче archive_audit_partitions"; exit 1; }
+	@$(call load_env,$(ENV_FILE)); \
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm --no-deps db_update \
-		python ops/scripts/archive_audit_partitions.py $(if $(filter 1,$(DRY_RUN)),--dry-run)
+		python ops/scripts/archive_audit_partitions.py \
+			--tmp-dir "$${LOGS_DIR:-/app/logs}/system/tmp" \
+			$(if $(filter 1,$(DRY_RUN)),--dry-run)

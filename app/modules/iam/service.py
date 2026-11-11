@@ -41,6 +41,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.iam.cache import InvalidationResult, PermissionCache
+from app.modules.iam.effective_permissions import EffectivePermissionsReport
 from app.modules.iam.models import PERMISSION_SLUG_PATTERN
 from app.modules.iam.repository import PermissionQueryRepository
 from app.modules.iam.snapshot import Decision, PermissionSnapshot
@@ -157,6 +158,16 @@ class PermissionService:
             )
             raise PermissionDeniedError(f"Permission denied: {slug}", code=PERMISSION_DENIED)
         return decision
+
+    async def effective_permissions(self, telegram_user_id: int) -> EffectivePermissionsReport:
+        """Why the user holds each permission: roles, overrides, expired overrides.
+
+        Always reads PostgreSQL (decision 2-a), never the cache: an administrative report
+        must show the committed state. Every ``allowed`` value is computed by
+        :meth:`PermissionSnapshot.decide` - the same rule :meth:`check` uses - so the report
+        and a real permission check cannot disagree.
+        """
+        return await self._queries.load_effective_permissions(telegram_user_id, now=self._clock())
 
     async def invalidate(self, telegram_user_id: int) -> InvalidationResult:
         """Drop the user's snapshot. Call AFTER ``session.commit()``.

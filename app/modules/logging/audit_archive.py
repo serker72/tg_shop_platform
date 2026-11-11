@@ -38,6 +38,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import traceback
 from collections.abc import Iterable, Mapping, Sequence
@@ -59,6 +60,7 @@ from app.shared_kernel.infrastructure.providers import AuditArchiveStorage, Stor
 __all__ = [
     "ARCHIVE_SCHEMA",
     "CANDIDATE_RE",
+    "EXIT_CONFIG",
     "EXIT_ERROR",
     "EXIT_INTEGRITY",
     "EXIT_OK",
@@ -97,6 +99,9 @@ __all__ = [
 EXIT_OK: Final = 0
 EXIT_ERROR: Final = 1
 EXIT_INTEGRITY: Final = 2
+#: Misconfiguration the operator must fix (e.g. ``--tmp-dir`` not writable). Shares the
+#: value with :data:`EXIT_INTEGRITY`: both mean "do not retry, a human has to act".
+EXIT_CONFIG: Final = 2
 
 ARCHIVE_SCHEMA: Final = "archive"
 PARENT_TABLE: Final = "public.audit_logs"
@@ -693,6 +698,34 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def check_tmp_dir(path: str) -> str | None:
+    """Make sure ``path`` exists and the current uid/gid can create files in it.
+
+    No fallback to the system tmp (decision A): spool files of the archive must stay on the
+    logs volume, and a bind mount owned by another uid is an operator error that has to be
+    fixed on the host, not hidden.
+
+    Returns:
+        ``None`` when the directory is usable, otherwise a message for the operator with the
+        uid/gid of this process and the ``chown`` hint.
+    """
+    try:
+        os.makedirs(path, exist_ok=True)
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise PermissionError(f"no write/search permission on {path}")
+        # ``os.access`` ignores ACLs and read-only mounts; a real file settles it.
+        with tempfile.TemporaryFile(dir=path):
+            pass
+    except OSError as error:
+        uid, gid = os.getuid(), os.getgid()
+        return (
+            f"--tmp-dir {path} is not writable for uid={uid} gid={gid} ({error}). "
+            f"Fix ownership on the host: chown -R {uid}:{gid} <LOGS_DATA_DIR> "
+            "(APP_UID:APP_GID from .env), then run `make init-dirs`."
+        )
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI: ``python ops/scripts/archive_audit_partitions.py [--dry-run] [--limit N]``."""
     parser = argparse.ArgumentParser(
@@ -706,10 +739,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
+    tmp_dir: str | None = args.tmp_dir
+    if tmp_dir:
+        problem = check_tmp_dir(tmp_dir)
+        if problem is not None:
+            logger.error(
+                "audit_archive_tmp_dir_not_writable",
+                tmp_dir=tmp_dir,
+                detail=problem,
+                exit_code=EXIT_CONFIG,
+            )
+            print(problem, file=sys.stderr)
+            return EXIT_CONFIG
     try:
         settings = get_settings()
     except Exception as error:
         return _log_failure(error)
     return asyncio.run(
-        run_archive(settings, dry_run=args.dry_run, limit=args.limit, tmp_dir=args.tmp_dir)
+        run_archive(settings, dry_run=args.dry_run, limit=args.limit, tmp_dir=tmp_dir)
     )

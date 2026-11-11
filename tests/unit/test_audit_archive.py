@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, BinaryIO
@@ -309,3 +310,42 @@ def test_exit_codes() -> None:
 def test_cli_rejects_bad_limit() -> None:
     with pytest.raises(SystemExit):
         aa.main(["--limit", "0"])
+
+
+# --- --tmp-dir must be writable: no silent fallback (decision A) ------------------------
+
+
+def test_tmp_dir_that_cannot_be_created_exits_with_config_error(
+    tmp_path: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")  # a file where a directory is expected: mkdir fails
+    code = aa.main(["--dry-run", "--tmp-dir", str(blocker / "tmp")])
+    assert code == aa.EXIT_CONFIG == 2
+    err = capsys.readouterr().err
+    assert "not writable" in err
+    assert "chown -R" in err
+    assert f"uid={os.getuid()}" in err
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory permissions")
+def test_existing_read_only_tmp_dir_exits_with_config_error(
+    tmp_path: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    locked = tmp_path / "root_owned_like"
+    locked.mkdir()
+    locked.chmod(0o555)  # exists, but no write permission - like root:root 755 for uid 1000
+    try:
+        code = aa.main(["--dry-run", "--tmp-dir", str(locked)])
+    finally:
+        locked.chmod(0o755)
+    assert code == 2
+    err = capsys.readouterr().err
+    assert str(locked) in err
+    assert "chown -R" in err and "make init-dirs" in err
+
+
+def test_check_tmp_dir_accepts_and_creates_a_writable_dir(tmp_path: Any) -> None:
+    target = tmp_path / "system" / "tmp"
+    assert aa.check_tmp_dir(str(target)) is None
+    assert target.is_dir()

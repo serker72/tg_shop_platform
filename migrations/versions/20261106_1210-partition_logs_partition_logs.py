@@ -4,6 +4,8 @@ Partitioned ``user_activity`` / ``audit_logs`` (pg_partman 5.5.0, monthly, prema
 DEFAULT partition) + guard trigger on ``partman.part_config`` for ``public.audit_logs``.
 
 Upgrade
+    * refuses to run on a non-empty ``archive`` schema - a leftover of an older downgrade
+      must be imported or dropped by the operator, never adopted silently;
     * schemas ``partman`` / ``archive`` and the extension;
     * if a *plain* ``public.<t>`` exists (left by :func:`downgrade`), it is renamed to
       ``<t>_legacy`` and its PK/indexes are dropped;
@@ -36,8 +38,10 @@ Downgrade (one migration transaction, no ``undo_partition_proc`` - it COMMITs)
       in ``part_config.template_table`` are read beforehand and dropped explicitly as well;
     * ``DROP`` parent -> ``RENAME`` ``<t>_undo`` -> PK + indexes (data preserved, the next
       upgrade converts the plain tables back);
-    * tables detached to ``archive`` by retention are no children of the parent any more and
-      are left untouched; ``archive`` is dropped only when empty (otherwise NOTICE);
+    * tables detached to ``archive`` by retention are no children of the parent any more;
+      the whole ``archive`` schema is dropped with ``CASCADE`` (decision R-9) - a detached
+      partition never outlives the parent that produced it, and ``upgrade`` on a non-empty
+      ``archive`` refuses to run, so nothing can be silently adopted later;
     * ``DROP EXTENSION pg_partman`` then ``DROP SCHEMA partman`` WITHOUT ``CASCADE``: a
       foreign object in ``partman`` makes the downgrade fail loudly instead of being lost.
 
@@ -249,6 +253,35 @@ def _partition(table: str) -> None:
 def upgrade() -> None:
     """Create partitioned log tables, pg_partman config and the guard trigger."""
     op.execute("CREATE SCHEMA IF NOT EXISTS partman")
+    # An ``archive`` left behind by an older downgrade keeps detached partitions of a
+    # dropped parent (until revision ``partition_logs`` learned to drop it). Upgrading on
+    # top of it would silently adopt them as children-less leftovers of the new parent,
+    # so refuse loudly: the operator decides whether to import or to discard the rows.
+    op.execute(
+        """
+        DO $$
+        DECLARE
+            v_left integer;
+            v_names text;
+        BEGIN
+            IF to_regnamespace('archive') IS NULL THEN
+                RETURN;
+            END IF;
+            SELECT count(*), string_agg(relname, ', ' ORDER BY relname)
+              INTO v_left, v_names
+              FROM pg_class
+             WHERE relnamespace = 'archive'::regnamespace
+               AND relkind IN ('r', 'p');
+            IF v_left > 0 THEN
+                RAISE EXCEPTION USING MESSAGE =
+                    'schema archive is not empty (' || v_left || ' table(s): '
+                    || coalesce(v_names, '?')
+                    || '): import or drop them before the upgrade '
+                       '(e.g. DROP SCHEMA archive CASCADE)';
+            END IF;
+        END $$;
+        """
+    )
     op.execute("CREATE SCHEMA IF NOT EXISTS archive")
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_partman SCHEMA partman")
     for table in INDEXES:
@@ -287,18 +320,42 @@ def upgrade() -> None:
     )
 
 
+def _template_guard_sql(table: str) -> str:
+    """Invariant check of ``_unpartition``: the partman template of ``table`` is gone.
+
+    ``downgrade()`` drops every ``partman.template_*`` table *before* undoing partitions.
+    The check runs **before** the ``undo_partition`` loop - while the ``part_config`` row
+    still names the template - and compares exactly (``template_table`` + ``to_regclass``),
+    so a template of another parent never trips it. Without a ``part_config`` row for
+    ``table`` there is nothing to check and the guard passes.
+    """
+    return f"""
+        DO $$
+        BEGIN
+            IF to_regclass('partman.part_config') IS NOT NULL AND EXISTS (
+                SELECT 1
+                  FROM partman.part_config pc
+                  JOIN pg_class c ON c.oid = to_regclass(pc.template_table)
+                 WHERE pc.parent_table = 'public.{table}'
+                   AND c.relkind = 'r'
+            ) THEN
+                RAISE EXCEPTION USING MESSAGE =
+                    'undo_partition(public.{table}): partman template still exists, '
+                    'drop templates before undoing the partition';
+            END IF;
+        END $$;
+    """
+
+
 def _unpartition(table: str) -> None:
+    op.execute(_template_guard_sql(table))
     op.execute(
         f"CREATE TABLE public.{table}_undo (LIKE public.{table} INCLUDING ALL EXCLUDING INDEXES)"
     )
     op.execute(
-        f"""
+        rf"""
         DO $$
         DECLARE
-            v_template text := (
-                SELECT template_table FROM partman.part_config
-                 WHERE parent_table = 'public.{table}'
-            );
             iteration integer := 0;
             max_iterations integer := (
                 SELECT count(*) FROM pg_inherits WHERE inhparent = 'public.{table}'::regclass
@@ -325,9 +382,6 @@ def _unpartition(table: str) -> None:
                 RAISE EXCEPTION USING MESSAGE =
                     'undo_partition(public.{table}): child partitions remain';
             END IF;
-            IF v_template IS NOT NULL AND to_regclass(v_template) IS NOT NULL THEN
-                EXECUTE format('DROP TABLE %s', to_regclass(v_template));
-            END IF;
         END $$;
         """
     )
@@ -339,28 +393,62 @@ def _unpartition(table: str) -> None:
 
 
 def downgrade() -> None:
-    """Remove partitioning, keep the rows in plain tables with the same PK/index names."""
+    """Remove partitioning, keep the rows in plain tables with the same PK/index names.
+
+    The ``archive`` schema of :class:`Retention`-moved partitions is dropped with its rows
+    (decision R-9). The drop is announced by a ``NOTICE`` naming the number of archived
+    partitions it destroys (decision RC-6) - it is irreversible, and the guard in
+    ``upgrade()`` makes a silent re-adoption of stale partitions impossible.
+    """
     op.execute("DROP TRIGGER IF EXISTS guard_audit_part_config ON partman.part_config")
     op.execute("DROP FUNCTION IF EXISTS public.tg_guard_audit_part_config()")
+    # Template tables also live in ``partman``; read their names before ``undo_partition``
+    # deletes the ``part_config`` rows that point at them.
+    op.execute(
+        """
+        DO $$
+        DECLARE
+            v_template text;
+        BEGIN
+            FOR v_template IN SELECT template_table FROM partman.part_config LOOP
+                IF v_template IS NOT NULL AND to_regclass(v_template) IS NOT NULL THEN
+                    EXECUTE format('DROP TABLE %s', to_regclass(v_template));
+                END IF;
+            END LOOP;
+        END $$;
+        """
+    )
     for table in INDEXES:
         _unpartition(table)
     op.execute("DROP EXTENSION IF EXISTS pg_partman")
     op.execute("DROP SCHEMA IF EXISTS partman")
+    # Decision R-9: a table in ``archive`` is a partition *detached from a parent this
+    # revision is about to drop*. Keeping it would orphan it (no parent, no
+    # ``partman.part_config`` row, nobody owning its lifetime), so the schema goes with its
+    # rows. The audit trail itself is intact: the plain ``public.audit_logs`` keeps every
+    # row retention had not moved yet, and ``upgrade`` now refuses a non-empty ``archive``
+    # instead of adopting stale partitions silently.
+    #
+    # RC-6: removal is irreversible, so it is announced. Before Alembic 1.16 a template
+    # variable was ``:%(name)s``, ``.py`` migrations never print ``op.execute`` results, so
+    # the notice is raised SQL-side with the real table count.
     op.execute(
         """
         DO $$
+        DECLARE
+            v_archived integer := 0;
         BEGIN
-            IF to_regnamespace('archive') IS NULL THEN
-                RETURN;
+            IF to_regnamespace('archive') IS NOT NULL THEN
+                SELECT count(*) INTO v_archived
+                  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = 'archive' AND c.relkind IN ('r', 'p');
             END IF;
-            IF EXISTS (
-                SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-                 WHERE n.nspname = 'archive'
-            ) THEN
-                RAISE NOTICE 'schema archive is not empty: kept (detached audit partitions)';
-            ELSE
-                DROP SCHEMA archive;
+            IF v_archived > 0 THEN
+                RAISE NOTICE
+                    'downgrade partition_logs: DROPPING SCHEMA archive CASCADE - '
+                    '% archived partition(s) will be deleted irreversibly', v_archived;
             END IF;
         END $$;
         """
     )
+    op.execute("DROP SCHEMA IF EXISTS archive CASCADE")

@@ -126,6 +126,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Same logs bind mount as the bots: one-off jobs (`make archive-audit`, retention)
+    # run on this service and must see /app/logs (log files, tmp dir, locks).
+    volumes:
+      - type: bind
+        source: ${LOGS_DATA_DIR:?LOGS_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
+        target: /app/logs
 
   master_bot:
     <<: *app

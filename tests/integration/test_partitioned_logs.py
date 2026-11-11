@@ -10,9 +10,13 @@ pg_partman cuts partitions in the database ``timezone``, not in Python's UTC.
 
 from __future__ import annotations
 
+import importlib.util
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
+import psycopg
 import pytest
 from alembic import command
 from sqlalchemy import select, text
@@ -348,11 +352,54 @@ def test_upgrade_downgrade_ring(scratch_db: tuple[str, Query]) -> None:
     # retention (3 months) dropped the 18-month-old click-log partition; audit kept it.
     assert _counts(query) == {"user_activity": 3, "audit_logs": 4}
 
+    # --- guard contract: `downgrade` leaves no orphan, `upgrade` refuses leftovers ------
     _alembic(url, command.downgrade, "base")
     assert query("SELECT to_regclass('public.system_settings')") == [(None,)]
+    assert query("SELECT to_regnamespace('archive')") == [(None,)]
+    # Reproduce the state an older downgrade could leave behind: non-empty ``archive``.
+    query("CREATE SCHEMA archive")
+    query(
+        "CREATE TABLE archive.audit_logs_p20200101 "
+        "(id uuid NOT NULL, created_at timestamptz NOT NULL, actor_type text, action text)"
+    )
+    with pytest.raises(DBAPIError, match="schema archive is not empty"):
+        _alembic(url, command.upgrade, "head")
+    # The guard is non-destructive: the operator decides what to do with the leftovers.
+    assert query("SELECT to_regclass('archive.audit_logs_p20200101')") != [(None,)]
+
+    # --- retention detaches partitions -> downgrade drops archive -> upgrade passes ----
+    query("DROP SCHEMA archive CASCADE")
     _alembic(url, command.upgrade, "head")
     assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
     assert _counts(query) == {"user_activity": 3, "audit_logs": 4}
+    # A row in a premade month partition, then retention with a short window: partman
+    # detaches the old audit partitions into ``archive`` (retention_keep_table).
+    query(
+        "INSERT INTO audit_logs (id, created_at, actor_type, action) VALUES "
+        "(gen_random_uuid(), date_trunc('month', now()) - interval '3 months', "
+        "'system', 'admin_action')"
+    )
+    query("SELECT partman.drop_partition_time('public.audit_logs', p_retention := '1 month')")
+    kept = _counts(query)
+    assert kept["audit_logs"] < 5, "retention detached nothing"
+    detached = [
+        str(row[0])
+        for row in query(
+            "SELECT relname FROM pg_class WHERE relnamespace = 'archive'::regnamespace "
+            "AND relkind = 'r' ORDER BY 1"
+        )
+    ]
+    assert detached, "retention moved nothing to archive"
+    _alembic(url, command.downgrade, "system_settings")
+    # Archive went with the parent: no orphan is left for the next upgrade to trip over.
+    assert query("SELECT to_regnamespace('archive')") == [(None,)]
+    for name in detached:
+        assert query(f"SELECT to_regclass('archive.{name}')") == [(None,)]
+    # Rows still attached to the parent survive the ring; only the archive is gone.
+    assert _counts(query) == kept
+    _alembic(url, command.upgrade, "head")
+    assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
+    assert _counts(query) == kept
 
 
 def test_maintenance_premakes_without_recent_rows(
@@ -383,7 +430,8 @@ def test_maintenance_premakes_without_recent_rows(
         assert {f"{table}_p{suffix}" for suffix in suffixes[3:]} <= set(children)
 
 
-def test_downgrade_keeps_non_empty_archive(migrated_scratch_db: tuple[str, Query]) -> None:
+def test_downgrade_drops_archive_schema(migrated_scratch_db: tuple[str, Query]) -> None:
+    """Decision R-9: a detached partition never outlives its parent."""
     url, query = migrated_scratch_db
     query(
         "INSERT INTO audit_logs (id, created_at, actor_type, action) VALUES "
@@ -402,16 +450,47 @@ def test_downgrade_keeps_non_empty_archive(migrated_scratch_db: tuple[str, Query
     assert rows_in_archive == 1
 
     _alembic(url, command.downgrade, "system_settings")
-    assert (
-        query(
-            "SELECT relname FROM pg_class WHERE relnamespace = 'archive'::regnamespace "
-            "AND relkind = 'r' ORDER BY 1"
-        )
-        == archived
-    )
+    # The archive schema and the detached partitions it held are gone with the parents.
+    assert query("SELECT to_regnamespace('archive')") == [(None,)]
     assert _counts(query) == {"user_activity": 0, "audit_logs": 0}
     _alembic(url, command.upgrade, "head")
     assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
+    # A second ring is possible: ``upgrade`` re-creates an empty ``archive``.
+    assert query("SELECT to_regnamespace('archive')") != [(None,)]
+
+
+def _migration_module() -> Any:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "versions"
+        / "20261106_1210-partition_logs_partition_logs.py"
+    )
+    spec = importlib.util.spec_from_file_location("partition_logs_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_unpartition_template_guard(migrated_scratch_db: tuple[str, Query]) -> None:
+    """The guard of ``_unpartition`` fires while the template of *this* table exists.
+
+    Runs before the ``undo_partition`` loop, so the ``part_config`` row still names the
+    template. Another table's template and a table without ``part_config`` never trip it.
+    """
+    _, query = migrated_scratch_db
+    guard = _migration_module()._template_guard_sql
+    with pytest.raises(psycopg.errors.RaiseException, match="partman template still exists"):
+        query(guard("audit_logs"))
+    # No ``part_config`` row for this name: nothing to check.
+    query(guard("no_such_parent"))
+    # Template of audit_logs removed: its guard passes, user_activity's template is untouched
+    # and still detected (exact comparison, not a suffix ``LIKE``).
+    query("DROP TABLE partman.template_public_audit_logs")
+    query(guard("audit_logs"))
+    with pytest.raises(psycopg.errors.RaiseException, match="partman template still exists"):
+        query(guard("user_activity"))
 
 
 def test_downgrade_fails_on_foreign_object_in_partman(
