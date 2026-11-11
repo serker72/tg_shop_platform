@@ -12,7 +12,9 @@
 #   *_DATA_DIR are written as literal paths under the test PROJECT_DATA_DIR (order-independent);
 #   *_PORT_HOST are shifted by PORT_OFFSET (default 20000), result must be within 1..65535;
 #   MASTER_BOT_TOKEN -> mock; ENCRYPTION_KEYS_OLD -> empty;
-#   ENCRYPTION_KEY is kept from an existing target file if valid, otherwise a new one is generated.
+#   ENCRYPTION_KEY is kept from an existing target file if valid, otherwise a new one is generated;
+#   GLITCHTIP_ADMIN_PASSWORD / GLITCHTIP_PROJECT_PUBLIC_KEY of the test obs stack are own values
+#   (kept from an existing target file, otherwise generated); SENTRY_DSN -> empty.
 # Lines are normalized: CR, leading whitespace and "export " are stripped.
 set -euo pipefail
 
@@ -36,12 +38,21 @@ valid_key() {
         "$1" >/dev/null 2>&1
 }
 
-key=""
-if [[ -f $dst ]]; then
-    key=$(tr -d '\r' <"$dst" \
-        | sed -nE 's/^[[:space:]]*(export[[:space:]]+)?ENCRYPTION_KEY=//p' \
-        | tail -n1 | tr -d "\"'")
-fi
+dst_value() {  # last value of KEY in an existing target file
+    [[ -f $dst ]] || return 0
+    tr -d '\r' <"$dst" \
+        | sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1=//p" \
+        | tail -n1 | tr -d "\"'"
+}
+
+key=$(dst_value ENCRYPTION_KEY)
+# Own GlitchTip bootstrap secrets for the test obs stack (stable across regenerations,
+# otherwise the existing test superuser would not match the password).
+gt_password=$(dst_value GLITCHTIP_ADMIN_PASSWORD)
+[[ $gt_password =~ ^[0-9a-f]{48}$ ]] || gt_password=$(openssl rand -hex 24)
+gt_public_key=$(dst_value GLITCHTIP_PROJECT_PUBLIC_KEY)
+[[ $gt_public_key =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+    || gt_public_key=$(python3 -c 'import uuid; print(uuid.uuid4())')
 key_msg="Keeping existing ENCRYPTION_KEY from $dst"
 if [[ -z $key ]] || ! valid_key "$key"; then
     key=$(gen_key)
@@ -51,7 +62,7 @@ fi
 tmp=$(mktemp "${dst}.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
-awk -v key="$key" -v tenv="$dst" -v off="$port_offset" '
+awk -v key="$key" -v tenv="$dst" -v off="$port_offset" -v gtpw="$gt_password" -v gtpk="$gt_public_key" '
 function norm(s) { gsub(/\r/, "", s); sub(/^[[:space:]]+/, "", s); sub(/^export[[:space:]]+/, "", s); return s }
 function unq(s) { if (s ~ /^".*"$/ || s ~ /^\047.*\047$/) return substr(s, 2, length(s) - 2); return s }
 function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
@@ -117,6 +128,9 @@ k == "ENCRYPTION_KEY"       { print k "=" key; next }
 k == "ENCRYPTION_KEYS_OLD"  { print k "="; next }
 k == "ALERT_TELEGRAM_BOT_TOKEN" || k == "ALERT_TELEGRAM_CHAT_ID" { print k "="; next }  # no test alerts to the real chat
 k == "APP_ENV_FILE"         { print k "=" tenv; next }
+k == "GLITCHTIP_ADMIN_PASSWORD"     { print k "=" gtpw; next }  # own test obs stack values
+k == "GLITCHTIP_PROJECT_PUBLIC_KEY" { print k "=" gtpk; next }
+k == "SENTRY_DSN"           { print k "="; next }  # test app never reports to GlitchTip
 { print line }
 END {
     if (err) exit 2
@@ -125,6 +139,9 @@ END {
     for (k in pd) if (!(k in seen)) print k "=" port(k, "")
     if (err) exit 2
     if (!("ENCRYPTION_KEY" in seen)) print "ENCRYPTION_KEY=" key
+    if (!("GLITCHTIP_ADMIN_PASSWORD" in seen)) print "GLITCHTIP_ADMIN_PASSWORD=" gtpw
+    if (!("GLITCHTIP_PROJECT_PUBLIC_KEY" in seen)) print "GLITCHTIP_PROJECT_PUBLIC_KEY=" gtpk
+    if (!("SENTRY_DSN" in seen)) print "SENTRY_DSN="
     if (!("APP_ENV_FILE" in seen)) { print "# Env file passed to app containers (docker-compose env_file)"; print "APP_ENV_FILE=" tenv }
 }
 ' "$src" "$src" >"$tmp"

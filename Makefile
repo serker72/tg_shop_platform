@@ -26,7 +26,8 @@ endef
 
 .PHONY: help install init-dirs env-test up down migrate lint format format-check check test \
 	test-integration test-integration-down clean archive-audit \
-	obs-config obs-up obs-down obs-ps obs-logs agent-config agent-up agent-down agent-logs
+	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset \
+	agent-config agent-up agent-down agent-logs
 
 # Loads $(1) into the recipe shell (bash expands ${PROJECT_DATA_DIR}-style references).
 # Limitation (same as docker compose interpolation): values must not contain unescaped `$`,
@@ -152,8 +153,30 @@ clean: ## Stop test stack, remove test data dir and caches
 obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (docker compose config)
 	$(OBS_COMPOSE) config --quiet && echo "docker-compose.obs.yml OK ($(ENV_FILE))"
 
-obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy
+obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy, bootstrap GlitchTip
 	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT)
+	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
+
+obs-bootstrap: ## Idempotent GlitchTip admin/org/team/project from ENV_FILE; writes SENTRY_DSN (backup .bak)
+	@bash ops/scripts/obs_bootstrap.sh "$(ENV_FILE)"
+
+# One-off: drops ONLY the GlitchTip database (OBS_POSTGRES_DB) in obs-postgres, re-runs
+# migrations and bootstrap. Other databases and services are not touched.
+obs-glitchtip-reset: ## DESTRUCTIVE: recreate GlitchTip DB and bootstrap from ENV_FILE (requires CONFIRM=1)
+	@if [ "$(CONFIRM)" != "1" ]; then \
+		echo "ERROR: obs-glitchtip-reset deletes ALL GlitchTip data (users, projects, events)."; \
+		echo "       Run: make obs-glitchtip-reset CONFIRM=1 [ENV_FILE=...]"; exit 1; fi
+	@$(call load_env,$(ENV_FILE)); \
+	db="$${OBS_POSTGRES_DB:-glitchtip}"; user="$${OBS_POSTGRES_USER:-glitchtip}"; \
+	[[ "$$db" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ && "$$user" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ ]] \
+		|| { echo "ERROR: OBS_POSTGRES_DB/OBS_POSTGRES_USER must be plain identifiers"; exit 1; }; \
+	set -e; \
+	$(OBS_COMPOSE) rm -s -f glitchtip-web glitchtip-worker glitchtip-migrate; \
+	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT) obs-postgres; \
+	$(OBS_COMPOSE) exec -T obs-postgres psql -v ON_ERROR_STOP=1 -U "$$user" -d postgres \
+		-c "DROP DATABASE IF EXISTS \"$$db\" WITH (FORCE)" -c "CREATE DATABASE \"$$db\" OWNER \"$$user\""; \
+	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT) glitchtip-migrate glitchtip-web glitchtip-worker
+	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
 obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
 	$(OBS_COMPOSE) down

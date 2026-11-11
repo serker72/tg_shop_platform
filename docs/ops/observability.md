@@ -64,10 +64,44 @@ Alertmanager silences/notifications `720h`.
   или через Caddy: `https://grafana.localhost` (внутренний CA Caddy → `curl -k`/исключение
   в браузере). Источники Prometheus, Loki, Alertmanager подключены через provisioning.
 - GlitchTip: http://127.0.0.1:8000 или `https://glitchtip.localhost`. Регистрация выключена;
-  первый админ:
-  `docker compose -f docker-compose.obs.yml --env-file .env exec glitchtip-web ./manage.py createsuperuser`
+  вход — `GLITCHTIP_ADMIN_EMAIL` / `GLITCHTIP_ADMIN_PASSWORD` из `.env` (см. «GlitchTip bootstrap»).
 - Проверка: `curl -u admin:$GRAFANA_ADMIN_PASSWORD http://127.0.0.1:3000/api/datasources`,
   `curl http://127.0.0.1:8000/_health/`.
+
+## GlitchTip bootstrap
+
+Администратор, организация, команда, проект и ключ проекта создаются автоматически из `.env`
+разовым сервисом `glitchtip-bootstrap` (профиль `bootstrap` в `docker-compose.obs.yml`,
+скрипт `ops/observability/glitchtip/bootstrap.py`, запуск
+`./manage.py shell -c "exec(open('/bootstrap/bootstrap.py').read())"` после `glitchtip-migrate`).
+
+| Переменная | Значение |
+|---|---|
+| `GLITCHTIP_ADMIN_EMAIL` | e-mail суперпользователя (e-mail отмечается подтверждённым в allauth) |
+| `GLITCHTIP_ADMIN_PASSWORD` | пусто → генерируется (`openssl rand -hex 24`) и записывается в `.env` |
+| `GLITCHTIP_ORG_SLUG` / `GLITCHTIP_ORG_NAME` | организация (`tgshopplatform` / `TgShopPlatform`) |
+| `GLITCHTIP_TEAM_SLUG` | команда (`platform`) |
+| `GLITCHTIP_PROJECT_NAME` / `GLITCHTIP_PROJECT_PLATFORM` | проект (`tg-shop-platform` / `python`) |
+| `GLITCHTIP_PROJECT_PUBLIC_KEY` | public key DSN (UUID4); пусто → генерируется |
+| `GLITCHTIP_INTERNAL_URL` | адрес GlitchTip из контейнеров приложения (`http://glitchtip-web:8000`) |
+| `SENTRY_DSN` | вычисляется: `<схема>://<public_key hex>@<хост GLITCHTIP_INTERNAL_URL>/<project_id>` |
+
+- `make obs-bootstrap` (вызывается из `make obs-up`): дописывает недостающие/пустые переменные
+  GlitchTip и `SENTRY_DSN` в `ENV_FILE` (остальные строки, порядок и комментарии не меняются;
+  перед изменением — копия `ENV_FILE.bak`), запускает bootstrap, пишет `SENTRY_DSN`.
+  Идемпотентно: повторный запуск ничего не дублирует, пароль существующего пользователя не
+  меняет. Для `PROJECT_ENVIRONMENT=test` (`.env.test`) `SENTRY_DSN` не пишется — тестовое
+  приложение ошибки не отправляет; `make env-test` генерирует свои пароль и UUID.
+- DSN: `grep ^SENTRY_DSN= .env`. Применить: пересоздать ботов — `make agent-up` с
+  `ALLOY_SINGLE_HOST=1` (overlay `ops/observability/alloy/compose.single-host.yml` подключает
+  `master_bot`/`bot_worker` к сети `${PROJECT_NAME}_obs_default`, где резолвится `glitchtip-web`).
+  DSN из UI GlitchTip содержит хост `GLITCHTIP_DOMAIN` и из контейнеров не подходит.
+- Вход: UI (см. «Доступ локально») или API allauth
+  `POST /_allauth/browser/v1/auth/login` `{"email": ..., "password": ...}`.
+- Сброс (разово, **удаляет все данные GlitchTip**: пользователей, проекты, события):
+  `make obs-glitchtip-reset CONFIRM=1` — останавливает только glitchtip-сервисы, пересоздаёт БД
+  `OBS_POSTGRES_DB` в obs-postgres (`DROP DATABASE ... WITH (FORCE)` + `CREATE DATABASE`),
+  прогоняет `glitchtip-migrate` и bootstrap. Без `CONFIRM=1` — отказ.
 
 ## Алерты
 

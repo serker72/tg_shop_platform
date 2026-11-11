@@ -1,6 +1,5 @@
 # Prometheus config. Retention (30d) is set by --storage.tsdb.retention.time in compose.
-# App scrape targets (master_bot/bot_worker metrics) are added in a later wave; on a single
-# host they are reachable via host.docker.internal:<published port>, on VPS 2 via VPN.
+# App/exporter metrics are scraped by Alloy and arrive via remote write (/api/v1/write).
 global:
   scrape_interval: 15s
   evaluation_interval: 15s

@@ -5,11 +5,21 @@
 # Used by `make agent-up` when ALLOY_SINGLE_HOST=1. Requires a running obs stack
 # (make obs-up with the same ENV_FILE). On VPS 1 in production do not use this file:
 # URLs point to the VPN IP of VPS 2.
+# master_bot/bot_worker join the obs network too: SENTRY_DSN points to glitchtip-web:8000
+# (GLITCHTIP_INTERNAL_URL). The list of networks replaces the base one, so `default` is kept.
 services:
   alloy:
     networks:
       - default
       - docker_api
+      - obs
+  master_bot:
+    networks:
+      - default
+      - obs
+  bot_worker:
+    networks:
+      - default
       - obs
 
 networks:

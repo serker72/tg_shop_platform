@@ -250,6 +250,33 @@ services:
       retries: 10
       start_period: 30s
 
+  # One-shot idempotent bootstrap (superuser/organization/team/project/key from GLITCHTIP_*).
+  # Profile `bootstrap`: started by `make obs-bootstrap` (part of `make obs-up`) via
+  # `run --rm`, which also writes SENTRY_DSN to the env file. Values are checked by the script.
+  glitchtip-bootstrap:
+    <<: *glitchtip
+    restart: "no"
+    profiles: ["bootstrap"]
+    command: ["./manage.py", "shell", "-c", "exec(open('/bootstrap/bootstrap.py').read())"]
+    environment:
+      <<: *glitchtip-env
+      GLITCHTIP_ADMIN_EMAIL: ${GLITCHTIP_ADMIN_EMAIL:-}
+      GLITCHTIP_ADMIN_PASSWORD: ${GLITCHTIP_ADMIN_PASSWORD:-}
+      GLITCHTIP_ORG_SLUG: ${GLITCHTIP_ORG_SLUG:-}
+      GLITCHTIP_ORG_NAME: ${GLITCHTIP_ORG_NAME:-}
+      GLITCHTIP_TEAM_SLUG: ${GLITCHTIP_TEAM_SLUG:-}
+      GLITCHTIP_PROJECT_NAME: ${GLITCHTIP_PROJECT_NAME:-}
+      GLITCHTIP_PROJECT_PLATFORM: ${GLITCHTIP_PROJECT_PLATFORM:-python}
+      GLITCHTIP_PROJECT_PUBLIC_KEY: ${GLITCHTIP_PROJECT_PUBLIC_KEY:-}
+    volumes:
+      - type: bind
+        source: ./ops/observability/glitchtip
+        target: /bootstrap
+        read_only: true
+    depends_on:
+      glitchtip-migrate:
+        condition: service_completed_successfully
+
   glitchtip-worker:
     <<: *glitchtip
     command: ["./bin/run-celery-with-beat.sh"]
