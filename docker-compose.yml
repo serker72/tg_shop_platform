@@ -151,6 +151,42 @@ services:
       retries: 10
       start_period: 10s
 
+  # One-off job: creates the application buckets in MinIO (idempotent, mc mb --ignore-existing).
+  # Same image as `minio` (it ships mc). Main bucket = STORAGE_BUCKET or MINIO_BUCKET (as
+  # StorageSettings.resolved_bucket); MINIO_AUDIT_ARCHIVE_BUCKET is created when set and different.
+  # STORAGE_BACKEND=s3: buckets are managed outside the platform -> exits 0 without changes.
+  minio_init:
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
+    restart: "no"
+    logging: *logging
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY не задан}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY не задан}
+      MINIO_BUCKET: ${MINIO_BUCKET:-tg-shop}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-}
+      MINIO_AUDIT_ARCHIVE_BUCKET: ${MINIO_AUDIT_ARCHIVE_BUCKET:-}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
+      MC_CONFIG_DIR: /tmp/.mc
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ "$$STORAGE_BACKEND" = "s3" ]; then
+          echo "minio_init: STORAGE_BACKEND=s3 - buckets are managed outside the platform, nothing to do"
+          exit 0
+        fi
+        main="$${STORAGE_BUCKET:-$$MINIO_BUCKET}"
+        mc alias set local http://minio:9000 "$$MINIO_ACCESS_KEY" "$$MINIO_SECRET_KEY" >/dev/null
+        mc mb --ignore-existing "local/$$main"
+        audit="$${MINIO_AUDIT_ARCHIVE_BUCKET:-}"
+        if [ -n "$$audit" ] && [ "$$audit" != "$$main" ]; then
+          mc mb --ignore-existing "local/$$audit"
+        fi
+        echo "minio_init: buckets ready"
+
   db_update:
     <<: *app
     command: ["sh", "ops/scripts/migrate.sh"]
@@ -158,6 +194,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # The audit archiver (`make archive-audit`) runs on this service and needs the bucket.
+      minio_init:
+        condition: service_completed_successfully
     # Same logs bind mount as the bots: one-off jobs (`make archive-audit`, retention)
     # run on this service and must see /app/logs (log files, tmp dir, locks).
     volumes:
@@ -171,6 +210,8 @@ services:
     healthcheck: *bot-healthcheck
     depends_on:
       db_update:
+        condition: service_completed_successfully
+      minio_init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -189,6 +230,8 @@ services:
     healthcheck: *bot-healthcheck
     depends_on:
       db_update:
+        condition: service_completed_successfully
+      minio_init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy

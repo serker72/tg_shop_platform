@@ -24,6 +24,21 @@
 Без тега `ops/scripts/version.sh` (и сборка через `make up/agent-up/migrate/test-integration`)
 завершается ошибкой с подсказкой; приложение при этом не падает, а сообщает `0.1.N+unknown`.
 
+### Свежий клон: тег не приходит сам
+
+Локальный тег не попадает в `git clone`, пока его не отправили на удалённый репозиторий
+(`git push origin milestone-N`). Клон без тега → `make up` падает с
+`ERROR: tag milestone-N not found` и подсказкой. Порядок:
+
+```bash
+git fetch --tags                 # подтянуть теги с remote
+git tag -l 'milestone-*'         # тег должен появиться
+make version                     # 0.1.N.<коммит>
+```
+
+Если после `git fetch --tags` тега нет — его не отправили на remote: выполнить
+`git push origin milestone-N` в репозитории, где тег создан.
+
 ## Где видна версия
 
 - `make version` / `ops/scripts/version.sh` — версия; `--commit` — короткий хеш;

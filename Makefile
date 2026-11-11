@@ -7,6 +7,8 @@ COMPOSE := docker compose
 # Services started by `test-integration` (db_update/master_bot/bot_worker join after Stage 1 wave 2)
 TEST_SERVICES ?= postgres redis rabbitmq minio
 WAIT_TIMEOUT ?= 300
+# make ready: how long to wait for /health/ready = 200 of master_bot and bot_worker (seconds)
+READY_TIMEOUT ?= 60
 # Observability stack (docker-compose.obs.yml); uses the same ENV_FILE (ENV_FILE=.env.test for test)
 OBS_COMPOSE = $(COMPOSE) -f docker-compose.obs.yml --env-file $(ENV_FILE)
 OBS_DIRS := OBS_POSTGRES_DATA_DIR OBS_REDIS_DATA_DIR OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR \
@@ -31,7 +33,7 @@ vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
 endef
 
-.PHONY: help install init-dirs env-test version up down migrate lint format format-check check test \
+.PHONY: help install init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset \
 	agent-config agent-up agent-down agent-logs
@@ -112,9 +114,14 @@ env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mo
 version: ## Print the application version (0.1.<milestone>.<commit>[+dirty])
 	@sh ops/scripts/version.sh
 
-up: ## Build and start the stack in background (image gets the current version)
+up: ## Build and start the stack in background (image gets the current version), then make ready
 	@$(version_env); \
-	$(COMPOSE) --env-file $(ENV_FILE) up -d --build
+	$(COMPOSE) --env-file $(ENV_FILE) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
+	@$(MAKE) --no-print-directory ready ENV_FILE=$(ENV_FILE)
+
+ready: ## Wait for /health/ready = 200 in master_bot and bot_worker (READY_TIMEOUT=60 s)
+	@READY_TIMEOUT=$(READY_TIMEOUT) timeout $$(( $(READY_TIMEOUT) + 60 )) \
+		bash ops/scripts/wait_ready.sh --env-file $(ENV_FILE)
 
 down: ## Stop the stack
 	$(COMPOSE) --env-file $(ENV_FILE) down
@@ -206,6 +213,7 @@ agent-config: ## Validate main compose with the observability profile (Alloy)
 agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
 	@$(version_env); \
 	$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
+	@$(MAKE) --no-print-directory ready ENV_FILE=$(ENV_FILE)
 
 agent-down: ## Stop only Alloy + docker-socket-proxy (the main stack keeps running)
 	@$(agent_compose) rm -s -f alloy docker-socket-proxy

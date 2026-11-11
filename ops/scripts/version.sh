@@ -64,7 +64,10 @@ echo "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
 milestone=${base##*.}
 tag="milestone-$milestone"
 git -C "$root" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null \
-    || die "tag $tag not found. Create it on the first commit of milestone $milestone:
+    || die "tag $tag not found.
+       Fresh clone: tags may not have been fetched -> git fetch --tags
+       (the tag must be pushed to the remote first: git push origin $tag).
+       No such tag yet: create it on the first commit of milestone $milestone:
        git tag -a $tag <sha> -m \"Milestone $milestone start\"   (see docs/ops/versioning.md)"
 
 count=$(git -C "$root" rev-list --count "$tag..HEAD")

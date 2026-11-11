@@ -123,6 +123,12 @@ docker run --rm --network "${PROJECT_NAME}_default" \
   отчётом, сохранённым при backup.
 - Альтернатива для холодного восстановления: остановить `minio` и вернуть каталог
   `MINIO_DATA_DIR` целиком (rsync из копии каталога), затем `make init-dirs`/права.
+- На пустом MinIO бакеты создаёт одноразовый сервис `minio_init` (образ `minio` с `mc`,
+  `mc mb --ignore-existing`): основной (`STORAGE_BUCKET`, пусто = `MINIO_BUCKET`) и
+  `MINIO_AUDIT_ARCHIVE_BUCKET`, если задан и отличается. Идемпотентен; `db_update`,
+  `master_bot`, `bot_worker` стартуют только после его успешного завершения. При
+  `STORAGE_BACKEND=s3` ничего не делает (бакеты S3 создаются вне платформы). Ручной запуск:
+  `docker compose --env-file .env up minio_init` (код выхода 0).
 
 ## 4. Migrations / config
 
@@ -136,12 +142,18 @@ make migrate     # init-dirs + db_update: wait_for_db → alembic upgrade head �
 ## 5. Запуск
 
 ```bash
-make up                                  # основной стек
+make up                                  # основной стек + make ready
 make obs-up                              # стек наблюдаемости (на VPS 2)
 docker compose --env-file .env ps        # все сервисы running/healthy
 ```
 
 ## 6. Проверка health
+
+`make up` и `make agent-up` после `docker compose up --wait` (healthcheck = `/health/live`)
+вызывают `make ready`: опрос `GET /health/ready` внутри `master_bot` и `bot_worker`
+(`docker compose exec`, порт `OBSERVABILITY_HTTP_PORT`) каждые 2 с до `READY_TIMEOUT`
+(по умолчанию 60 с). Оба 200 → `ready`; иначе печатается JSON `/health/ready` неготовых
+сервисов и код выхода 1. Отдельно: `make ready [READY_TIMEOUT=120]`.
 
 ```bash
 curl -fsS http://127.0.0.1:<порт сервиса>/health/live
