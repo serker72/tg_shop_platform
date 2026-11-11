@@ -67,8 +67,16 @@ function port(k, v,  p, r) {
 BEGIN {
     dd["POSTGRES_DATA_DIR"] = "db"; dd["REDIS_DATA_DIR"] = "redis"; dd["RABBITMQ_DATA_DIR"] = "rabbitmq"
     dd["MINIO_DATA_DIR"] = "minio"; dd["LOGS_DATA_DIR"] = "logs"
+    # observability stack (docker-compose.obs.yml)
+    dd["OBS_POSTGRES_DATA_DIR"] = "obs/db"; dd["OBS_REDIS_DATA_DIR"] = "obs/redis"
+    dd["OBS_GRAFANA_DATA_DIR"] = "obs/grafana"; dd["OBS_PROMETHEUS_DATA_DIR"] = "obs/prometheus"
+    dd["OBS_LOKI_DATA_DIR"] = "obs/loki"; dd["OBS_ALERTMANAGER_DATA_DIR"] = "obs/alertmanager"
+    dd["OBS_CADDY_DATA_DIR"] = "obs/caddy"
     pd["POSTGRES_PORT_HOST"] = 5432; pd["REDIS_PORT_HOST"] = 6379; pd["RABBITMQ_PORT_HOST"] = 5672
     pd["RABBITMQ_MGMT_PORT_HOST"] = 15672; pd["MINIO_API_PORT_HOST"] = 9000; pd["MINIO_CONSOLE_PORT_HOST"] = 9001
+    pd["GRAFANA_PORT_HOST"] = 3000; pd["LOKI_PORT_HOST"] = 3100; pd["PROMETHEUS_PORT_HOST"] = 9090
+    pd["ALERTMANAGER_PORT_HOST"] = 9093; pd["GLITCHTIP_PORT_HOST"] = 8000
+    pd["CADDY_HTTP_PORT_HOST"] = 80; pd["CADDY_HTTPS_PORT_HOST"] = 443
 }
 # Pass 1: collect and validate PROJECT_DATA_DIR / PROJECT_NAME.
 FNR == NR {
@@ -105,6 +113,7 @@ k in pd                     { print k "=" port(k, v); next }
 k == "MASTER_BOT_TOKEN"     { print k "=123456789:TEST-mock-master-bot-token"; next }
 k == "ENCRYPTION_KEY"       { print k "=" key; next }
 k == "ENCRYPTION_KEYS_OLD"  { print k "="; next }
+k == "ALERT_TELEGRAM_BOT_TOKEN" || k == "ALERT_TELEGRAM_CHAT_ID" { print k "="; next }  # no test alerts to the real chat
 k == "APP_ENV_FILE"         { print k "=" tenv; next }
 { print line }
 END {

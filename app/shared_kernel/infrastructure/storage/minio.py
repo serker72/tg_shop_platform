@@ -24,19 +24,25 @@ from app.shared_kernel.infrastructure.storage.boto3_storage import (
 __all__ = ["MinIOStorage", "build_minio_client", "minio_client_config"]
 
 
-def minio_client_config() -> Config:
-    """Return the ``botocore`` config for a MinIO client."""
+def minio_client_config(
+    *, connect_timeout: float = 10, read_timeout: float = 60, max_retries: int = 3
+) -> Config:
+    """Return the ``botocore`` config for a MinIO client.
+
+    ``max_retries`` excludes the initial call (``0`` = a single attempt);
+    health probes use short timeouts and a single attempt.
+    """
     return Config(
         signature_version="s3v4",
         s3={"addressing_style": "path"},
-        retries={"max_attempts": 3, "mode": "standard"},
-        connect_timeout=10,
-        read_timeout=60,
+        retries={"max_attempts": max_retries, "mode": "standard"},
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
         max_pool_connections=MAX_POOL_CONNECTIONS,
     )
 
 
-def build_minio_client(settings: Settings) -> Any:
+def build_minio_client(settings: Settings, *, config: Config | None = None) -> Any:
     """Create a ``boto3`` S3 client pointed at MinIO.
 
     Returns ``Any``: ``botocore``/``boto3`` publish no type stubs, so the concrete
@@ -50,7 +56,7 @@ def build_minio_client(settings: Settings) -> Any:
         aws_access_key_id=minio.access_key,
         aws_secret_access_key=secret_key,
         region_name=settings.storage.region or "us-east-1",
-        config=minio_client_config(),
+        config=config if config is not None else minio_client_config(),
     )
 
 

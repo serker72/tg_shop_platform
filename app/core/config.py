@@ -28,6 +28,7 @@ __all__ = [
     "EncryptionSettings",
     "LogsSettings",
     "MinioSettings",
+    "ObservabilitySettings",
     "PostgresSettings",
     "RabbitMQSettings",
     "RedisSettings",
@@ -299,6 +300,46 @@ class LogsSettings(BaseSettings):
     file_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
 
 
+class ObservabilitySettings(BaseSettings):
+    """Health/metrics HTTP server and Sentry (GlitchTip) error reporting.
+
+    HTTP server: ``OBSERVABILITY_HTTP_HOST`` / ``OBSERVABILITY_HTTP_PORT``, per-check
+    timeout ``OBSERVABILITY_HEALTH_TIMEOUT_SECONDS``, heartbeat TTL
+    ``OBSERVABILITY_HEARTBEAT_TTL_SECONDS``. Sentry uses the conventional names
+    ``SENTRY_DSN`` (empty = disabled), ``SENTRY_ENVIRONMENT`` (empty = ``PROJECT_ENVIRONMENT``)
+    and ``SENTRY_TRACES_SAMPLE_RATE``. The prefix never clashes with ``OBS_*_DATA_DIR``
+    (host directories of the observability stack, not read by the application).
+    """
+
+    model_config = _base_config("OBSERVABILITY_")
+
+    # Inside a container the server must listen on all interfaces (scraped over the network).
+    http_host: str = "0.0.0.0"  # noqa: S104
+    http_port: int = Field(default=8080, gt=0, lt=65536)
+    health_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    heartbeat_ttl_seconds: int = Field(default=30, gt=0)
+    # ``/health/ready`` reuses one report for this long (bounds the probe rate).
+    ready_cache_ttl_seconds: float = Field(default=1.0, ge=0, le=60)
+    sentry_dsn: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("SENTRY_DSN", "sentry_dsn")
+    )
+    sentry_environment: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SENTRY_ENVIRONMENT", "sentry_environment"),
+    )
+    sentry_traces_sample_rate: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+        validation_alias=AliasChoices("SENTRY_TRACES_SAMPLE_RATE", "sentry_traces_sample_rate"),
+    )
+
+    @field_validator("sentry_dsn", "sentry_environment", mode="before")
+    @classmethod
+    def _empty_sentry_to_none(cls, value: object) -> object:
+        return _normalise_empty_secret(value)
+
+
 # ``Settings`` field name -> nested section class.
 _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "postgres": PostgresSettings,
@@ -309,6 +350,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "encryption": EncryptionSettings,
     "storage": StorageSettings,
     "logs": LogsSettings,
+    "observability": ObservabilitySettings,
 }
 
 
@@ -334,6 +376,7 @@ class Settings(BaseSettings):
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     logs: LogsSettings = Field(default_factory=LogsSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.

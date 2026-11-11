@@ -7,9 +7,17 @@ COMPOSE := docker compose
 # Services started by `test-integration` (db_update/master_bot/bot_worker join after Stage 1 wave 2)
 TEST_SERVICES ?= postgres redis rabbitmq minio
 WAIT_TIMEOUT ?= 300
+# Observability stack (docker-compose.obs.yml); uses the same ENV_FILE (ENV_FILE=.env.test for test)
+OBS_COMPOSE = $(COMPOSE) -f docker-compose.obs.yml --env-file $(ENV_FILE)
+OBS_DIRS := OBS_POSTGRES_DATA_DIR OBS_REDIS_DATA_DIR OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR \
+	OBS_LOKI_DATA_DIR OBS_ALERTMANAGER_DATA_DIR OBS_CADDY_DATA_DIR
+# Dirs of services running as APP_UID:APP_GID (`user:` in docker-compose.obs.yml): must stay writable
+OBS_APP_UID_DIRS := OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR OBS_LOKI_DATA_DIR \
+	OBS_ALERTMANAGER_DATA_DIR
 
 .PHONY: help install init-dirs env-test up down migrate lint format format-check check test \
-	test-integration test-integration-down clean archive-audit
+	test-integration test-integration-down clean archive-audit \
+	obs-config obs-up obs-down obs-ps obs-logs
 
 # Loads $(1) into the recipe shell (bash expands ${PROJECT_DATA_DIR}-style references).
 # Limitation (same as docker compose interpolation): values must not contain unescaped `$`,
@@ -64,6 +72,17 @@ init-dirs: ## Create bind-mount data directories from ENV_FILE
 	fi; \
 	for sub in users bots system system/tmp; do \
 		mkdir -p "$$LOGS_DATA_DIR/$$sub" 2>/dev/null || deny "$$LOGS_DATA_DIR"; \
+	done; \
+	for var in $(OBS_DIRS); do \
+		if [ -z "$${!var:-}" ]; then echo "SKIP $$var (empty; needed only for make obs-up)"; continue; fi; \
+		mkdir -p "$${!var}" 2>/dev/null || deny "$${!var}"; \
+		echo "OK $$var=$${!var}"; \
+	done; \
+	for var in $(OBS_APP_UID_DIRS); do \
+		[ -n "$${!var:-}" ] || continue; \
+		probe="$${!var}/.init-dirs-probe"; \
+		{ touch "$$probe" 2>/dev/null && rm -f "$$probe"; } \
+			|| [ "$$(stat -c %u "$${!var}")" = "$${APP_UID:-}" ] || deny "$${!var}"; \
 	done
 
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
@@ -116,6 +135,21 @@ clean: ## Stop test stack, remove test data dir and caches
 	else echo "$(TEST_ENV_FILE) not found, skipping test stack cleanup"; fi
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
+
+obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (docker compose config)
+	$(OBS_COMPOSE) config --quiet && echo "docker-compose.obs.yml OK ($(ENV_FILE))"
+
+obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy
+	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT)
+
+obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
+	$(OBS_COMPOSE) down
+
+obs-ps: ## Show observability stack services
+	$(OBS_COMPOSE) ps
+
+obs-logs: ## Follow observability logs (SERVICE=grafana to filter)
+	$(OBS_COMPOSE) logs -f --tail=200 $(SERVICE)
 
 # --tmp-dir must be a path *inside* the container: the script runs in ``db_update``, where
 # ``LOGS_DATA_DIR`` (host path) is mounted at ``${LOGS_DIR}`` (``/app/logs``). Temporary

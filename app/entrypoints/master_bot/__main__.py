@@ -2,11 +2,11 @@
 
 import asyncio
 
-from app.core.process import run_placeholder
+from app.core.process import run_service
 
 
 def main() -> None:
-    asyncio.run(run_placeholder("master_bot"))
+    asyncio.run(run_service("master_bot"))
 
 
 if __name__ == "__main__":

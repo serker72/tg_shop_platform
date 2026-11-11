@@ -1,0 +1,30 @@
+# Alertmanager config TEMPLATE, rendered by the container entrypoint (docker-compose.obs.yml):
+#   __DEFAULT_RECEIVER__ -> telegram | blackhole
+#   __TELEGRAM_CHAT_ID__ -> ALERT_TELEGRAM_CHAT_ID (integer)
+#   bot token            -> /tmp/telegram_bot_token (from ALERT_TELEGRAM_BOT_TOKEN)
+# The block between "BEGIN telegram" / "END telegram" is removed when Telegram is not configured.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: __DEFAULT_RECEIVER__
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+inhibit_rules:
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: ["alertname"]
+
+receivers:
+  - name: blackhole
+  # BEGIN telegram
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /tmp/telegram_bot_token
+        chat_id: __TELEGRAM_CHAT_ID__
+        parse_mode: HTML
+        send_resolved: true
+  # END telegram

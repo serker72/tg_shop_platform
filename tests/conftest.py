@@ -39,6 +39,19 @@ def _clear_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _pristine_faststream_logger() -> None:
+    """Importing FastStream configures its module-level ``faststream`` logger (own stderr
+    handler, ``propagate=False``). Production code never logs through it (the broker gets
+    ``logger=`` from ``build_rabbit_broker``), but tests that use the name do - reset it."""
+    import logging
+
+    log = logging.getLogger("faststream")
+    log.handlers.clear()
+    log.propagate = True
+    log.setLevel(logging.NOTSET)
+
+
 @pytest.fixture
 def tenant() -> UUID:
     """A fresh tenant id."""

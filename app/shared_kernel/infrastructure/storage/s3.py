@@ -25,19 +25,24 @@ __all__ = ["S3Storage", "build_s3_client", "s3_client_config"]
 _DEFAULT_REGION = "us-east-1"
 
 
-def s3_client_config() -> Config:
-    """Return the ``botocore`` config for an AWS S3 (or S3-compatible) client."""
+def s3_client_config(
+    *, connect_timeout: float = 10, read_timeout: float = 120, max_retries: int = 3
+) -> Config:
+    """Return the ``botocore`` config for an AWS S3 (or S3-compatible) client.
+
+    ``max_retries`` excludes the initial call (``0`` = a single attempt).
+    """
     return Config(
         signature_version="s3v4",
         s3={"addressing_style": "virtual"},
-        retries={"max_attempts": 3, "mode": "standard"},
-        connect_timeout=10,
-        read_timeout=120,
+        retries={"max_attempts": max_retries, "mode": "standard"},
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
         max_pool_connections=MAX_POOL_CONNECTIONS,
     )
 
 
-def build_s3_client(settings: Settings) -> Any:
+def build_s3_client(settings: Settings, *, config: Config | None = None) -> Any:
     """Create a ``boto3`` S3 client for AWS or an S3-compatible endpoint.
 
     Credentials come only from ``STORAGE_ACCESS_KEY``/``STORAGE_SECRET_KEY``; ``MINIO_*``
@@ -55,7 +60,7 @@ def build_s3_client(settings: Settings) -> Any:
         aws_access_key_id=storage.access_key,
         aws_secret_access_key=secret_key,
         region_name=storage.region or _DEFAULT_REGION,
-        config=s3_client_config(),
+        config=config if config is not None else s3_client_config(),
     )
 
 

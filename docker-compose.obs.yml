@@ -1,0 +1,279 @@
+# Observability stack (Stage 2): Loki, Prometheus, Alertmanager, Grafana, GlitchTip, Caddy.
+# Target host: VPS 2. Locally it runs next to docker-compose.yml on the same machine.
+#   make obs-up / obs-down / obs-logs / obs-config   (ENV_FILE=.env.test for the test copy)
+#
+# Network: own compose network (no shared external network). Everything except Caddy is
+# published only on 127.0.0.1:${*_PORT_HOST}; the app stack talks to Loki/Prometheus via
+# host ports (and later via VPN on VPS 2). Prometheus resolves host.docker.internal to the
+# host gateway to scrape app metrics published on the host.
+# Storage: only bind mounts (${OBS_*_DATA_DIR:?}), created by `make init-dirs`.
+# Grafana/Loki/Prometheus/Alertmanager run as APP_UID:APP_GID, so their dirs stay owned by
+# the host user (no sudo/chown needed). Postgres/Valkey/Caddy entrypoints manage own dirs.
+# Images are pinned by tag + digest and can be overridden with *_IMAGE.
+name: ${PROJECT_NAME:-tg_shop_platform}_obs
+
+x-glitchtip: &glitchtip
+  image: ${GLITCHTIP_IMAGE:-glitchtip/glitchtip:v5.1@sha256:805f4fb7b886653b944caff1ae06a95c8724b5b3ddc21917e80e18e6c03019ab}
+  restart: unless-stopped
+  environment: &glitchtip-env
+    # Passwords are interpolated into URLs: use URL-safe values (e.g. `openssl rand -hex 24`).
+    DATABASE_URL: postgres://${OBS_POSTGRES_USER:-glitchtip}:${OBS_POSTGRES_PASSWORD:?OBS_POSTGRES_PASSWORD не задан}@obs-postgres:5432/${OBS_POSTGRES_DB:-glitchtip}
+    REDIS_URL: redis://:${OBS_REDIS_PASSWORD:?OBS_REDIS_PASSWORD не задан}@obs-redis:6379/0
+    SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?GLITCHTIP_SECRET_KEY не задан}
+    PORT: "8000"
+    GLITCHTIP_DOMAIN: https://${GLITCHTIP_DOMAIN:?GLITCHTIP_DOMAIN не задан}:${CADDY_HTTPS_PORT_HOST:-443}
+    DEFAULT_FROM_EMAIL: ${GLITCHTIP_FROM_EMAIL:-glitchtip@localhost}
+    # consolemail:// = e-mails are only written to the container log
+    EMAIL_URL: ${GLITCHTIP_EMAIL_URL:-consolemail://}
+    GLITCHTIP_MAX_EVENT_LIFE_DAYS: ${GLITCHTIP_MAX_EVENT_LIFE_DAYS:-30}
+    ENABLE_USER_REGISTRATION: ${GLITCHTIP_ENABLE_USER_REGISTRATION:-false}
+    ENABLE_ORGANIZATION_CREATION: ${GLITCHTIP_ENABLE_ORGANIZATION_CREATION:-false}
+    CELERY_WORKER_AUTOSCALE: "1,3"
+    CELERY_WORKER_MAX_TASKS_PER_CHILD: "10000"
+
+services:
+  loki:
+    image: ${LOKI_IMAGE:-grafana/loki:3.5.5@sha256:31628519045e7f28692a7ae73b4a3fd293dccb425585ed5d16ceea3b5c9592e6}
+    restart: unless-stopped
+    user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - type: bind
+        source: ./ops/observability/loki/config.yml
+        target: /etc/loki/config.yml
+        read_only: true
+      - type: bind
+        source: ${OBS_LOKI_DATA_DIR:?OBS_LOKI_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /loki
+    ports:
+      - "127.0.0.1:${LOKI_PORT_HOST:-3100}:3100"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.6.0@sha256:76947e7ef22f8a698fc638f706685909be425dbe09bd7a2cd7aca849f79b5f64}
+    restart: unless-stopped
+    user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}"
+      - "--web.enable-lifecycle"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ./ops/observability/prometheus
+        target: /etc/prometheus
+        read_only: true
+      - type: bind
+        source: ${OBS_PROMETHEUS_DATA_DIR:?OBS_PROMETHEUS_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT_HOST:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.28.1@sha256:27c475db5fb156cab31d5c18a4251ac7ed567746a2483ff264516437a39b15ba}
+    restart: unless-stopped
+    user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
+    # Alertmanager does not expand env in its config: render the template into /tmp.
+    # The bot token goes to a 0600 file (bot_token_file), not into the config or argv.
+    # Without ALERT_TELEGRAM_BOT_TOKEN/CHAT_ID the telegram block is dropped (alerts -> blackhole).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        set -e; umask 077;
+        src=/etc/alertmanager-src/alertmanager.yml; dst=/tmp/alertmanager.yml;
+        if [ -n "$$ALERT_TELEGRAM_BOT_TOKEN" ] && [ -n "$$ALERT_TELEGRAM_CHAT_ID" ]; then
+        case "$$ALERT_TELEGRAM_CHAT_ID" in -*[!0-9]*|*[!-0-9]*|-|'') echo "ALERT_TELEGRAM_CHAT_ID must be an integer" >&2; exit 1;; esac;
+        printf '%s' "$$ALERT_TELEGRAM_BOT_TOKEN" > /tmp/telegram_bot_token;
+        sed -e "s/__TELEGRAM_CHAT_ID__/$$ALERT_TELEGRAM_CHAT_ID/" -e "s/__DEFAULT_RECEIVER__/telegram/" "$$src" > "$$dst";
+        else
+        echo "WARN: ALERT_TELEGRAM_BOT_TOKEN/ALERT_TELEGRAM_CHAT_ID empty, alerts go to blackhole" >&2;
+        sed -e '/# BEGIN telegram/,/# END telegram/d' -e "s/__DEFAULT_RECEIVER__/blackhole/" "$$src" > "$$dst";
+        fi;
+        exec /bin/alertmanager --config.file="$$dst" --storage.path=/alertmanager
+        --data.retention=${ALERTMANAGER_RETENTION:-720h}
+    environment:
+      ALERT_TELEGRAM_BOT_TOKEN: ${ALERT_TELEGRAM_BOT_TOKEN:-}
+      ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-}
+    volumes:
+      - type: bind
+        source: ./ops/observability/alertmanager
+        target: /etc/alertmanager-src
+        read_only: true
+      - type: bind
+        source: ${OBS_ALERTMANAGER_DATA_DIR:?OBS_ALERTMANAGER_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /alertmanager
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT_HOST:-9093}:9093"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7}
+    restart: unless-stopped
+    user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD не задан}
+      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:?GRAFANA_DOMAIN не задан}:${CADDY_HTTPS_PORT_HOST:-443}/
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - type: bind
+        source: ./ops/observability/grafana/provisioning
+        target: /etc/grafana/provisioning
+        read_only: true
+      - type: bind
+        source: ./ops/observability/grafana/dashboards
+        target: /etc/grafana/dashboards
+        read_only: true
+      - type: bind
+        source: ${OBS_GRAFANA_DATA_DIR:?OBS_GRAFANA_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT_HOST:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  obs-postgres:
+    image: ${OBS_POSTGRES_IMAGE:-postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${OBS_POSTGRES_USER:-glitchtip}
+      POSTGRES_PASSWORD: ${OBS_POSTGRES_PASSWORD:?OBS_POSTGRES_PASSWORD не задан}
+      POSTGRES_DB: ${OBS_POSTGRES_DB:-glitchtip}
+    volumes:
+      - type: bind
+        source: ${OBS_POSTGRES_DATA_DIR:?OBS_POSTGRES_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  obs-redis:
+    image: ${OBS_REDIS_IMAGE:-valkey/valkey:8.1-alpine@sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a}
+    restart: unless-stopped
+    # Same approach as redis in docker-compose.yml: password goes to a config file, not argv.
+    command:
+      - "sh"
+      - "-c"
+      - >-
+        umask 077
+        && printf 'requirepass "%s"\nappendonly yes\n'
+        "$$(printf '%s' "$$REDISCLI_AUTH" | sed 's/[\\"]/\\&/g')" > /tmp/valkey.conf
+        && chown valkey:valkey /tmp/valkey.conf
+        && exec docker-entrypoint.sh valkey-server /tmp/valkey.conf
+    environment:
+      REDISCLI_AUTH: ${OBS_REDIS_PASSWORD:?OBS_REDIS_PASSWORD не задан}
+    volumes:
+      - type: bind
+        source: ${OBS_REDIS_DATA_DIR:?OBS_REDIS_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Official GlitchTip layout: one-shot migrate + web + celery worker with beat.
+  glitchtip-migrate:
+    <<: *glitchtip
+    restart: "no"
+    command: ["./bin/run-migrate.sh"]
+    depends_on:
+      obs-postgres:
+        condition: service_healthy
+      obs-redis:
+        condition: service_healthy
+
+  glitchtip-web:
+    <<: *glitchtip
+    depends_on:
+      glitchtip-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${GLITCHTIP_PORT_HOST:-8000}:8000"
+    healthcheck:
+      # The image has neither curl nor wget.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/_health/', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  glitchtip-worker:
+    <<: *glitchtip
+    command: ["./bin/run-celery-with-beat.sh"]
+    depends_on:
+      glitchtip-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A glitchtip inspect ping -d celery@$$HOSTNAME --timeout 10 | grep -q pong"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+      start_period: 60s
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}
+    restart: unless-stopped
+    environment:
+      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:?GRAFANA_DOMAIN не задан}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:?GLITCHTIP_DOMAIN не задан}
+      # certificates, ACME account and autosave config live in the bind-mounted dir
+      XDG_DATA_HOME: /caddy/data
+      XDG_CONFIG_HOME: /caddy/config
+    volumes:
+      - type: bind
+        source: ./ops/observability/caddy/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: bind
+        source: ${OBS_CADDY_DATA_DIR:?OBS_CADDY_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /caddy
+    ports:
+      # The only service exposed beyond loopback (CADDY_BIND_ADDRESS, default 0.0.0.0).
+      - "${CADDY_BIND_ADDRESS:-0.0.0.0}:${CADDY_HTTP_PORT_HOST:-80}:80"
+      - "${CADDY_BIND_ADDRESS:-0.0.0.0}:${CADDY_HTTPS_PORT_HOST:-443}:443"
+    depends_on:
+      grafana:
+        condition: service_healthy
+      glitchtip-web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
