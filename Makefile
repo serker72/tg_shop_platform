@@ -170,8 +170,8 @@ agent-config: ## Validate main compose with the observability profile (Alloy)
 agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
 	@$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 
-agent-down: ## Stop only Alloy (the main stack keeps running)
-	@$(agent_compose) rm -s -f alloy
+agent-down: ## Stop only Alloy + docker-socket-proxy (the main stack keeps running)
+	@$(agent_compose) rm -s -f alloy docker-socket-proxy
 
 agent-logs: ## Follow Alloy logs
 	@$(agent_compose) logs -f --tail=200 alloy

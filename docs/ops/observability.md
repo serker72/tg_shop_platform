@@ -161,14 +161,32 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
 - Healthcheck `master_bot`/`bot_worker`: `GET /health/live` на `OBSERVABILITY_HTTP_PORT`
   через `python -c urllib.request` (порт наружу не публикуется).
 
-> **Принятый риск: `docker.sock` в Alloy.** Сокет `/var/run/docker.sock` смонтирован в
-> контейнер `alloy` с `read_only: true`, но это ограничивает только файловую операцию над
-> сокетом, а не Docker API: через сокет доступны все вызовы (создание контейнеров,
-> монтирование `/` хоста и т. п.), то есть компрометация Alloy фактически даёт root-доступ
-> к хосту. Риск принят ради сбора логов контейнеров (`discovery.docker`,
-> `loki.source.docker`). **Follow-up:** поставить `docker-socket-proxy` (например,
-> `tecnativa/docker-socket-proxy`) с доступом только на чтение `containers`/`logs`
-> (`CONTAINERS=1`, `POST=0`, остальное запрещено) и направить Alloy на него по TCP.
+### Docker API через docker-socket-proxy
+
+`docker.sock` в Alloy **не монтируется**. Alloy (`discovery.docker`, `loki.source.docker`)
+ходит в Docker API по `DOCKER_HOST_URL` (по умолчанию `tcp://docker-socket-proxy:2375`) через
+сервис `docker-socket-proxy` (профиль `observability`, образ
+`tecnativa/docker-socket-proxy:v0.4.1@sha256:3400c429…`, переопределяется
+`DOCKER_SOCKET_PROXY_IMAGE`). Proxy (HAProxy) сам монтирует `/var/run/docker.sock` (`ro`),
+портов не публикует и доступен только из internal-сети `docker_api` (alloy + proxy, без выхода
+наружу). Healthcheck — `wget http://127.0.0.1:2375/version` (busybox в образе), Alloy ждёт
+`service_healthy`. Логи — общий якорь `x-logging`.
+
+Разрешено (только GET/HEAD, `POST=0`):
+
+| Переменная | Эндпоинты | Зачем |
+|---|---|---|
+| `CONTAINERS=1` | `/containers/json`, `/containers/{id}/json`, `/containers/{id}/logs` | discovery контейнеров и чтение их логов |
+| `NETWORKS=1` | `/networks` | `discovery.docker` вычисляет сетевые метки; без неё — 403 и `Unable to refresh target groups` (проверено) |
+| `EVENTS=1` | `/events` | отслеживание старта/остановки контейнеров |
+| `VERSION=1`, `PING=1` | `/version`, `/_ping` | согласование версии API клиентом Docker (`HEAD /_ping`, `GET /version` в логах proxy) и healthcheck |
+
+Всё остальное (`INFO`, `IMAGES`, `EXEC`, `POST`, `ALLOW_START/STOP/RESTARTS`, …) = 0 → 403.
+
+> **Остаточный риск.** Компрометация Alloy даёт чтение метаданных контейнеров (в т. ч.
+> переменных окружения из `/containers/{id}/json`), сетей и логов контейнеров, но не
+> управление хостом: создание/запуск/exec/удаление контейнеров отклоняются proxy (403).
+> Компрометация самого proxy по-прежнему равна доступу к `docker.sock`.
 
 ### Переменные
 
@@ -178,6 +196,8 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
 | `ALLOY_PORT_HOST` | UI Alloy на `127.0.0.1` (12345, test 32345) |
 | `ALLOY_HOST_LABEL` | метка `host` |
 | `ALLOY_SINGLE_HOST` | `1` — obs-стек на этом же хосте (см. ниже), `0` — прод |
+| `DOCKER_SOCKET_PROXY_IMAGE` | образ docker-socket-proxy (tag+digest) |
+| `DOCKER_HOST_URL` | адрес Docker API для Alloy (по умолчанию `tcp://docker-socket-proxy:2375`) |
 | `OBS_LOKI_PUSH_URL` | `http://<loki>:3100/loki/api/v1/push` |
 | `OBS_PROMETHEUS_REMOTE_WRITE_URL` | `http://<prometheus>:9090/api/v1/write` |
 | `POSTGRES_MONITORING_USER/PASSWORD` | read-only роль (`pg_monitor`) |

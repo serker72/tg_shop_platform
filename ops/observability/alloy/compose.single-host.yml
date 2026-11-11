@@ -9,6 +9,7 @@ services:
   alloy:
     networks:
       - default
+      - docker_api
       - obs
 
 networks:

@@ -223,6 +223,14 @@ services:
       POSTGRES_MONITORING_PASSWORD: ${POSTGRES_MONITORING_PASSWORD:-}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       OBSERVABILITY_HTTP_PORT: ${OBSERVABILITY_HTTP_PORT:-8080}
+      DOCKER_HOST_URL: ${DOCKER_HOST_URL:-tcp://docker-socket-proxy:2375}
+    # Docker API only via the read-only proxy (no docker.sock in this container).
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
+    networks:
+      - default
+      - docker_api
     volumes:
       - type: bind
         source: ./ops/observability/alloy/config.alloy
@@ -235,11 +243,6 @@ services:
       - type: bind
         source: ${ALLOY_DATA_DIR:?ALLOY_DATA_DIR не задан — см. .env.example, затем make init-dirs}
         target: /var/lib/alloy/data
-      # logs discovery (read-only socket)
-      - type: bind
-        source: /var/run/docker.sock
-        target: /var/run/docker.sock
-        read_only: true
       # node exporter: host proc/sys/rootfs
       - type: bind
         source: /proc
@@ -269,3 +272,65 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # Read-only Docker API for Alloy (discovery.docker, loki.source.docker). HAProxy in front of
+  # docker.sock: only GET to the allowed path groups below, everything else -> 403.
+  # Not published; reachable only from the internal network docker_api (alloy only).
+  docker-socket-proxy:
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:v0.4.1@sha256:3400c429c5f9e1b21d62130fb93b16e2e772d4fb7695bd52fc2b743800b9fe9e}
+    profiles: ["observability"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      # GET /containers/json, /containers/{id}/json, /containers/{id}/logs
+      CONTAINERS: 1
+      # GET /networks: discovery.docker computes network labels (403 without it, verified)
+      NETWORKS: 1
+      # GET /events
+      EVENTS: 1
+      # GET /_ping, /version: API version negotiation of the Docker client + healthcheck
+      PING: 1
+      VERSION: 1
+      INFO: 0
+      # everything except GET is denied (no create/start/exec/...)
+      POST: 0
+      ALLOW_START: 0
+      ALLOW_STOP: 0
+      ALLOW_RESTARTS: 0
+      AUTH: 0
+      BUILD: 0
+      COMMIT: 0
+      CONFIGS: 0
+      DISTRIBUTION: 0
+      EXEC: 0
+      GRPC: 0
+      IMAGES: 0
+      NODES: 0
+      PLUGINS: 0
+      SECRETS: 0
+      SERVICES: 0
+      SESSION: 0
+      SWARM: 0
+      SYSTEM: 0
+      TASKS: 0
+      VOLUMES: 0
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+    networks:
+      - docker_api
+    healthcheck:
+      # busybox wget is present in the image
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2375/version"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+networks:
+  default: {}
+  # proxy <-> alloy only; internal: no outbound traffic
+  docker_api:
+    internal: true
