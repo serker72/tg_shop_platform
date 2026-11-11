@@ -1,16 +1,29 @@
 """In-process metrics of the logging pipeline.
 
 ``logs_dropped_total`` counts click-log records that were lost (written to ``stderr`` only).
-Export to Prometheus (``logs_dropped_total{reason=...}``) is planned for stage 2:
-``prometheus_client`` is not a dependency yet, the counter keeps the same shape (total +
-per-reason values) so the exporter can read it without changes in the callers.
+It is exported to Prometheus as ``logs_dropped_total{reason=...}`` by
+:class:`~app.core.observability.metrics.LogsDroppedCollector` (reads :attr:`by_reason`
+on every scrape); DI shares one instance between ``LogBuffer`` and ``AppMetrics``.
 """
 
 from __future__ import annotations
 
 import threading
 
-__all__ = ["LogsDroppedCounter", "logs_dropped_total"]
+__all__ = ["DROP_REASONS", "LogsDroppedCounter", "logs_dropped_total"]
+
+#: Every ``reason`` used by :class:`~app.modules.logging.buffer.LogBuffer`. The exporter
+#: emits them with value ``0`` before the first drop, so ``logs_dropped_total{reason}``
+#: exists from the process start and ``increase(...)`` sees the first increment.
+DROP_REASONS: tuple[str, ...] = (
+    "db_error",
+    "db_rejected",
+    "file_error",
+    "internal_error",
+    "not_running",
+    "queue_full",
+    "shutdown_timeout",
+)
 
 
 class LogsDroppedCounter:

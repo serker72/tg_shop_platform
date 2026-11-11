@@ -1,5 +1,25 @@
 name: ${PROJECT_NAME:-tg_shop_platform}
 
+# Docker log rotation for every service (json-file is also what Alloy reads).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${DOCKER_LOG_MAX_SIZE:-20m}
+    max-file: "${DOCKER_LOG_MAX_FILE:-5}"
+
+# Liveness of bots: GET /health/live on OBSERVABILITY_HTTP_PORT inside the container
+# (the image has no curl/wget; the port is not published).
+x-bot-healthcheck: &bot-healthcheck
+  test:
+    - "CMD"
+    - "python"
+    - "-c"
+    - "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('OBSERVABILITY_HTTP_PORT', '8080') + '/health/live', timeout=3)"
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
 # One image for db_update/master_bot/bot_worker (same build + image name).
 x-app: &app
   build:
@@ -10,12 +30,14 @@ x-app: &app
   image: ${PROJECT_NAME:-tg_shop_platform}-app
   env_file: ${APP_ENV_FILE:-.env}
   restart: unless-stopped
+  logging: *logging
 
 services:
   postgres:
     build: ./ops/postgres
     image: ${PROJECT_NAME:-tg_shop_platform}-postgres
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER не задан}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD не задан}
@@ -46,6 +68,7 @@ services:
   redis:
     image: redis:8.10.3-alpine
     restart: unless-stopped
+    logging: *logging
     # Password is passed via env and written to a config file, so it is not visible
     # in `docker inspect` Cmd/Args or `ps`. REDISCLI_AUTH is also used by the healthcheck.
     # `\` and `"` are escaped for the redis config quoted string. The official
@@ -75,8 +98,11 @@ services:
       start_period: 5s
 
   rabbitmq:
+    # rabbitmq_prometheus is enabled in this image (metrics on :15692, scraped by Alloy;
+    # the port is not published).
     image: rabbitmq:4.3-management
     restart: unless-stopped
+    logging: *logging
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER не задан}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD не задан}
@@ -101,6 +127,7 @@ services:
     # The image contains curl (used by the healthcheck) and mc.
     image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
     restart: unless-stopped
+    logging: *logging
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY не задан}
@@ -136,6 +163,7 @@ services:
   master_bot:
     <<: *app
     command: ["python", "-m", "app.entrypoints.master_bot"]
+    healthcheck: *bot-healthcheck
     depends_on:
       db_update:
         condition: service_completed_successfully
@@ -153,6 +181,7 @@ services:
   bot_worker:
     <<: *app
     command: ["python", "-m", "app.entrypoints.bot_worker"]
+    healthcheck: *bot-healthcheck
     depends_on:
       db_update:
         condition: service_completed_successfully
@@ -166,3 +195,77 @@ services:
       - type: bind
         source: ${LOGS_DATA_DIR:?LOGS_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
         target: /app/logs
+
+  # Collection agent (Stage 2): Docker logs -> Loki, exporters/app metrics -> Prometheus
+  # remote write. Starts only with the `observability` profile (make agent-up).
+  # Single host: make agent-up with ALLOY_SINGLE_HOST=1 adds
+  # ops/observability/alloy/compose.single-host.yml (joins the obs stack network).
+  alloy:
+    image: ${ALLOY_IMAGE:-grafana/alloy:v1.11.3@sha256:8c7256f412feb9f5f48f9f6f9394dc97ca887f63dea9304f347970ecc1787669}
+    profiles: ["observability"]
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--storage.path=/var/lib/alloy/data"
+      - "--disable-reporting"
+      - "/etc/alloy/config.alloy"
+    # Only the variables Alloy needs (not the whole .env).
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:-tg_shop_platform}
+      PROJECT_ENVIRONMENT: ${PROJECT_ENVIRONMENT:-loc}
+      ALLOY_HOST_LABEL: ${ALLOY_HOST_LABEL:-}
+      OBS_LOKI_PUSH_URL: ${OBS_LOKI_PUSH_URL:-}
+      OBS_PROMETHEUS_REMOTE_WRITE_URL: ${OBS_PROMETHEUS_REMOTE_WRITE_URL:-}
+      POSTGRES_DB: ${POSTGRES_DB:-}
+      POSTGRES_MONITORING_USER: ${POSTGRES_MONITORING_USER:-monitoring}
+      POSTGRES_MONITORING_PASSWORD: ${POSTGRES_MONITORING_PASSWORD:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      OBSERVABILITY_HTTP_PORT: ${OBSERVABILITY_HTTP_PORT:-8080}
+    volumes:
+      - type: bind
+        source: ./ops/observability/alloy/config.alloy
+        target: /etc/alloy/config.alloy
+        read_only: true
+      - type: bind
+        source: ./ops/observability/alloy/postgres_queries.yml
+        target: /etc/alloy/postgres_queries.yml
+        read_only: true
+      - type: bind
+        source: ${ALLOY_DATA_DIR:?ALLOY_DATA_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /var/lib/alloy/data
+      # logs discovery (read-only socket)
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      # node exporter: host proc/sys/rootfs
+      - type: bind
+        source: /proc
+        target: /host/proc
+        read_only: true
+      - type: bind
+        source: /sys
+        target: /host/sys
+        read_only: true
+      - type: bind
+        source: /
+        target: /host/root
+        read_only: true
+        bind:
+          propagation: rslave
+    ports:
+      # Alloy UI / debug (127.0.0.1 only)
+      - "127.0.0.1:${ALLOY_PORT_HOST:-12345}:12345"
+    healthcheck:
+      # the image has no curl/wget: plain HTTP over bash /dev/tcp
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - "exec 3<>/dev/tcp/127.0.0.1/12345 && printf 'GET /-/ready HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

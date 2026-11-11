@@ -12,9 +12,17 @@
 # Images are pinned by tag + digest and can be overridden with *_IMAGE.
 name: ${PROJECT_NAME:-tg_shop_platform}_obs
 
+# Docker log rotation for every service.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${DOCKER_LOG_MAX_SIZE:-20m}
+    max-file: "${DOCKER_LOG_MAX_FILE:-5}"
+
 x-glitchtip: &glitchtip
   image: ${GLITCHTIP_IMAGE:-glitchtip/glitchtip:v5.1@sha256:805f4fb7b886653b944caff1ae06a95c8724b5b3ddc21917e80e18e6c03019ab}
   restart: unless-stopped
+  logging: *logging
   environment: &glitchtip-env
     # Passwords are interpolated into URLs: use URL-safe values (e.g. `openssl rand -hex 24`).
     DATABASE_URL: postgres://${OBS_POSTGRES_USER:-glitchtip}:${OBS_POSTGRES_PASSWORD:?OBS_POSTGRES_PASSWORD не задан}@obs-postgres:5432/${OBS_POSTGRES_DB:-glitchtip}
@@ -35,6 +43,7 @@ services:
   loki:
     image: ${LOKI_IMAGE:-grafana/loki:3.5.5@sha256:31628519045e7f28692a7ae73b4a3fd293dccb425585ed5d16ceea3b5c9592e6}
     restart: unless-stopped
+    logging: *logging
     user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
     command: ["-config.file=/etc/loki/config.yml"]
     volumes:
@@ -46,7 +55,8 @@ services:
         source: ${OBS_LOKI_DATA_DIR:?OBS_LOKI_DATA_DIR не задан — см. .env.example, затем make init-dirs}
         target: /loki
     ports:
-      - "127.0.0.1:${LOKI_PORT_HOST:-3100}:3100"
+      # Ingest endpoint for Alloy of VPS 1: OBS_INGEST_BIND_ADDRESS = VPN IP of VPS 2 in prod.
+      - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT_HOST:-3100}:3100"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
       interval: 10s
@@ -57,12 +67,15 @@ services:
   prometheus:
     image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.6.0@sha256:76947e7ef22f8a698fc638f706685909be425dbe09bd7a2cd7aca849f79b5f64}
     restart: unless-stopped
+    logging: *logging
     user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}"
       - "--web.enable-lifecycle"
+      # metrics from Alloy (VPS 1) arrive via /api/v1/write
+      - "--web.enable-remote-write-receiver"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -74,7 +87,8 @@ services:
         source: ${OBS_PROMETHEUS_DATA_DIR:?OBS_PROMETHEUS_DATA_DIR не задан — см. .env.example, затем make init-dirs}
         target: /prometheus
     ports:
-      - "127.0.0.1:${PROMETHEUS_PORT_HOST:-9090}:9090"
+      # Ingest endpoint for Alloy of VPS 1 (see Loki above).
+      - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT_HOST:-9090}:9090"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
       interval: 10s
@@ -85,6 +99,7 @@ services:
   alertmanager:
     image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.28.1@sha256:27c475db5fb156cab31d5c18a4251ac7ed567746a2483ff264516437a39b15ba}
     restart: unless-stopped
+    logging: *logging
     user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
     # Alertmanager does not expand env in its config: render the template into /tmp.
     # The bot token goes to a 0600 file (bot_token_file), not into the config or argv.
@@ -127,6 +142,7 @@ services:
   grafana:
     image: ${GRAFANA_IMAGE:-grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7}
     restart: unless-stopped
+    logging: *logging
     user: "${APP_UID:?APP_UID не задан}:${APP_GID:?APP_GID не задан}"
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
@@ -165,6 +181,7 @@ services:
   obs-postgres:
     image: ${OBS_POSTGRES_IMAGE:-postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac}
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: ${OBS_POSTGRES_USER:-glitchtip}
       POSTGRES_PASSWORD: ${OBS_POSTGRES_PASSWORD:?OBS_POSTGRES_PASSWORD не задан}
@@ -183,6 +200,7 @@ services:
   obs-redis:
     image: ${OBS_REDIS_IMAGE:-valkey/valkey:8.1-alpine@sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a}
     restart: unless-stopped
+    logging: *logging
     # Same approach as redis in docker-compose.yml: password goes to a config file, not argv.
     command:
       - "sh"
@@ -248,6 +266,7 @@ services:
   caddy:
     image: ${CADDY_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}
     restart: unless-stopped
+    logging: *logging
     environment:
       GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:?GRAFANA_DOMAIN не задан}
       GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:?GLITCHTIP_DOMAIN не задан}

@@ -1,0 +1,209 @@
+# promtool unit tests for alert rules:
+#   docker run --rm --entrypoint promtool -v "$PWD/ops/observability/prometheus:/p:ro" -w /p/tests \
+#     prom/prometheus:v3.6.0 test rules rules_test.yml
+rule_files:
+  - ../rules/platform.yml
+
+evaluation_interval: 15s
+
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'up{job="redis", instance="redis:6379", env="loc", host="vps1"}'
+        values: "0x20"
+      - series: 'up{job="node", instance="n1", env="loc", host="vps1"}'
+        values: "1x20"
+      - series: 'redis_up{job="redis", instance="redis:6379", env="loc", host="vps1"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: redis, instance: "redis:6379", env: loc, host: vps1}
+            exp_annotations:
+              summary: "Target redis/redis:6379 is down"
+              description: "Alloy cannot scrape redis target redis:6379 (env=loc, host=vps1) for more than 2 minutes."
+      - eval_time: 3m
+        alertname: RedisDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: redis, instance: "redis:6379", env: loc, host: vps1}
+            exp_annotations:
+              summary: "Redis is unreachable (redis:6379)"
+              description: "redis exporter reports redis_up == 0 for 1 minute."
+      - eval_time: 3m
+        alertname: AgentMetricsAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'logs_dropped_total{service="bot_worker", reason="db_error", env="loc", host="vps1"}'
+        values: "0 0 0 5 5 5 5 5 5 5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LogsDroppedIncreasing
+        exp_alerts:
+          - exp_labels: {severity: warning, service: bot_worker, reason: db_error, env: loc, host: vps1}
+            exp_annotations:
+              summary: "bot_worker drops log records (reason=db_error)"
+              description: "logs_dropped_total grew by 5 in 5 minutes (service=bot_worker, reason=db_error)."
+      - eval_time: 9m
+        alertname: LogsDroppedIncreasing
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: LogsDroppedHigh
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{job="postgres", instance="pg"}'
+        values: "1x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PostgresStatActivityAbsent
+        exp_alerts:
+          - exp_labels: {severity: warning, job: postgres}
+            exp_annotations:
+              summary: "pg_stat_activity metrics are missing while PostgreSQL is up"
+              description: "pg_up == 1 but pg_stat_activity_count is absent for 10 minutes: the monitoring role lost pg_monitor or the stat_activity collector is failing."
+      - eval_time: 12m
+        alertname: AgentMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: critical, job: node}
+            exp_annotations:
+              summary: "No metrics from Alloy agent (job=node absent)"
+              description: 'Prometheus receives no up{job="node"} samples for 5 minutes: Alloy agent on VPS 1 is stopped or remote write to Prometheus is broken. All other agent alerts are blind.'
+
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{job="node", mountpoint="/", fstype="ext4", device="d", host="vps1"}'
+        values: "4x15"
+      - series: 'node_filesystem_size_bytes{job="node", mountpoint="/", fstype="ext4", device="d", host="vps1"}'
+        values: "100x15"
+      - series: 'node_filesystem_avail_bytes{job="node", mountpoint="/run", fstype="tmpfs", device="t", host="vps1"}'
+        values: "1x15"
+      - series: 'node_filesystem_size_bytes{job="node", mountpoint="/run", fstype="tmpfs", device="t", host="vps1"}'
+        values: "100x15"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: DiskSpaceLow
+        exp_alerts:
+          - exp_labels: {severity: warning, job: node, mountpoint: "/", fstype: ext4, device: d, host: vps1}
+            exp_annotations:
+              summary: "Low disk space on vps1:/"
+              description: "Only 4% free on / (d)."
+      - eval_time: 11m
+        alertname: DiskSpaceCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, job: node, mountpoint: "/", fstype: ext4, device: d, host: vps1}
+            exp_annotations:
+              summary: "Disk almost full on vps1:/"
+              description: "Only 4% free on / (d); PostgreSQL/MinIO/log writes will start failing."
+
+  # pg_partman: BGW stopped -> maintenance age grows from 1h past the threshold (8100 s)
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{job="postgres", env="loc", host="vps1"}'
+        values: "1x60"
+      - series: 'pg_partman_maintenance_age_seconds{job="postgres", env="loc", host="vps1", parent_table="public.audit_logs"}'
+        values: "7200+60x60"
+      - series: 'pg_partman_maintenance_age_seconds{job="postgres", env="loc", host="vps1", parent_table="public.user_activity"}'
+        values: "60x60"
+      - series: 'pg_partman_partitions_future_count{job="postgres", env="loc", host="vps1", parent_table="public.audit_logs"}'
+        values: "3x60"
+      - series: 'pg_partman_partitions_horizon_seconds{job="postgres", env="loc", host="vps1", parent_table="public.audit_logs"}'
+        values: "9000000x60"
+      - series: 'pg_partman_partitions_future_count{job="postgres", env="loc", host="vps1", parent_table="public.user_activity"}'
+        values: "1x60"
+      - series: 'pg_partman_partitions_horizon_seconds{job="postgres", env="loc", host="vps1", parent_table="public.user_activity"}'
+        values: "2000000x60"
+    alert_rule_test:
+      # threshold crossed at 15m (7200 + 15*60 = 8100), pending until 25m
+      - eval_time: 20m
+        alertname: PgPartmanBgwDown
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: PgPartmanBgwDown
+        exp_alerts:
+          - exp_labels: {severity: critical, env: loc, host: vps1, parent_table: public.audit_logs}
+            exp_annotations:
+              summary: "pg_partman background worker does not run maintenance (public.audit_logs)"
+              description: "run_maintenance() for public.audit_logs last ran 2h 27m 0s ago while PostgreSQL is up: pg_partman_bgw is dead or misconfigured (shared_preload_libraries, pg_partman_bgw.dbname/role). New partitions will not be created and rows will go to the _default partition."
+      - eval_time: 27m
+        alertname: PgPartmanMetricsAbsent
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PgPartmanFuturePartitionsMissing
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: PgPartmanFuturePartitionsMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, job: postgres, env: loc, host: vps1, parent_table: public.user_activity}
+            exp_annotations:
+              summary: "Not enough future partitions for public.user_activity"
+              description: "public.user_activity has fewer than 2 future partitions or its last partition ends in less than 30 days (premake = 3 monthly partitions expected). Check pg_partman_bgw and partman.run_maintenance(); rows will otherwise go to _default."
+
+  # PostgreSQL down -> BGW alert is suppressed (pg_up == 0), only PostgresDown fires
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{job="postgres", env="loc", host="vps1"}'
+        values: "0x30"
+      - series: 'pg_partman_maintenance_age_seconds{job="postgres", env="loc", host="vps1", parent_table="public.audit_logs"}'
+        values: "99999x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PgPartmanBgwDown
+        exp_alerts: []
+
+  # PostgresDown: pg_up == 0 for 1m (pending at 30s, firing at 2m)
+  - interval: 15s
+    input_series:
+      - series: 'pg_up{job="postgres", instance="postgres:5432", env="loc", host="vps1"}'
+        values: "1 1 0x20"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PostgresDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PostgresDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: postgres, instance: "postgres:5432", env: loc, host: vps1}
+            exp_annotations:
+              summary: "PostgreSQL is unreachable (postgres:5432)"
+              description: "postgres exporter reports pg_up == 0 for 1 minute: the database refuses connections of the monitoring role or is down."
+
+  # RabbitmqDown: rabbitmq scrape target down for 1m; healthy target -> no alert
+  - interval: 15s
+    input_series:
+      - series: 'up{job="rabbitmq", instance="rabbitmq:15692", env="loc", host="vps1"}'
+        values: "1 1 0x20"
+      - series: 'up{job="rabbitmq", instance="rabbitmq2:15692", env="loc", host="vps1"}'
+        values: "1x22"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RabbitmqDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RabbitmqDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: rabbitmq, instance: "rabbitmq:15692", env: loc, host: vps1}
+            exp_annotations:
+              summary: "RabbitMQ metrics endpoint is down (rabbitmq:15692)"
+              description: "RabbitMQ Prometheus plugin endpoint (port 15692) does not answer for 1 minute: the broker is down or the plugin is disabled."
+
+  # metrics missing while PostgreSQL is up
+  - interval: 1m
+    input_series:
+      - series: 'pg_up{job="postgres", env="loc", host="vps1"}'
+        values: "1x30"
+      - series: 'pg_stat_activity_count{job="postgres", env="loc", host="vps1"}'
+        values: "1x30"
+      - series: 'up{job="node", env="loc", host="vps1"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PgPartmanMetricsAbsent
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "pg_partman metrics are missing while PostgreSQL is up"
+              description: "pg_partman_maintenance_age_seconds is absent for 15 minutes: Alloy custom queries fail (monitoring role lacks USAGE on schema partman / SELECT on partman.part_config) or pg_partman is not configured. PgPartmanBgwDown is blind."

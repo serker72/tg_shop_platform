@@ -40,6 +40,7 @@ async def run_service(name: str) -> None:
     from app.core.observability.metrics import AppMetrics
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
+    from app.modules.logging.ioc import LoggingProvider
     from app.shared_kernel.infrastructure.providers import (
         DatabaseProvider,
         RedisProvider,
@@ -52,6 +53,7 @@ async def run_service(name: str) -> None:
     container = make_async_container(
         DatabaseProvider(),
         RedisProvider(),
+        LoggingProvider(),
         ObservabilityProvider(),
         context={Settings: settings},
     )

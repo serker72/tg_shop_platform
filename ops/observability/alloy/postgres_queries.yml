@@ -1,0 +1,54 @@
+# Custom queries of prometheus.exporter.postgres (custom_queries_config_path, postgres_exporter
+# queries.yaml format). Metric name = <top-level key>_<column>. Runs as the read-only
+# `monitoring` role: needs USAGE on schema partman + SELECT on partman.part_config
+# (granted by ops/scripts/ensure_monitoring_role.py); pg_class/pg_inherits are public.
+#
+# Why maintenance_last_run and not pg_stat_activity: the pg_partman 5.x background worker has
+# no database connection between runs and is NOT listed in pg_stat_activity (checked on
+# PostgreSQL 17 + pg_partman 5.5.0), so its health is measured by its effect — run_maintenance()
+# updates part_config.maintenance_last_run every pg_partman_bgw.interval (3600 s).
+
+pg_partman_maintenance:
+  query: |
+    SELECT parent_table,
+           COALESCE(EXTRACT(EPOCH FROM now() - maintenance_last_run), 1e9)::float8 AS age_seconds,
+           premake::float8 AS premake
+    FROM partman.part_config
+  metrics:
+    - parent_table:
+        usage: "LABEL"
+        description: "Partitioned parent table (schema.table)"
+    - age_seconds:
+        usage: "GAUGE"
+        description: "Seconds since the last pg_partman run_maintenance() for this table (1e9 = never)"
+    - premake:
+        usage: "GAUGE"
+        description: "Configured number of partitions to create ahead (part_config.premake)"
+
+pg_partman_partitions:
+  query: |
+    WITH bounds AS (
+      SELECT pc.parent_table,
+             substring(pg_get_expr(c.relpartbound, c.oid) FROM 'FROM \(''([^'']+)''\)')::timestamptz AS lo,
+             substring(pg_get_expr(c.relpartbound, c.oid) FROM 'TO \(''([^'']+)''\)')::timestamptz AS hi
+      FROM partman.part_config pc
+      JOIN pg_inherits i ON i.inhparent = pc.parent_table::regclass
+      JOIN pg_class c ON c.oid = i.inhrelid
+      WHERE pg_get_expr(c.relpartbound, c.oid) <> 'DEFAULT'
+    )
+    SELECT pc.parent_table,
+           count(b.lo) FILTER (WHERE b.lo > now())::float8 AS future_count,
+           COALESCE(EXTRACT(EPOCH FROM max(b.hi) - now()), 0)::float8 AS horizon_seconds
+    FROM partman.part_config pc
+    LEFT JOIN bounds b ON b.parent_table = pc.parent_table
+    GROUP BY pc.parent_table
+  metrics:
+    - parent_table:
+        usage: "LABEL"
+        description: "Partitioned parent table (schema.table)"
+    - future_count:
+        usage: "GAUGE"
+        description: "Number of partitions whose lower bound is in the future"
+    - horizon_seconds:
+        usage: "GAUGE"
+        description: "Seconds from now to the upper bound of the last partition (0 = none)"

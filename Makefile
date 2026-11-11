@@ -14,10 +14,19 @@ OBS_DIRS := OBS_POSTGRES_DATA_DIR OBS_REDIS_DATA_DIR OBS_GRAFANA_DATA_DIR OBS_PR
 # Dirs of services running as APP_UID:APP_GID (`user:` in docker-compose.obs.yml): must stay writable
 OBS_APP_UID_DIRS := OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR OBS_LOKI_DATA_DIR \
 	OBS_ALERTMANAGER_DATA_DIR
+# Collection agent (service alloy, profile observability in docker-compose.yml).
+# ALLOY_SINGLE_HOST=1 in ENV_FILE adds the override joining the obs stack network.
+ALLOY_SINGLE_HOST_FILE := ops/observability/alloy/compose.single-host.yml
+define agent_compose
+$(call load_env,$(ENV_FILE)); \
+files="-f docker-compose.yml"; \
+if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ]; then files="$$files -f $(ALLOY_SINGLE_HOST_FILE)"; fi; \
+$(COMPOSE) $$files --env-file $(ENV_FILE) --profile observability
+endef
 
 .PHONY: help install init-dirs env-test up down migrate lint format format-check check test \
 	test-integration test-integration-down clean archive-audit \
-	obs-config obs-up obs-down obs-ps obs-logs
+	obs-config obs-up obs-down obs-ps obs-logs agent-config agent-up agent-down agent-logs
 
 # Loads $(1) into the recipe shell (bash expands ${PROJECT_DATA_DIR}-style references).
 # Limitation (same as docker compose interpolation): values must not contain unescaped `$`,
@@ -73,6 +82,10 @@ init-dirs: ## Create bind-mount data directories from ENV_FILE
 	for sub in users bots system system/tmp; do \
 		mkdir -p "$$LOGS_DATA_DIR/$$sub" 2>/dev/null || deny "$$LOGS_DATA_DIR"; \
 	done; \
+	if [ -n "$${ALLOY_DATA_DIR:-}" ]; then \
+		mkdir -p "$$ALLOY_DATA_DIR" 2>/dev/null || deny "$$ALLOY_DATA_DIR"; \
+		echo "OK ALLOY_DATA_DIR=$$ALLOY_DATA_DIR"; \
+	else echo "SKIP ALLOY_DATA_DIR (empty; needed only for make agent-up)"; fi; \
 	for var in $(OBS_DIRS); do \
 		if [ -z "$${!var:-}" ]; then echo "SKIP $$var (empty; needed only for make obs-up)"; continue; fi; \
 		mkdir -p "$${!var}" 2>/dev/null || deny "$${!var}"; \
@@ -150,6 +163,18 @@ obs-ps: ## Show observability stack services
 
 obs-logs: ## Follow observability logs (SERVICE=grafana to filter)
 	$(OBS_COMPOSE) logs -f --tail=200 $(SERVICE)
+
+agent-config: ## Validate main compose with the observability profile (Alloy)
+	@$(agent_compose) config --quiet && echo "docker-compose.yml + profile observability OK ($(ENV_FILE))"
+
+agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
+	@$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
+
+agent-down: ## Stop only Alloy (the main stack keeps running)
+	@$(agent_compose) rm -s -f alloy
+
+agent-logs: ## Follow Alloy logs
+	@$(agent_compose) logs -f --tail=200 alloy
 
 # --tmp-dir must be a path *inside* the container: the script runs in ``db_update``, where
 # ``LOGS_DATA_DIR`` (host path) is mounted at ``${LOGS_DIR}`` (``/app/logs``). Temporary

@@ -36,7 +36,7 @@ from app.core.observability.sentry import (
     scrub,
 )
 from app.core.observability.tracing import TRACE_ID_HEADER, AiogramTraceIdMiddleware
-from app.modules.logging.metrics import LogsDroppedCounter
+from app.modules.logging.metrics import DROP_REASONS, LogsDroppedCounter
 
 
 def test_logs_dropped_exported() -> None:
@@ -52,6 +52,47 @@ def test_logs_dropped_exported() -> None:
         'logs_dropped_total{reason="queue_full"} 5.0' in render_metrics(metrics.registry).decode()
     )
     assert counter.value == 6  # the counter API is unchanged
+
+
+def test_logs_dropped_known_reasons_zero() -> None:
+    text = render_metrics(build_metrics(LogsDroppedCounter()).registry).decode()
+    assert "# TYPE logs_dropped_total counter" in text
+    for reason in DROP_REASONS:
+        assert f'logs_dropped_total{{reason="{reason}"}} 0.0' in text
+
+
+async def test_di_shares_dropped_counter_between_buffer_and_metrics(tmp_path: Any) -> None:
+    from uuid import uuid4
+
+    from dishka import make_async_container
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.core.observability.metrics import AppMetrics
+    from app.core.observability.providers import ObservabilityProvider
+    from app.modules.logging.buffer import LogBuffer
+    from app.modules.logging.events import ActivityEvent
+    from app.modules.logging.files import DailyFileWriter
+    from app.modules.logging.ioc import LoggingProvider
+    from app.modules.logging.metrics import logs_dropped_total
+
+    # Same wiring as ``run_service``; only the two APP factories below are resolved.
+    container = make_async_container(
+        LoggingProvider(), ObservabilityProvider(), skip_validation=True
+    )
+    counter = await container.get(LogsDroppedCounter)
+    try:
+        metrics = await container.get(AppMetrics)
+        assert counter is logs_dropped_total
+        assert metrics.logs_dropped is counter
+        counter.reset()
+        # LogBuffer fed by the DI counter, never started: log() drops with not_running.
+        buffer = LogBuffer(async_sessionmaker(), DailyFileWriter(tmp_path), counter=counter)
+        buffer.log(ActivityEvent(bot_id=uuid4(), action_type="CLICK"))
+        text = render_metrics(metrics.registry).decode()
+        assert 'logs_dropped_total{reason="not_running"} 1.0' in text
+    finally:
+        counter.reset()
+        await container.close()
 
 
 def test_skeleton_metrics_registered() -> None:

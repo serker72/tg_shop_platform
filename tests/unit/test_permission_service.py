@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 from dishka import Provider, Scope, make_async_container, provide
+from pydantic import SecretStr
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -212,7 +213,11 @@ class _FakeSessionProvider(Provider):
 
 
 async def test_container_wiring() -> None:
-    settings = Settings(_env_file=None)
+    secret = "wiring-secret-Zq7"
+    base = Settings(_env_file=None)
+    settings = base.model_copy(
+        update={"redis": base.redis.model_copy(update={"password": SecretStr(secret)})}
+    )
     container = make_async_container(
         RedisProvider(), IamProvider(), _FakeSessionProvider(), context={Settings: settings}
     )
@@ -220,7 +225,9 @@ async def test_container_wiring() -> None:
         redis = await container.get(Redis)
         cache = await container.get(PermissionCache)
         assert cache is await container.get(PermissionCache)
-        assert "password" not in repr(redis).lower()
+        # redis-py >= 6 prints "password=<redacted>": check that the secret itself never leaks
+        assert secret not in repr(redis)
+        assert redis.connection_pool.connection_kwargs["password"] == secret
         async with container() as request:
             service = await request.get(PermissionService)
             assert isinstance(service, PermissionService)

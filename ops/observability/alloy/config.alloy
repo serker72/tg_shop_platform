@@ -1,0 +1,184 @@
+// Grafana Alloy — collection agent of VPS 1 (docker-compose.yml, profile `observability`).
+// Logs:    Docker JSON logs of the compose project -> loki.write (OBS_LOKI_PUSH_URL).
+// Metrics: node / postgres / redis exporters + RabbitMQ (rabbitmq_prometheus, :15692) +
+//          app (/metrics of master_bot, bot_worker) -> remote_write (OBS_PROMETHEUS_REMOTE_WRITE_URL).
+// Common labels: env (PROJECT_ENVIRONMENT), host (ALLOY_HOST_LABEL, default: container hostname).
+// Secrets come only from the container environment (sys.env), never from this file.
+
+
+// ---------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------
+discovery.docker "project" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+
+  // only containers of this compose project (main stack of VPS 1)
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=" + sys.env("PROJECT_NAME")]
+  }
+}
+
+discovery.relabel "docker_logs" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+}
+
+loki.source.docker "project" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.docker.project.targets
+  relabel_rules    = discovery.relabel.docker_logs.rules
+  refresh_interval = "15s"
+  forward_to       = [loki.process.json.receiver]
+}
+
+loki.process "json" {
+  // Non-JSON lines (third-party services) pass through unchanged.
+  stage.json {
+    expressions = {
+      level    = "level",
+      logger   = "logger",
+      trace_id = "trace_id",
+    }
+  }
+
+  // low-cardinality labels only
+  stage.labels {
+    values = {
+      level  = "",
+      logger = "",
+    }
+  }
+
+  // trace_id is high-cardinality: structured metadata, not a label
+  stage.structured_metadata {
+    values = {
+      trace_id = "",
+    }
+  }
+
+  forward_to = [loki.write.obs.receiver]
+}
+
+loki.write "obs" {
+  endpoint {
+    url = sys.env("OBS_LOKI_PUSH_URL")
+  }
+
+  external_labels = {
+    env  = coalesce(sys.env("PROJECT_ENVIRONMENT"), "unknown"),
+    host = coalesce(sys.env("ALLOY_HOST_LABEL"), constants.hostname),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics: exporters
+// ---------------------------------------------------------------------------
+prometheus.exporter.unix "node" {
+  // host filesystems are bind-mounted read-only (see docker-compose.yml, service alloy)
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+  rootfs_path = "/host/root"
+}
+
+prometheus.exporter.postgres "main" {
+  // read-only role, member of pg_monitor (ops/scripts/ensure_monitoring_role.py)
+  data_source_names = [
+    "postgresql://" + sys.env("POSTGRES_MONITORING_USER") + ":" + sys.env("POSTGRES_MONITORING_PASSWORD") +
+    "@" + coalesce(sys.env("POSTGRES_HOST"), "postgres") + ":" + coalesce(sys.env("POSTGRES_PORT"), "5432") +
+    "/" + sys.env("POSTGRES_DB") + "?sslmode=disable",
+  ]
+  // pg_partman_maintenance_* / pg_partman_partitions_* (BGW health, future partitions)
+  custom_queries_config_path = "/etc/alloy/postgres_queries.yml"
+}
+
+prometheus.exporter.redis "main" {
+  redis_addr     = coalesce(sys.env("REDIS_HOST"), "redis") + ":" + coalesce(sys.env("REDIS_PORT"), "6379")
+  redis_password = sys.env("REDIS_PASSWORD")
+}
+
+// Exporter targets carry job="integrations/..."; rename to short job names.
+discovery.relabel "node" {
+  targets = prometheus.exporter.unix.node.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "node"
+  }
+}
+
+discovery.relabel "postgres" {
+  targets = prometheus.exporter.postgres.main.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "postgres"
+  }
+}
+
+discovery.relabel "redis" {
+  targets = prometheus.exporter.redis.main.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "redis"
+  }
+}
+
+prometheus.scrape "exporters" {
+  targets = array.concat(
+    discovery.relabel.node.output,
+    discovery.relabel.postgres.output,
+    discovery.relabel.redis.output,
+  )
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.obs.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// Metrics: RabbitMQ (built-in rabbitmq_prometheus plugin) and the application
+// ---------------------------------------------------------------------------
+prometheus.scrape "rabbitmq" {
+  job_name        = "rabbitmq"
+  targets         = [{"__address__" = coalesce(sys.env("RABBITMQ_HOST"), "rabbitmq") + ":15692"}]
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.obs.receiver]
+}
+
+prometheus.scrape "app" {
+  job_name = "app"
+  targets  = [
+    {"__address__" = "master_bot:" + coalesce(sys.env("OBSERVABILITY_HTTP_PORT"), "8080"), "service" = "master_bot"},
+    {"__address__" = "bot_worker:" + coalesce(sys.env("OBSERVABILITY_HTTP_PORT"), "8080"), "service" = "bot_worker"},
+  ]
+  metrics_path    = "/metrics"
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.obs.receiver]
+}
+
+prometheus.remote_write "obs" {
+  endpoint {
+    url = sys.env("OBS_PROMETHEUS_REMOTE_WRITE_URL")
+  }
+
+  external_labels = {
+    env  = coalesce(sys.env("PROJECT_ENVIRONMENT"), "unknown"),
+    host = coalesce(sys.env("ALLOY_HOST_LABEL"), constants.hostname),
+  }
+}

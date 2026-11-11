@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.core.config import Settings
 from app.core.observability.health import HealthChecker, HeartbeatRegistry, build_health_checker
 from app.core.observability.metrics import AppMetrics, build_metrics
+from app.modules.logging.metrics import LogsDroppedCounter
 from app.shared_kernel.domain.storage import StorageService
 from app.shared_kernel.infrastructure.storage.minio import (
     MinIOStorage,
@@ -50,13 +51,17 @@ def build_probe_storage_client(settings: Settings) -> Any:
 
 
 class ObservabilityProvider(Provider):
-    """``AppMetrics``, ``HeartbeatRegistry``, probe storage and ``HealthChecker`` (APP)."""
+    """``AppMetrics``, ``HeartbeatRegistry``, probe storage and ``HealthChecker`` (APP).
+
+    Needs ``LogsDroppedCounter`` (``LoggingProvider``): the same instance feeds
+    ``LogBuffer`` and the ``logs_dropped_total`` series of ``/metrics``.
+    """
 
     scope = Scope.APP
 
     @provide
-    def provide_metrics(self) -> AppMetrics:
-        return build_metrics()
+    def provide_metrics(self, dropped: LogsDroppedCounter) -> AppMetrics:
+        return build_metrics(dropped)
 
     @provide
     def provide_heartbeats(self) -> HeartbeatRegistry:

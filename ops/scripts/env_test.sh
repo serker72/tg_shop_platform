@@ -72,11 +72,13 @@ BEGIN {
     dd["OBS_GRAFANA_DATA_DIR"] = "obs/grafana"; dd["OBS_PROMETHEUS_DATA_DIR"] = "obs/prometheus"
     dd["OBS_LOKI_DATA_DIR"] = "obs/loki"; dd["OBS_ALERTMANAGER_DATA_DIR"] = "obs/alertmanager"
     dd["OBS_CADDY_DATA_DIR"] = "obs/caddy"
+    dd["ALLOY_DATA_DIR"] = "alloy"  # collection agent (docker-compose.yml, profile observability)
     pd["POSTGRES_PORT_HOST"] = 5432; pd["REDIS_PORT_HOST"] = 6379; pd["RABBITMQ_PORT_HOST"] = 5672
     pd["RABBITMQ_MGMT_PORT_HOST"] = 15672; pd["MINIO_API_PORT_HOST"] = 9000; pd["MINIO_CONSOLE_PORT_HOST"] = 9001
     pd["GRAFANA_PORT_HOST"] = 3000; pd["LOKI_PORT_HOST"] = 3100; pd["PROMETHEUS_PORT_HOST"] = 9090
     pd["ALERTMANAGER_PORT_HOST"] = 9093; pd["GLITCHTIP_PORT_HOST"] = 8000
     pd["CADDY_HTTP_PORT_HOST"] = 80; pd["CADDY_HTTPS_PORT_HOST"] = 443
+    pd["ALLOY_PORT_HOST"] = 12345
 }
 # Pass 1: collect and validate PROJECT_DATA_DIR / PROJECT_NAME.
 FNR == NR {

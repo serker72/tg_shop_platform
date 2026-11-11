@@ -1,0 +1,171 @@
+# Platform alert rules (Stage 2, W4). Metrics come from Grafana Alloy (VPS 1) via remote write:
+# jobs node, postgres, redis, rabbitmq, app; external labels env, host.
+# Only metrics actually exported on the dev stack are used; deferred rules are listed in
+# docs/ops/observability.md ("Алерты" → follow-up). Unit tests: ../tests/rules_test.yml.
+groups:
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"node|postgres|redis|rabbitmq|app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Target {{ $labels.job }}/{{ $labels.instance }} is down"
+          description: >-
+            Alloy cannot scrape {{ $labels.job }} target {{ $labels.instance }}
+            (env={{ $labels.env }}, host={{ $labels.host }}) for more than 2 minutes.
+
+      - alert: AgentMetricsAbsent
+        expr: absent(up{job="node"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No metrics from Alloy agent (job=node absent)"
+          description: >-
+            Prometheus receives no up{job="node"} samples for 5 minutes: Alloy agent on VPS 1
+            is stopped or remote write to Prometheus is broken. All other agent alerts are blind.
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is unreachable ({{ $labels.instance }})"
+          description: >-
+            postgres exporter reports pg_up == 0 for 1 minute: the database refuses
+            connections of the monitoring role or is down.
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is unreachable ({{ $labels.instance }})"
+          description: "redis exporter reports redis_up == 0 for 1 minute."
+
+      - alert: RabbitmqDown
+        expr: up{job="rabbitmq"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ metrics endpoint is down ({{ $labels.instance }})"
+          description: >-
+            RabbitMQ Prometheus plugin endpoint (port 15692) does not answer for 1 minute:
+            the broker is down or the plugin is disabled.
+
+  - name: postgres
+    rules:
+      # pg_partman_* come from Alloy custom queries (ops/observability/alloy/postgres_queries.yml).
+      # The BGW is not visible in pg_stat_activity (no DB connection between runs), so it is
+      # checked by its effect: part_config.maintenance_last_run must be refreshed every
+      # pg_partman_bgw.interval (3600 s). Threshold = 2 intervals + 15 min slack.
+      - alert: PgPartmanBgwDown
+        expr: >-
+          max by (env, host, parent_table) (pg_partman_maintenance_age_seconds) > 2 * 3600 + 900
+          and on (env, host) (max by (env, host) (pg_up) == 1)
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "pg_partman background worker does not run maintenance ({{ $labels.parent_table }})"
+          description: >-
+            run_maintenance() for {{ $labels.parent_table }} last ran {{ $value | humanizeDuration }}
+            ago while PostgreSQL is up: pg_partman_bgw is dead or misconfigured
+            (shared_preload_libraries, pg_partman_bgw.dbname/role). New partitions will not be
+            created and rows will go to the _default partition.
+
+      - alert: PgPartmanMetricsAbsent
+        expr: absent(pg_partman_maintenance_age_seconds) and on () (count(pg_up == 1) > 0)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "pg_partman metrics are missing while PostgreSQL is up"
+          description: >-
+            pg_partman_maintenance_age_seconds is absent for 15 minutes: Alloy custom queries
+            fail (monitoring role lacks USAGE on schema partman / SELECT on partman.part_config)
+            or pg_partman is not configured. PgPartmanBgwDown is blind.
+
+      - alert: PgPartmanFuturePartitionsMissing
+        expr: >-
+          pg_partman_partitions_future_count < 2
+          or pg_partman_partitions_horizon_seconds < 30 * 86400
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Not enough future partitions for {{ $labels.parent_table }}"
+          description: >-
+            {{ $labels.parent_table }} has fewer than 2 future partitions or its last partition
+            ends in less than 30 days (premake = 3 monthly partitions expected). Check
+            pg_partman_bgw and partman.run_maintenance(); rows will otherwise go to _default.
+
+      - alert: PostgresStatActivityAbsent
+        expr: absent(pg_stat_activity_count{job="postgres"}) and on() (count(pg_up == 1) > 0)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "pg_stat_activity metrics are missing while PostgreSQL is up"
+          description: >-
+            pg_up == 1 but pg_stat_activity_count is absent for 10 minutes: the monitoring role
+            lost pg_monitor or the stat_activity collector is failing.
+
+  - name: logging
+    rules:
+      - alert: LogsDroppedIncreasing
+        expr: sum by (env, host, service, reason) (increase(logs_dropped_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} drops log records (reason={{ $labels.reason }})"
+          description: >-
+            logs_dropped_total grew by {{ $value | printf "%.0f" }} in 5 minutes
+            (service={{ $labels.service }}, reason={{ $labels.reason }}).
+
+      - alert: LogsDroppedHigh
+        expr: sum by (env, host) (rate(logs_dropped_total[10m])) > 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "High log drop rate on {{ $labels.host }}"
+          description: >-
+            Applications drop {{ $value | printf "%.2f" }} log records/s (10m average):
+            DB log writer or file sink is failing, audit trail is incomplete.
+
+  - name: node
+    rules:
+      # /data is the production data mount; "/" is included because on dev/single-disk hosts
+      # PROJECT_DATA_DIR lives on the root filesystem.
+      - alert: DiskSpaceLow
+        expr: >-
+          node_filesystem_avail_bytes{job="node", mountpoint=~"/|/data", fstype!~"tmpfs|overlay"}
+          / node_filesystem_size_bytes{job="node", mountpoint=~"/|/data", fstype!~"tmpfs|overlay"}
+          < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.host }}:{{ $labels.mountpoint }}"
+          description: >-
+            Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }}
+            ({{ $labels.device }}).
+
+      - alert: DiskSpaceCritical
+        expr: >-
+          node_filesystem_avail_bytes{job="node", mountpoint=~"/|/data", fstype!~"tmpfs|overlay"}
+          / node_filesystem_size_bytes{job="node", mountpoint=~"/|/data", fstype!~"tmpfs|overlay"}
+          < 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk almost full on {{ $labels.host }}:{{ $labels.mountpoint }}"
+          description: >-
+            Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }}
+            ({{ $labels.device }}); PostgreSQL/MinIO/log writes will start failing.

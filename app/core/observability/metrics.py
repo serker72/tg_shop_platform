@@ -16,7 +16,7 @@ from prometheus_client.core import CounterMetricFamily
 from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
-from app.modules.logging.metrics import LogsDroppedCounter, logs_dropped_total
+from app.modules.logging.metrics import DROP_REASONS, LogsDroppedCounter, logs_dropped_total
 
 __all__ = [
     "METRICS_CONTENT_TYPE",
@@ -31,10 +31,23 @@ METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 
 class LogsDroppedCollector(Collector):
-    """Expose a :class:`LogsDroppedCounter` as ``logs_dropped_total{reason}``."""
+    """Expose a :class:`LogsDroppedCounter` as ``logs_dropped_total{reason}``.
 
-    def __init__(self, counter: LogsDroppedCounter) -> None:
+    Known reasons (:data:`DROP_REASONS`) are always present (``0`` before the first drop):
+    a family without samples renders no series, and ``increase()`` would miss the first
+    increment of a series that appears with a non-zero value.
+    """
+
+    def __init__(
+        self, counter: LogsDroppedCounter, known_reasons: Iterable[str] = DROP_REASONS
+    ) -> None:
         self._counter = counter
+        self._known_reasons = tuple(known_reasons)
+
+    @property
+    def counter(self) -> LogsDroppedCounter:
+        """The exported counter instance."""
+        return self._counter
 
     def collect(self) -> Iterable[Metric]:
         family = CounterMetricFamily(
@@ -42,7 +55,9 @@ class LogsDroppedCollector(Collector):
             "Click-log records lost by the logging pipeline (written to stderr only).",
             labels=["reason"],
         )
-        for reason, value in sorted(self._counter.by_reason.items()):
+        values = dict.fromkeys(self._known_reasons, 0)
+        values.update(self._counter.by_reason)
+        for reason, value in sorted(values.items()):
             family.add_metric([reason], value)
         yield family
 
@@ -58,6 +73,7 @@ class AppMetrics:
     app_errors_total: Counter
     update_duration_seconds: Histogram
     active_bots: Gauge
+    logs_dropped: LogsDroppedCounter
 
 
 def build_metrics(dropped: LogsDroppedCounter | None = None) -> AppMetrics:
@@ -65,10 +81,12 @@ def build_metrics(dropped: LogsDroppedCounter | None = None) -> AppMetrics:
 
     ``dropped`` defaults to the process-wide :data:`logs_dropped_total` counter.
     """
+    counter = dropped if dropped is not None else logs_dropped_total
     registry = CollectorRegistry(auto_describe=False)
-    registry.register(LogsDroppedCollector(dropped if dropped is not None else logs_dropped_total))
+    registry.register(LogsDroppedCollector(counter))
     return AppMetrics(
         registry=registry,
+        logs_dropped=counter,
         app_errors_total=Counter(
             "app_errors",
             "Unhandled application errors.",
