@@ -33,7 +33,7 @@ vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
 endef
 
-.PHONY: help install init-dirs env-test version up ready down migrate lint format format-check check test \
+.PHONY: help install env init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset \
 	agent-config agent-up agent-down agent-logs
@@ -42,7 +42,7 @@ endef
 # Limitation (same as docker compose interpolation): values must not contain unescaped `$`,
 # backticks or unbalanced quotes — see .env.example.
 define load_env
-test -f "$(1)" || { echo "ERROR: $(1) not found (cp .env.example .env)"; exit 1; }; \
+test -f "$(1)" || { echo "ERROR: $(1) not found ($(if $(filter $(abspath .env),$(abspath $(1))),make env,make env-test))"; exit 1; }; \
 set -a; source "$(1)"; set +a
 endef
 
@@ -70,15 +70,35 @@ install: ## Install dependencies (uv sync) and pre-commit hooks
 	uv sync
 	uv run pre-commit install
 
+# FORCE=1: the new file is generated into <file>.new first; only after success the old one is
+# backed up to <file>.bak.<timestamp> (mode 600, never overwritten) and replaced.
+env: ## Generate ENV_FILE from .env.example with random secrets (SKIP if exists; FORCE=1 regenerates, backup .bak.<ts>)
+	@set -e; f="$(ENV_FILE)"; \
+	if [ -e "$$f" ] && [ "$(FORCE)" != "1" ]; then echo "SKIP: $$f exists (FORCE=1 to regenerate)"; exit 0; fi; \
+	if [ ! -e "$$f" ]; then bash ops/scripts/env_test.sh --init .env.example "$$f"; exit 0; fi; \
+	rm -f "$$f.new"; \
+	bash ops/scripts/env_test.sh --init .env.example "$$f.new"; \
+	bak="$$f.bak.$$(date +%Y%m%d%H%M%S)"; \
+	if [ -e "$$bak" ]; then bak="$$bak.$$$$"; fi; \
+	install -m 600 "$$f" "$$bak"; \
+	mv -f "$$f.new" "$$f"; \
+	echo "Backup: $$bak; $$f replaced (old passwords stay in existing PG/Redis/RabbitMQ data)"
+
+# The main env file is generated automatically on a fresh clone (only for ENV_FILE=.env;
+# .env.test comes from make env-test).
+INIT_DIRS_DEPS := $(if $(filter $(abspath .env),$(abspath $(ENV_FILE))),env)
+
 # Service dirs (db, redis, ...) are re-owned by their containers; the logs dir is written by
 # app containers running as APP_UID, so it must be writable by us or owned by APP_UID.
 # A permission problem ends with a chown hint instead of a raw `mkdir: Permission denied`.
-init-dirs: ## Create bind-mount data directories from ENV_FILE
+init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE (.env is generated if missing)
 	@$(call load_env,$(ENV_FILE)); \
 	deny() { \
+		owner="$${APP_UID:-$$(id -u)}:$${APP_GID:-$$(id -g)}"; root="$${PROJECT_DATA_DIR%/}"; \
+		case "$$1" in "$$root"|"$$root"/*) [ -n "$$root" ] || root="$$1";; *) root="$$1";; esac; \
 		echo "ERROR: $$1 is not writable for uid=$$(id -u) gid=$$(id -g)." >&2; \
 		echo "       Host data dirs must belong to APP_UID:APP_GID. Fix once on the host:" >&2; \
-		echo "       sudo chown -R $${APP_UID:-$$(id -u)}:$${APP_GID:-$$(id -g)} $$1 && make init-dirs" >&2; \
+		echo "       sudo mkdir -p $$root && sudo chown -R $$owner $$root && make init-dirs" >&2; \
 		exit 1; \
 	}; \
 	for var in POSTGRES_DATA_DIR REDIS_DATA_DIR RABBITMQ_DATA_DIR MINIO_DATA_DIR LOGS_DATA_DIR; do \

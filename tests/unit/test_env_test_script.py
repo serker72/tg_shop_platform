@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -12,7 +14,10 @@ from cryptography.fernet import Fernet
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ops" / "scripts" / "env_test.sh"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
+pytestmark = [
+    pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required"),
+    pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl is required"),
+]
 
 
 def _write_source(tmp_path: Path, *, postgres_db: str | None) -> Path:
@@ -90,3 +95,171 @@ def test_bad_postgres_db_is_rejected(tmp_path: Path, postgres_db: str | None, re
     assert result.returncode != 0
     assert reason in result.stderr
     assert not target.exists()
+
+
+# --- --init mode (make env) ---
+
+HEX48 = re.compile(r"^[0-9a-f]{48}$")
+
+
+def _run_init(source: Path, target: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed script path, arguments are tmp files
+        ["bash", str(SCRIPT), "--init", str(source), str(target)],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+        timeout=120,
+    )
+
+
+def _write_template(tmp_path: Path) -> Path:
+    source = tmp_path / "example.env"
+    source.write_text(
+        "\n".join(
+            [
+                "# comment stays",
+                "PROJECT_ENVIRONMENT=stage",
+                "PROJECT_DATA_DIR=/opt/tg_shop_platform_data",
+                'LOGS_DATA_DIR="${PROJECT_DATA_DIR}/logs"',
+                "POSTGRES_PASSWORD=change_me",
+                "REDIS_PASSWORD=change_me",
+                "MINIO_SECRET_KEY=change_me_min_8_chars",
+                "ENCRYPTION_KEY=",
+                "POSTGRES_MONITORING_PASSWORD=",
+                "MASTER_BOT_TOKEN=",
+                "GLITCHTIP_ADMIN_PASSWORD=",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_init_generates_secrets_and_copies_the_rest(tmp_path: Path) -> None:
+    target = tmp_path / "out.env"
+    result = _run_init(_write_template(tmp_path), target)
+
+    assert result.returncode == 0, result.stderr
+    values = _values(target)
+    secrets = [
+        values[k]
+        for k in (
+            "POSTGRES_PASSWORD",
+            "REDIS_PASSWORD",
+            "MINIO_SECRET_KEY",
+            "POSTGRES_MONITORING_PASSWORD",
+        )
+    ]
+    assert all(HEX48.match(s) for s in secrets), secrets
+    assert len(set(secrets)) == len(secrets)
+    Fernet(values["ENCRYPTION_KEY"].encode())
+    assert values["PROJECT_ENVIRONMENT"] == "stage"
+    assert values["PROJECT_DATA_DIR"] == "/opt/tg_shop_platform_data"
+    assert values["LOGS_DATA_DIR"] == "${PROJECT_DATA_DIR}/logs"
+    assert values["MASTER_BOT_TOKEN"] == ""
+    assert values["GLITCHTIP_ADMIN_PASSWORD"] == ""
+    assert "# comment stays" in target.read_text(encoding="utf-8")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert "POSTGRES_PASSWORD" in result.stdout
+    assert "MASTER_BOT_TOKEN" in result.stdout
+    assert secrets[0] not in result.stdout
+
+
+def test_init_refuses_existing_target(tmp_path: Path) -> None:
+    target = tmp_path / "out.env"
+    target.write_text("KEEP=1\n", encoding="utf-8")
+    result = _run_init(_write_template(tmp_path), target)
+
+    assert result.returncode != 0
+    assert "already exists" in result.stderr
+    assert target.read_text(encoding="utf-8") == "KEEP=1\n"
+
+
+def test_init_does_not_change_default_mode(tmp_path: Path) -> None:
+    """Legacy ``env_test.sh <src> <dst>`` still applies the test transformations."""
+    target = tmp_path / "dst.env"
+    result = _run(_write_source(tmp_path, postgres_db="shop_db"), target)
+
+    assert result.returncode == 0, result.stderr
+    assert _values(target)["PROJECT_ENVIRONMENT"] == "test"
+
+
+def test_init_fails_without_openssl(tmp_path: Path) -> None:
+    """No openssl -> non-zero exit, no target, no temp file left behind."""
+    out = tmp_path / "out"
+    out.mkdir()
+    target = out / "x.env"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("realpath", "mktemp", "dirname", "basename", "chmod", "rm", "ln", "tr"):
+        found = shutil.which(tool)
+        assert found is not None
+        (bindir / tool).symlink_to(found)
+    bash = shutil.which("bash") or "bash"
+    source = _write_template(tmp_path)
+    result = subprocess.run(  # noqa: S603 - fixed script path, arguments are tmp files
+        [bash, str(SCRIPT), "--init", str(source), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+        timeout=120,
+        env={"PATH": str(bindir)},
+    )
+
+    assert result.returncode != 0
+    assert not target.exists()
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is required")
+def test_make_env_skip_and_force(tmp_path: Path) -> None:
+    target = tmp_path / "x.env"
+
+    def make(*extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603
+            ["make", "--no-print-directory", "env", f"ENV_FILE={target}", *extra],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=ROOT,
+            timeout=120,
+        )
+
+    first = make()
+    assert first.returncode == 0, first.stderr
+    old = target.read_text(encoding="utf-8")
+    old_pw = _values(target)["POSTGRES_PASSWORD"]
+
+    skip = make()
+    assert skip.returncode == 0
+    assert "SKIP" in skip.stdout
+    assert target.read_text(encoding="utf-8") == old
+
+    forced = make("FORCE=1")
+    assert forced.returncode == 0, forced.stderr
+    backups = list(tmp_path.glob("x.env.bak.*"))
+    assert len(backups) == 1
+    assert re.fullmatch(r"x\.env\.bak\.\d{14}(\.\d+)?", backups[0].name)
+    assert backups[0].read_text(encoding="utf-8") == old
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert _values(target)["POSTGRES_PASSWORD"] != old_pw
+    assert not (tmp_path / "x.env.new").exists()
+    for proc in (first, skip, forced):
+        assert old_pw not in proc.stdout + proc.stderr
+
+
+def test_init_real_env_example(tmp_path: Path) -> None:
+    target = tmp_path / "real.env"
+    result = _run_init(ROOT / ".env.example", target)
+
+    assert result.returncode == 0, result.stderr
+    text = target.read_text(encoding="utf-8")
+    values = _values(target)
+    assert "change_me" not in "\n".join(values.values())
+    Fernet(values["ENCRYPTION_KEY"].encode())
+    assert HEX48.match(values["POSTGRES_MONITORING_PASSWORD"])
+    assert text.count("\n") == (ROOT / ".env.example").read_text(encoding="utf-8").count("\n")

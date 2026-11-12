@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Generates an isolated test env file from the main (dev) env file.
 # Usage: ops/scripts/env_test.sh <source .env> <target .env.test>
+#        ops/scripts/env_test.sh --init <.env.example> <target .env>   (used by `make env`)
+#
+# --init mode: copies the template as is, replacing only secrets with random hex values
+#   (URL-safe: they are embedded into URLs without escaping and read by `source`):
+#   values starting with "change_me" -> openssl rand -hex 24; empty ENCRYPTION_KEY -> Fernet key
+#   (urlsafe base64 of 32 random bytes, openssl only: no uv/python needed on the server);
+#   empty POSTGRES_MONITORING_PASSWORD -> hex. GLITCHTIP_ADMIN_PASSWORD/PUBLIC_KEY stay empty
+#   (filled by ops/scripts/obs_bootstrap.sh). Refuses to overwrite an existing target
+#   (also if it appears during generation: published via `ln`, never clobbers);
+#   the target has mode 600. Secret values are never printed.
 #
 # Rules:
 #   source must be a dev file: PROJECT_DATA_DIR absolute and PROJECT_DATA_DIR/PROJECT_NAME
@@ -18,16 +28,6 @@
 # Lines are normalized: CR, leading whitespace and "export " are stripped.
 set -euo pipefail
 
-src=${1:?usage: env_test.sh <source> <target>}
-dst=${2:?usage: env_test.sh <source> <target>}
-port_offset=${PORT_OFFSET:-20000}
-
-[[ -f $src ]] || { echo "ERROR: $src not found (cp .env.example .env)" >&2; exit 1; }
-if [[ -e $dst && $(realpath "$src") == "$(realpath "$dst")" ]]; then
-    echo "ERROR: source and target env files are the same file ($src)" >&2
-    exit 1
-fi
-
 gen_key() {
     uv run --quiet python -c \
         'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
@@ -37,6 +37,88 @@ valid_key() {
         'import sys; from cryptography.fernet import Fernet; Fernet(sys.argv[1].encode())' \
         "$1" >/dev/null 2>&1
 }
+
+gen_fernet_key() {  # Fernet key = urlsafe base64 of 32 random bytes (44 chars, trailing '=')
+    local k
+    k=$(openssl rand -base64 32 | tr -d '\n' | tr '+/' '-_')
+    [[ $k =~ ^[A-Za-z0-9_-]{43}=$ ]] || { echo "ERROR: could not generate ENCRYPTION_KEY" >&2; return 1; }
+    printf '%s\n' "$k"
+}
+gen_hex() {
+    local h
+    h=$(openssl rand -hex 24)
+    [[ $h =~ ^[0-9a-f]{48}$ ]] || { echo "ERROR: openssl rand failed" >&2; return 1; }
+    printf '%s\n' "$h"
+}
+
+init_env() {  # --init <source> <target>: production-like env file with generated secrets
+    local src=${1:-} dst=${2:-} tmp line key value secret generated=()
+    local re='^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$'
+    [[ -n $src && -n $dst ]] || { echo "usage: env_test.sh --init <source> <target>" >&2; exit 2; }
+    [[ -f $src ]] || { echo "ERROR: $src not found" >&2; exit 1; }
+    if [[ $(realpath -m "$src") == "$(realpath -m "$dst")" ]]; then
+        echo "ERROR: source and target env files are the same file ($src)" >&2
+        exit 1
+    fi
+    if [[ -e $dst ]]; then
+        echo "ERROR: $dst already exists; refusing to overwrite (make env FORCE=1 backs it up)" >&2
+        exit 1
+    fi
+
+    tmp=$(mktemp "$(dirname -- "$dst")/.$(basename -- "$dst").XXXXXX")
+    # shellcheck disable=SC2064  # expand $tmp now: it is local to this function
+    trap "rm -f -- '$tmp'" EXIT
+    chmod 600 "$tmp"
+
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%$'\r'}
+        if [[ $line =~ $re ]]; then
+            key=${BASH_REMATCH[2]}
+            value=${BASH_REMATCH[3]}
+            value=${value#[\"\']}
+            value=${value%[\"\']}
+            if [[ $value == change_me* ]] \
+                || [[ -z $value && $key == POSTGRES_MONITORING_PASSWORD ]]; then
+                secret=$(gen_hex) || exit 1
+                line="$key=$secret"
+                generated+=("$key")
+            elif [[ -z $value && $key == ENCRYPTION_KEY ]]; then
+                secret=$(gen_fernet_key) || exit 1
+                line="$key=$secret"
+                generated+=("$key")
+            fi
+        fi
+        printf '%s\n' "$line"
+    done <"$src" >"$tmp"
+
+    # ln fails if dst already exists (no check-then-move race); tmp is in the same directory.
+    if ! ln -- "$tmp" "$dst" 2>/dev/null; then
+        echo "ERROR: could not create $dst (appeared during generation or hard links unsupported)" >&2
+        exit 1
+    fi
+    rm -f -- "$tmp"
+    trap - EXIT
+    echo "Generated $dst from $src (mode 600)"
+    echo "Generated secrets: ${generated[*]:-none}"
+    echo "Fill in manually in $dst: MASTER_BOT_TOKEN (required);"
+    echo "  ALERT_TELEGRAM_BOT_TOKEN / ALERT_TELEGRAM_CHAT_ID (alerts), GRAFANA_DOMAIN / GLITCHTIP_DOMAIN,"
+    echo "  OBS_LOKI_PUSH_URL / OBS_PROMETHEUS_REMOTE_WRITE_URL (ALLOY_SINGLE_HOST), APP_UID / APP_GID."
+}
+
+if [[ ${1:-} == --init ]]; then
+    init_env "${2:-}" "${3:-}"
+    exit 0
+fi
+
+src=${1:?usage: env_test.sh <source> <target>}
+dst=${2:?usage: env_test.sh <source> <target>}
+port_offset=${PORT_OFFSET:-20000}
+
+[[ -f $src ]] || { echo "ERROR: $src not found (make env)" >&2; exit 1; }
+if [[ -e $dst && $(realpath "$src") == "$(realpath "$dst")" ]]; then
+    echo "ERROR: source and target env files are the same file ($src)" >&2
+    exit 1
+fi
 
 dst_value() {  # last value of KEY in an existing target file
     [[ -f $dst ]] || return 0

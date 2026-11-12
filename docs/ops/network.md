@@ -64,7 +64,7 @@ Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale u
 | Сервис | Хост по умолчанию | Доступ |
 |---|---|---|
 | Grafana | `127.0.0.1:${GRAFANA_PORT_HOST:-3000}` | через Caddy (HTTPS) |
-| GlitchTip web | `127.0.0.1:${GLITCHTIP_PORT_HOST:-8000}` | через Caddy (HTTPS); приём событий Sentry SDK с VPS 1 — через VPN |
+| GlitchTip web | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${GLITCHTIP_PORT_HOST:-8000}` | через Caddy (HTTPS); приём событий Sentry SDK с VPS 1 — через VPN |
 | Loki | `127.0.0.1:${LOKI_PORT_HOST:-3100}` | VPS 1 (Alloy/push логов) — только через VPN |
 | Prometheus | `127.0.0.1:${PROMETHEUS_PORT_HOST:-9090}` | remote write / UI — только VPN или SSH-туннель |
 | Alertmanager | `127.0.0.1:${ALERTMANAGER_PORT_HOST:-9093}` | только локально (исходящие в Telegram) |

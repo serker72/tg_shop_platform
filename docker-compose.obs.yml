@@ -3,7 +3,8 @@
 #   make obs-up / obs-down / obs-logs / obs-config   (ENV_FILE=.env.test for the test copy)
 #
 # Network: own compose network (no shared external network). Everything except Caddy is
-# published only on 127.0.0.1:${*_PORT_HOST}; the app stack talks to Loki/Prometheus via
+# published only on 127.0.0.1:${*_PORT_HOST} (Loki/Prometheus/GlitchTip ingest: on
+# ${OBS_INGEST_BIND_ADDRESS}, VPN IP in production); the app stack talks to Loki/Prometheus via
 # host ports (and later via VPN on VPS 2). Prometheus resolves host.docker.internal to the
 # host gateway to scrape app metrics published on the host.
 # Storage: only bind mounts (${OBS_*_DATA_DIR:?}), created by `make init-dirs`.
@@ -241,7 +242,8 @@ services:
       glitchtip-migrate:
         condition: service_completed_successfully
     ports:
-      - "127.0.0.1:${GLITCHTIP_PORT_HOST:-8000}:8000"
+      # Sentry SDK of VPS 1 sends events over VPN (like Loki/Prometheus ingest), see docs/ops/network.md
+      - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${GLITCHTIP_PORT_HOST:-8000}:8000"
     healthcheck:
       # The image has neither curl nor wget.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/_health/', timeout=4)"]
