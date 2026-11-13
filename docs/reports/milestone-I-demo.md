@@ -3,25 +3,32 @@
 ## Подготовка (за день до демо)
 
 1. Чистый хост (или чистый каталог данных); установлены Docker, `make`, `openssl`, `python3`, git.
-   Для шагов с `pytest` (2 и 6) нужны [uv](https://docs.astral.sh/uv/) и dev-зависимости:
-   `make install`.
+   Шаги с `pytest`/`uv` — подготовка п. 5 (`make test-report`), демонстрация шаги 2
+   (`make test-integration`) и 6 (`uv run pytest ...`): нужны [uv](https://docs.astral.sh/uv/)
+   и dev-зависимости — `make install`.
 2. `make env` — сгенерировать `.env` (секреты случайные), заполнить `MASTER_BOT_TOKEN`.
-3. Режим «всё на одном хосте» (отдельного сервера мониторинга пока нет) — в `.env`:
+   **Пароль Basic Auth мониторинга `make env` выводит один раз — сразу сохранить** в менеджер
+   паролей. `make obs-auth` — только если пароль потерян (задаёт новый, пересоздаёт Caddy).
+3. В `.env`:
+   - `PROJECT_DATA_DIR` — каталог данных; по умолчанию `/opt/tg_shop_platform_data`, нужен
+     `sudo mkdir` + `chown` на пользователя (README, п. 2) или другой каталог с правами записи;
+   - `PROJECT_ENVIRONMENT=stage` (или `loc`); при `test` bootstrap GlitchTip **не пишет**
+     `SENTRY_DSN` и шаг 4 не сработает;
+   - `CADDY_MODE=ip` и `VPS_IP=<IP хоста>` — `make env` оставляет `VPS_IP` пустым, заполнить
+     (или режим доменов — см. README).
+4. Режим «всё на одном хосте» (отдельного сервера мониторинга пока нет) — в `.env`:
    - `ALLOY_SINGLE_HOST=1`;
-   - раскомментировать URL для одного хоста (строки под `# Single host` в `.env.example`) и
-     закомментировать URL для VPS 2:
-     `OBS_LOKI_PUSH_URL=http://loki:3100/loki/api/v1/push`,
-     `OBS_PROMETHEUS_REMOTE_WRITE_URL=http://prometheus:9090/api/v1/write`;
-   - `CADDY_MODE=ip` и `VPS_IP=<IP хоста>` (или режим доменов — см. README);
-   - пароль мониторинга — `make obs-auth` (показывается один раз, сохранить в менеджер паролей).
-4. Строго в этом порядке:
+   - **заменить значения** существующих строк (не добавлять вторые — при дублях действует
+     последняя): `OBS_LOKI_PUSH_URL=http://loki:3100/loki/api/v1/push`,
+     `OBS_PROMETHEUS_REMOTE_WRITE_URL=http://prometheus:9090/api/v1/write`.
+5. Строго в этом порядке:
    - `make obs-up` — стек мониторинга (Grafana, Loki, Prometheus, Alertmanager, GlitchTip,
      Caddy); в конце bootstrap GlitchTip **записывает `SENTRY_DSN` в `.env`**;
    - `make agent-up` — основной стек + агент Alloy (уже с новым `SENTRY_DSN`), в конце
      `make ready`. Обратный порядок оставит приложение без DSN и агента без сети мониторинга.
-5. `make test-report` — свежий отчёт об автотестах (`build/reports/milestone-I-tests.md`;
+6. `make test-report` — свежий отчёт об автотестах (`build/reports/milestone-I-tests.md`;
    принятая версия — [milestone-I-tests.md](milestone-I-tests.md)); убедиться, что все ✅.
-6. Заранее открыть вкладки: Grafana, GlitchTip, отчёт; проверить вход по Basic Auth.
+7. Заранее открыть вкладки: Grafana, GlitchTip, отчёт; проверить вход по Basic Auth.
 
 ## Ход демонстрации
 
@@ -44,8 +51,10 @@
 ### 3. Дашборды Grafana (3 мин)
 - Открыть `https://<VPS_IP>/grafana/` (или домен Grafana): браузер запрашивает логин/пароль
   (Basic Auth), затем вход в Grafana.
-- Дашборды: **platform_overview** (состояние сервисов, ошибки), **datastores** (PostgreSQL,
-  Redis, RabbitMQ, партиции pg_partman), **logs** (журналы приложения из Loki, фильтр по сервису).
+- Dashboards → папка **tg_shop_platform** (папка provisioning, не дашборд) → три дашборда:
+  обзор платформы (uid `tgsp-overview`: состояние сервисов, ошибки),
+  **PostgreSQL / Redis / RabbitMQ** (uid `tgsp-datastores`, партиции pg_partman), журналы
+  (uid `tgsp-logs`: логи приложения из Loki, фильтр по сервису).
 
 ### 4. Журнал ошибок GlitchTip (2 мин)
 - Отправить тестовую ошибку из контейнера приложения (DSN — внутренний, из `.env`):
@@ -67,9 +76,9 @@
 - `make test-alerts` — promtool проверяет правила алертов и их unit-тесты (все SUCCESS).
 - Показать правило `PgPartmanBgwDown` в `ops/observability/prometheus/rules/platform.yml`.
 - Живые правила — в Grafana (Prometheus и Alertmanager наружу не опубликованы, только через
-  Caddy → Grafana): **Alerting → Alert rules**, раздел правил источника данных *Prometheus*
-  (datasource подключён автоматически). Если список правил недоступен — **Explore** → источник
-  *Prometheus* → запрос `ALERTS` (активные/ожидающие алерты) или
+  Caddy → Grafana): **Alerting → Alert rules** → раздел правил источника данных *Prometheus*
+  (data source-managed, 13 правил; раздел Grafana-managed пуст — это нормально).
+  **Explore** → источник *Prometheus* → запрос `ALERTS` (активные/ожидающие алерты) или
   `pg_partman_bgw_up` / `up`. Резервный вариант для инженера:
   `ssh -L 9090:127.0.0.1:9090 <хост>` и `http://127.0.0.1:9090/alerts`.
 - Говорить: «если фоновый процесс, создающий разделы журналов, остановился — придёт
@@ -77,15 +86,11 @@
 
 ### 6. Безопасность (3 мин)
 - **Токены зашифрованы:** таблицы ботов появятся на Этапе II, поэтому показываем механизм тестом:
-  `uv run pytest tests/unit/test_encrypted_string.py -v` — значение в БД ≠ открытый текст,
-  после смены ключа старые значения читаются, новые пишутся новым ключом. Когда таблица ботов
-  появится, то же видно запросом (переменные раскрываются внутри контейнера):
-
-  ```bash
-  docker compose exec postgres sh -c \
-    'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select <колонка токена> from <таблица> limit 1"'
-  ```
-  (в ответе — строка Fernet `gAAAA…`).
+  `uv run pytest tests/unit/test_encrypted_string.py -v` — после смены ключа старые значения
+  читаются, новые пишутся новым ключом. «В БД не открытый текст» показывает
+  `test_round_trip_encrypts_and_decrypts`: он читает сырое значение из таблицы в обход ORM и
+  проверяет, что открытого текста там нет. Колонка `Bot.encrypted_token` появится на Этапе II —
+  тогда то же будет видно `psql`-запросом (строка Fernet `gAAAA…`).
 - **Изоляция магазинов:** `make test-integration` уже прогнал
   `tests/integration/test_tenant_isolation_repository.py`; показать строку R2 в отчёте.
 - **Права:** строки R3/S5 — роли, персональные права, кэш; при недоступном Redis права

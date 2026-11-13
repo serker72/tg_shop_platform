@@ -14,6 +14,9 @@
 #    The host of GLITCHTIP_INTERNAL_URL must be internal (check_internal_url.sh), otherwise
 #    the script fails before bootstrap and SENTRY_DSN is not touched.
 # Secrets (password, DSN) are never printed.
+# Every value written by set_env is also exported to this process: make obs-bootstrap runs
+# after `set -a; source .env`, and the shell environment wins over `docker compose --env-file`,
+# so a stale (e.g. empty) exported value would otherwise reach glitchtip-bootstrap.
 set -euo pipefail
 
 env_file=${1:?usage: obs_bootstrap.sh <env file>}
@@ -51,6 +54,7 @@ set_env() {  # set_env KEY VALUE: replace existing line(s) or append; value prin
         fi
         printf '%s=%s\n' "$key" "$value" >>"$env_file"
     fi
+    export "$key=$value"
     echo "Updated $key in $env_file"
 }
 ensure_default() {  # key missing or empty -> default value
@@ -74,7 +78,13 @@ bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$(get_env GLITCH
 
 out=$(docker compose -f docker-compose.obs.yml --env-file "$env_file" --profile bootstrap \
     run --rm -T glitchtip-bootstrap 2>&1) || {
-    echo "$out" | grep -v -i 'password' >&2
+    # Diagnostics (GLITCHTIP_BOOTSTRAP_ERROR ...) pass; only the secret value itself is dropped.
+    admin_password=$(get_env GLITCHTIP_ADMIN_PASSWORD)
+    if [[ -n $admin_password ]]; then
+        echo "$out" | grep -v -F -e "$admin_password" >&2 || true
+    else
+        echo "$out" >&2
+    fi
     echo "ERROR: glitchtip-bootstrap failed" >&2
     exit 1
 }
