@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import pytest
+
 from app.modules.iam.effective_permissions import (
     EffectivePermissionsReport,
     OverrideRef,
@@ -22,6 +24,8 @@ from app.modules.iam.permissions import (
     TENANTS_VIEW_ALL,
 )
 from app.modules.iam.snapshot import DecisionSource, PermissionSnapshot
+
+pytestmark = pytest.mark.req("R3")
 
 TG = 4242
 NOW = datetime(2030, 1, 1, tzinfo=UTC)

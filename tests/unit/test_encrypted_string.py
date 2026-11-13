@@ -21,6 +21,8 @@ from app.core.config import Settings, get_settings
 from app.shared_kernel.domain.exceptions import ConfigurationError, DomainError
 from app.shared_kernel.infrastructure.encrypted_string import EncryptedString
 
+pytestmark = pytest.mark.req("R4", "S4")
+
 PLAINTEXT = "123456789:AAH-secret-bot-token"
 
 DIALECT = postgresql.dialect()  # type: ignore[no-untyped-call]

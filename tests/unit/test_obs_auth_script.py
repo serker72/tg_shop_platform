@@ -18,6 +18,7 @@ OBS_AUTH = ROOT / "ops" / "scripts" / "obs_auth.sh"
 OBS_MODE = ROOT / "ops" / "scripts" / "obs_mode.sh"
 
 pytestmark = [
+    pytest.mark.req("SEC1"),
     pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required"),
     pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl is required"),
 ]

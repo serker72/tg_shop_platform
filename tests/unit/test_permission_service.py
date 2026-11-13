@@ -33,6 +33,8 @@ from app.shared_kernel.domain.exceptions import (
 )
 from app.shared_kernel.infrastructure.providers import RedisProvider
 
+pytestmark = pytest.mark.req("R3")
+
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 TG = 1001
 

@@ -20,7 +20,7 @@ from app.modules.logging import audit_archive as aa
 from app.shared_kernel.infrastructure.storage.minio import build_minio_client
 from tests.integration.conftest import ROOT, Query, infra_unavailable
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R7")]
 
 
 @pytest.fixture

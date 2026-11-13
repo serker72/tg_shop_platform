@@ -32,7 +32,7 @@ from app.shared_kernel.infrastructure.base_repository import (
     ScopedPage,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R2")]
 
 #: ``BaseRepository(session, Tenant)`` + how to read ``tenant_id`` of a ``Tenant`` row.
 #: ``Tenant`` has no ``tenant_id`` column (it *is* the tenant), so its own primary key is

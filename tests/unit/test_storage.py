@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import io
+import os
 import threading
 from typing import Any
 from unittest.mock import MagicMock
@@ -28,12 +29,23 @@ from app.shared_kernel.infrastructure.storage.boto3_storage import (
 from app.shared_kernel.infrastructure.storage.minio import MinIOStorage
 from app.shared_kernel.infrastructure.storage.s3 import S3Storage
 
+pytestmark = pytest.mark.req("R5")
+
 BUCKET = "tg-shop"
 
 
 def client_error(code: str, operation: str = "HeadObject") -> ClientError:
     """Build a ``ClientError`` as the SDK reports it."""
     return ClientError({"Error": {"Code": code, "Message": "boom"}}, operation)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_storage_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Settings here come only from defaults and explicit values: drop ``MINIO_*`` /
+    ``STORAGE_*`` of the process (e.g. after ``set -a; . ./.env.test``)."""
+    for name in list(os.environ):
+        if name.startswith(("MINIO_", "STORAGE_")):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture

@@ -20,7 +20,7 @@ from app.modules.logging.metrics import LogsDroppedCounter
 from app.modules.logging.models import AuditLog, UserActivity
 from app.shared_kernel.infrastructure.database import build_session_factory
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R7")]
 
 
 async def test_buffer_writes_db_and_files(clean_db: AsyncEngine, tmp_path: Path) -> None:
@@ -66,6 +66,7 @@ async def test_buffer_writes_db_and_files(clean_db: AsyncEngine, tmp_path: Path)
     assert (tmp_path / f"users/{day}/user_100.log").read_text().count("\n") == 4
 
 
+@pytest.mark.req("S5")
 async def test_poison_row_loses_only_itself(
     clean_db: AsyncEngine, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

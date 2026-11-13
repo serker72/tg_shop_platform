@@ -21,6 +21,8 @@ from app.modules.iam.snapshot import (
     PermissionSnapshot,
 )
 
+pytestmark = pytest.mark.req("R3")
+
 SHOP = uuid4()
 OTHER_SHOP = uuid4()
 

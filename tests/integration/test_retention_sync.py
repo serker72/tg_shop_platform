@@ -28,7 +28,7 @@ from tests.integration._cli import cli_env as _env
 from tests.integration._cli import run_cli as _run
 from tests.integration.conftest import ALEMBIC_INI, ROOT, Query
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R7")]
 
 SYNC_SCRIPT = ROOT / "ops" / "scripts" / "sync_partman_retention.py"
 MIGRATE_SCRIPT = ROOT / "ops" / "scripts" / "migrate.sh"
@@ -117,6 +117,7 @@ def test_sync_happy_path_and_noop(
     assert _intervals_equal(query, 5, 30)
 
 
+@pytest.mark.req("S3")
 def test_sync_s3_guard_writes_nothing(
     settings: Settings, migrated_scratch_db: tuple[str, Query]
 ) -> None:
@@ -153,6 +154,7 @@ def test_sync_unreachable_database_exit_1(
     assert result.returncode == 1, result.stderr + result.stdout
 
 
+@pytest.mark.req("S3")
 def test_db_trigger_is_second_line(
     settings: Settings,
     migrated_scratch_db: tuple[str, Query],
@@ -168,6 +170,7 @@ def test_db_trigger_is_second_line(
     assert _intervals_equal(query, 3, 24)
 
 
+@pytest.mark.req("R1", "S1")
 def test_migrate_sh_on_empty_database(settings: Settings, scratch_db: tuple[str, Query]) -> None:
     url, query = scratch_db
     env = _env(settings, url)

@@ -14,6 +14,8 @@ import pytest
 from app.modules.logging.events import ActivityEvent
 from app.modules.logging.files import DailyFileWriter, event_paths, format_line, prune_and_compress
 
+pytestmark = pytest.mark.req("R7")
+
 BOT = UUID("00000000-0000-0000-0000-000000000017")
 PRODUCT = UUID("00000000-0000-0000-0000-000000000384")
 CATEGORY = UUID("00000000-0000-0000-0000-000000000005")

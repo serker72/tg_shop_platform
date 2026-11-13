@@ -7,6 +7,16 @@ COMPOSE := docker compose
 # Services started by `test-integration` (db_update/master_bot/bot_worker join after Stage 1 wave 2)
 TEST_SERVICES ?= postgres redis rabbitmq minio
 WAIT_TIMEOUT ?= 300
+# Extra pytest args of test-integration (test-report passes --req-report/--junitxml)
+INTEGRATION_PYTEST_ARGS ?=
+# test-report: raw results (git-ignored build/) and the customer report (Markdown)
+REPORT_DIR ?= build/reports
+# For delivery: commit the code, then make test-report REPORT_MD=docs/reports/milestone-I-tests.md
+# on the clean tree and commit the report separately (it names the verified commit).
+REPORT_MD ?= $(REPORT_DIR)/milestone-I-tests.md
+# promtool image = the Prometheus image pinned in docker-compose.obs.yml (single source)
+PROM_DIR := ops/observability/prometheus
+PROMTOOL_IMAGE ?= $(shell sed -n 's/.*PROMETHEUS_IMAGE:-\([^}]*\)}.*/\1/p' docker-compose.obs.yml | head -n1)
 # make ready: how long to wait for /health/ready = 200 of master_bot and bot_worker (seconds)
 READY_TIMEOUT ?= 60
 # Observability stack (docker-compose.obs.yml); uses the same ENV_FILE (ENV_FILE=.env.test for test)
@@ -34,7 +44,7 @@ export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION (
 endef
 
 .PHONY: help install env init-dirs env-test version up ready down migrate lint format format-check check test \
-	test-integration test-integration-down clean archive-audit \
+	test-integration test-integration-down test-alerts test-report clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset obs-auth \
 	agent-config agent-up agent-down agent-logs
 
@@ -185,9 +195,44 @@ test-integration: env-test ## Start test infra (TEST_SERVICES) and run integrati
 		RABBITMQ_HOST=127.0.0.1 RABBITMQ_PORT="$${RABBITMQ_PORT_HOST:-5672}" \
 		MINIO_ENDPOINT="127.0.0.1:$${MINIO_API_PORT_HOST:-9000}" \
 		REQUIRE_INFRA=1; \
-	rc=0; uv run pytest -m integration tests/integration || rc=$$?; \
+	rc=0; uv run pytest -m integration tests/integration $(INTEGRATION_PYTEST_ARGS) || rc=$$?; \
 	if [ $$rc -eq 5 ]; then echo "No integration tests collected — treated as success"; rc=0; fi; \
 	echo "Test stack is left running; stop it with: make test-integration-down [PURGE=1]"; \
+	exit $$rc
+
+test-alerts: ## Validate Prometheus alert rules and run their unit tests (promtool in Docker)
+	@test -n "$(PROMTOOL_IMAGE)" || { echo "ERROR: Prometheus image not found in docker-compose.obs.yml"; exit 1; }
+	docker run --rm --entrypoint promtool -v "$(CURDIR)/$(PROM_DIR):/p:ro" -w /p/tests $(PROMTOOL_IMAGE) \
+		check rules $(patsubst $(PROM_DIR)/%,/p/%,$(wildcard $(PROM_DIR)/rules/*.yml))
+	docker run --rm --entrypoint promtool -v "$(CURDIR)/$(PROM_DIR):/p:ro" -w /p/tests $(PROMTOOL_IMAGE) \
+		test rules rules_test.yml
+
+# $(SUBMAKE) instead of $(MAKE): GNU make runs lines that mention $(MAKE) even under `make -n`,
+# which would start the test stack; an indirect reference keeps `make -n test-report` a dry run.
+SUBMAKE = $(MAKE)
+
+# Failing tests do not stop the chain: the report is always written, the target exits non-zero.
+# The test stack is stopped afterwards only if it was not running before (test-integration
+# itself leaves it up).
+test-report: ## Unit + integration + promtool -> REPORT_MD (build/reports/milestone-I-tests.md; delivery: REPORT_MD=docs/reports/...)
+	@mkdir -p $(REPORT_DIR); \
+	rm -f $(addprefix $(REPORT_DIR)/,unit.json unit.xml integration.json integration.xml promtool.txt promtool.rc); \
+	was_up=0; \
+	if [ -f "$(TEST_ENV_FILE)" ] && [ -n "$$($(COMPOSE) --env-file $(TEST_ENV_FILE) ps -q 2>/dev/null)" ]; then was_up=1; fi; \
+	rc=0; \
+	echo "== unit tests"; \
+	uv run pytest tests/unit -q --req-report=$(REPORT_DIR)/unit.json --junitxml=$(REPORT_DIR)/unit.xml || rc=1; \
+	echo "== integration tests"; \
+	$(SUBMAKE) --no-print-directory test-integration \
+		INTEGRATION_PYTEST_ARGS="--req-report=$(REPORT_DIR)/integration.json --junitxml=$(REPORT_DIR)/integration.xml" || rc=1; \
+	if [ $$was_up -eq 0 ]; then \
+		echo "== stopping the test stack started by test-report"; \
+		$(SUBMAKE) --no-print-directory test-integration-down || rc=1; \
+	fi; \
+	echo "== alert rules (promtool)"; \
+	prc=0; $(SUBMAKE) --no-print-directory test-alerts > $(REPORT_DIR)/promtool.txt 2>&1 || prc=$$?; \
+	cat $(REPORT_DIR)/promtool.txt; echo $$prc > $(REPORT_DIR)/promtool.rc; [ $$prc -eq 0 ] || rc=1; \
+	uv run python ops/scripts/test_report.py --reports $(REPORT_DIR) --output $(REPORT_MD) || rc=1; \
 	exit $$rc
 
 test-integration-down: ## Stop integration stack (PURGE=1 also removes test data dir)

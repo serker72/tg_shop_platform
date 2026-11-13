@@ -27,7 +27,7 @@ from app.shared_kernel.domain.storage import (
 from app.shared_kernel.infrastructure.storage.minio import MinIOStorage, build_minio_client
 from tests.integration.conftest import infra_unavailable as _infra_unavailable
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R5")]
 
 PREFIX = "test"
 

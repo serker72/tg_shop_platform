@@ -11,6 +11,8 @@ from pydantic import ValidationError
 
 from app.core.config import ObservabilitySettings, is_internal_host
 
+pytestmark = pytest.mark.req("SEC1")
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ops" / "scripts" / "check_internal_url.sh"
 

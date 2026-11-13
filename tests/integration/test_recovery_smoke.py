@@ -35,7 +35,7 @@ from app.shared_kernel.infrastructure.storage.minio import MinIOStorage, build_m
 from tests.integration._cli import assert_no_password, cli_env, run_cli
 from tests.integration.conftest import ALEMBIC_INI, Query, infra_unavailable, run_alembic
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R8", "S6")]
 
 PREFIX = "test/recovery"
 LOG_TABLES = [("public.audit_logs",), ("public.user_activity",)]

@@ -29,6 +29,8 @@ from app.modules.logging.retention import (
     validate_retention_months,
 )
 
+pytestmark = pytest.mark.req("R7")
+
 
 def _audit(keep_table: bool | None = True, schema: str | None = "archive") -> PartConfigRow:
     return PartConfigRow(AUDIT_TABLE, "24 months", schema, keep_table, True)

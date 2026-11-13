@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from tests.integration.conftest import Query
 from tests.integration.conftest import run_alembic as _alembic
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R7")]
 
 TABLES = ("user_activity", "audit_logs")
 
@@ -56,6 +56,7 @@ async def _suffix(engine: AsyncEngine, month_offset_sql: str) -> str:
 
 
 @pytest.mark.parametrize("table", TABLES)
+@pytest.mark.req("S2")
 async def test_month_boundaries_route_explicitly(clean_db: AsyncEngine, table: str) -> None:
     """First second, a middle second and the last second of the month, then a far date.
 
@@ -77,6 +78,7 @@ async def test_month_boundaries_route_explicitly(clean_db: AsyncEngine, table: s
     assert await _route(clean_db, table, "now() + interval '5 years'") == f"{table}_default"
 
 
+@pytest.mark.req("S2")
 async def test_last_second_of_month_is_not_default(clean_db: AsyncEngine) -> None:
     """Explicit regression guard: the last second of the month never falls into DEFAULT."""
     current = await _suffix(clean_db, "")

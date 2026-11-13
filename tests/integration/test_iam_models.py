@@ -690,6 +690,7 @@ def test_rbac_migration_ring(scratch_db: tuple[str, Query]) -> None:
     _assert_rbac_seed(query)
 
 
+@pytest.mark.req("R1")
 def test_models_match_migrations(migrated_scratch_db: tuple[str, Query]) -> None:
     """Autogenerate against a fresh ``head`` reports no difference for any model.
 

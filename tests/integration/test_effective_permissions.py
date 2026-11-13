@@ -36,7 +36,7 @@ from app.modules.iam.permissions import (
 from app.modules.iam.repository import PermissionQueryRepository
 from app.modules.iam.snapshot import DecisionSource
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R3")]
 
 
 #: Unique per test run and per call: the savepoint session rolls the rows back, but a flaky

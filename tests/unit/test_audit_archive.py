@@ -22,6 +22,8 @@ from app.shared_kernel.domain.storage import (
     StoredObject,
 )
 
+pytestmark = pytest.mark.req("R7")
+
 TABLE = "audit_logs_p20240101"
 
 

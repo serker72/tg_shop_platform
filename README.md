@@ -131,6 +131,14 @@
 | `make env-test` | сгенерировать `.env.test` (изолированные данные, порты +20000) |
 | `make test-integration` | поднять тестовую инфраструктуру и прогнать интеграционные тесты |
 | `make check` | линтеры + проверка форматирования + unit-тесты |
+| `make test-alerts` | проверить правила алертов Prometheus (promtool в Docker) |
+| `make test-report` | unit + интеграционные тесты + promtool → отчёт `build/reports/milestone-I-tests.md` |
+
+Отчёты о сдаче этапов — [docs/reports/](docs/reports/): результаты автотестов вехи I
+([milestone-I-tests.md](docs/reports/milestone-I-tests.md)) и сценарий демонстрации
+([milestone-I-demo.md](docs/reports/milestone-I-demo.md)). Отчёт для сдачи: закоммитить код,
+на чистом дереве выполнить `make test-report REPORT_MD=docs/reports/milestone-I-tests.md` и закоммитить
+отчёт отдельным коммитом (в отчёте указан проверенный коммит).
 
 Документация: восстановление — [docs/ops/recovery.md](docs/ops/recovery.md),
 версионирование — [docs/ops/versioning.md](docs/ops/versioning.md).

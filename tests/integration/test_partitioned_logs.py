@@ -27,7 +27,7 @@ from app.modules.logging.models import AuditLog, UserActivity
 from tests.integration.conftest import Query, reset_system_settings_sql
 from tests.integration.conftest import run_alembic as _alembic
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R7")]
 
 TABLES = ("user_activity", "audit_logs")
 INDEXES = {
@@ -59,6 +59,7 @@ def _sqlstate(error: DBAPIError) -> str | None:
 # --- main test database (savepoint session) ------------------------------------------
 
 
+@pytest.mark.req("S1")
 async def test_part_config_and_premade_partitions(session: AsyncSession) -> None:
     rows = (
         await session.execute(
@@ -91,6 +92,7 @@ async def test_part_config_and_premade_partitions(session: AsyncSession) -> None
         assert f"{table}_default" in children
 
 
+@pytest.mark.req("S2")
 async def test_insert_routes_to_month_and_default(session: AsyncSession) -> None:
     last_moment = (
         await session.execute(
@@ -159,6 +161,7 @@ async def test_audit_actor_type_check(session: AsyncSession) -> None:
         "parent_table = 'public.x', retention_keep_table = false",
     ],
 )
+@pytest.mark.req("S3")
 async def test_guard_blocks_audit_config(session: AsyncSession, assignment: str) -> None:
     with pytest.raises(DBAPIError) as caught:
         async with session.begin_nested():
@@ -173,6 +176,7 @@ async def test_guard_blocks_audit_config(session: AsyncSession, assignment: str)
     assert (await session.execute(text("SELECT 1"))).scalar_one() == 1
 
 
+@pytest.mark.req("S3")
 async def test_guard_allows_user_activity(session: AsyncSession) -> None:
     result = await session.execute(
         text(
@@ -183,6 +187,7 @@ async def test_guard_allows_user_activity(session: AsyncSession) -> None:
     assert result.rowcount == 1  # type: ignore[attr-defined]
 
 
+@pytest.mark.req("S3")
 async def test_guard_function_hardening(session: AsyncSession) -> None:
     config, public_can_execute = (
         await session.execute(

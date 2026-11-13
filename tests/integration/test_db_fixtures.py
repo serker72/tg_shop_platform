@@ -25,6 +25,7 @@ pytestmark = pytest.mark.integration
 # bound parameters, so f-strings are the only way to build these probe statements.
 
 
+@pytest.mark.req("R1")
 async def test_database_is_migrated_to_head(engine: AsyncEngine) -> None:
     head = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
     async with engine.connect() as connection:

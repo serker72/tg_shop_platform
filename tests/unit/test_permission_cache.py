@@ -17,6 +17,8 @@ from app.modules.iam.cache import (
 )
 from app.modules.iam.snapshot import PermissionSnapshot
 
+pytestmark = pytest.mark.req("R3")
+
 ERRORS = [RedisConnectionError("down"), RedisTimeoutError("slow"), OSError("io"), TimeoutError()]
 
 

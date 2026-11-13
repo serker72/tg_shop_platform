@@ -37,7 +37,7 @@ from app.modules.iam.snapshot import DecisionSource, PermissionSnapshot
 from app.modules.system.repository import SystemSettingsRepository
 from app.shared_kernel.infrastructure.redis import build_redis
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R3")]
 
 
 def tg_id() -> int:
@@ -297,6 +297,7 @@ async def test_guarded_write_lua(redis_client: Any) -> None:
     assert await cache.set(bumped, tg, 60, generations=(1, 6)) is False  # user gen differs
 
 
+@pytest.mark.req("S5")
 async def test_redis_down_falls_back_to_postgres(session: AsyncSession, settings: Settings) -> None:
     broken = settings.model_copy(update={"redis": settings.redis.model_copy(update={"port": 1})})
     client = build_redis(broken)

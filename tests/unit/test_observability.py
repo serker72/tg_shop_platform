@@ -38,7 +38,10 @@ from app.core.observability.sentry import (
 from app.core.observability.tracing import TRACE_ID_HEADER, AiogramTraceIdMiddleware
 from app.modules.logging.metrics import DROP_REASONS, LogsDroppedCounter
 
+pytestmark = pytest.mark.req("R8")
 
+
+@pytest.mark.req("S5")
 def test_logs_dropped_exported() -> None:
     counter = LogsDroppedCounter()
     counter.inc(3, reason="queue_full")
@@ -54,6 +57,7 @@ def test_logs_dropped_exported() -> None:
     assert counter.value == 6  # the counter API is unchanged
 
 
+@pytest.mark.req("S5")
 def test_logs_dropped_known_reasons_zero() -> None:
     text = render_metrics(build_metrics(LogsDroppedCounter()).registry).decode()
     assert "# TYPE logs_dropped_total counter" in text
@@ -61,6 +65,7 @@ def test_logs_dropped_known_reasons_zero() -> None:
         assert f'logs_dropped_total{{reason="{reason}"}} 0.0' in text
 
 
+@pytest.mark.req("S5")
 async def test_di_shares_dropped_counter_between_buffer_and_metrics(tmp_path: Any) -> None:
     from uuid import uuid4
 

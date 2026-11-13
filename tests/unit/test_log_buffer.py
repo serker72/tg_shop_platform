@@ -19,6 +19,8 @@ from app.modules.logging.events import ActivityEvent
 from app.modules.logging.files import DailyFileWriter
 from app.modules.logging.metrics import LogsDroppedCounter
 
+pytestmark = pytest.mark.req("R7")
+
 BOT = UUID("00000000-0000-0000-0000-000000000001")
 
 
@@ -77,6 +79,7 @@ def counter() -> LogsDroppedCounter:
     return LogsDroppedCounter()
 
 
+@pytest.mark.req("S5")
 def test_counter_by_reason() -> None:
     counter = LogsDroppedCounter()
     counter.inc(reason="a")
@@ -95,6 +98,7 @@ def test_event_to_row_maps_metadata() -> None:
     assert isinstance(row["id"], UUID)
 
 
+@pytest.mark.req("S5")
 async def test_log_before_start_and_after_stop_is_dropped(
     tmp_path: Path, counter: LogsDroppedCounter, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -109,6 +113,7 @@ async def test_log_before_start_and_after_stop_is_dropped(
     assert "action=AFTER" in err
 
 
+@pytest.mark.req("S5")
 async def test_queue_full_goes_to_stderr(
     tmp_path: Path, counter: LogsDroppedCounter, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -123,6 +128,7 @@ async def test_queue_full_goes_to_stderr(
     assert len(factory.rows) == 2
 
 
+@pytest.mark.req("S5")
 async def test_db_failure_retries_then_drops_but_files_written(
     tmp_path: Path, counter: LogsDroppedCounter, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -141,6 +147,7 @@ async def test_db_failure_retries_then_drops_but_files_written(
     assert [row["telegram_user_id"] for row in factory.rows] == [8]
 
 
+@pytest.mark.req("S5")
 async def test_file_failure_does_not_block_db(tmp_path: Path, counter: LogsDroppedCounter) -> None:
     (tmp_path / "users").write_text("blocker")
     factory = FakeFactory()
@@ -164,6 +171,7 @@ async def test_stop_drains_queue(tmp_path: Path, counter: LogsDroppedCounter) ->
     assert not buffer.running
 
 
+@pytest.mark.req("S5")
 async def test_stop_timeout_dumps_rest(
     tmp_path: Path, counter: LogsDroppedCounter, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -227,6 +235,7 @@ async def test_prune_runs_outside_consumer(
     assert counter.value == 0
 
 
+@pytest.mark.req("S5")
 async def test_log_never_raises_on_broken_event(
     tmp_path: Path, counter: LogsDroppedCounter
 ) -> None:

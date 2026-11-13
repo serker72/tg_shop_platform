@@ -22,7 +22,7 @@ from app.shared_kernel.infrastructure.database import build_engine
 from app.shared_kernel.infrastructure.storage.minio import MinIOStorage, build_minio_client
 from tests.integration._guards import assert_test_database
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.req("R8")]
 
 COMPONENT = "obs_test_component"
 
@@ -45,6 +45,7 @@ async def heartbeat_redis(redis_client: Any) -> AsyncIterator[Any]:
     await redis_client.unlink(heartbeat_key(COMPONENT))
 
 
+@pytest.mark.req("R1")
 async def test_ready_against_real_stack(
     settings: Settings, migrated_db: Any, heartbeat_redis: Any
 ) -> None:
