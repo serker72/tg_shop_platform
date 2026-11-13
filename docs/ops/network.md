@@ -5,7 +5,10 @@
 - **VPS 2** — стек наблюдаемости (`docker-compose.obs.yml`): Loki, Prometheus,
   Alertmanager, Grafana, GlitchTip, Caddy. Подробности — [observability.md](observability.md).
 
-Принцип: **наружу открыт только Caddy 80/443 на VPS 2** (и SSH). Всё остальное слушает
+Принцип: **наружу открыт только Caddy 80/443 на VPS 2** (и SSH), целиком за HTTP Basic Auth
+(`CADDY_MODE=ip` — `https://<VPS_IP>/` и `/grafana/`, самоподписанный сертификат, `curl -k -u`;
+`CADDY_MODE=domain` — домены с Let's Encrypt; см. [observability.md](observability.md)).
+Sentry DSN — только внутренний адрес (Docker-сеть или VPN), публичный запрещён. Всё остальное слушает
 `127.0.0.1` или VPN-адрес. Трафик VPS 1 → VPS 2 (логи, метрики, ошибки) и скрейп
 VPS 2 → VPS 1 идут только через VPN.
 
@@ -69,12 +72,13 @@ Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale u
 | Prometheus | `127.0.0.1:${PROMETHEUS_PORT_HOST:-9090}` | remote write / UI — только VPN или SSH-туннель |
 | Alertmanager | `127.0.0.1:${ALERTMANAGER_PORT_HOST:-9093}` | только локально (исходящие в Telegram) |
 | obs-postgres, obs-redis | не публикуются | внутренняя сеть compose |
-| **Caddy** | `${CADDY_BIND_ADDRESS:-0.0.0.0}:80`, `:443` | **публично** |
+| **Caddy** | `${CADDY_BIND_ADDRESS:-0.0.0.0}:80`, `:443` | **публично**, Basic Auth на всё |
 | WireGuard | `0.0.0.0:51820/udp` | только с IP VPS 1 |
 
 Не публикуются в интернет ни при каких условиях: `/metrics` и `/health/*` приложения,
 Alloy, Loki push API, Prometheus (включая remote write endpoint), Alertmanager,
-PostgreSQL/Redis/RabbitMQ/MinIO. Caddy проксирует только Grafana и GlitchTip.
+PostgreSQL/Redis/RabbitMQ/MinIO. Caddy проксирует только Grafana и GlitchTip (за Basic Auth,
+без исключений для API; API GlitchTip / `sentry-cli` — через SSH на `127.0.0.1:8000`).
 
 Важно: Docker публикует порты через собственные цепочки iptables (`DOCKER`), в обход
 правил ufw. Поэтому защита строится в первую очередь на адресе публикации

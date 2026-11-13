@@ -35,12 +35,21 @@ endef
 
 .PHONY: help install env init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down clean archive-audit \
-	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset \
+	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset obs-auth \
 	agent-config agent-up agent-down agent-logs
 
 # Loads $(1) into the recipe shell (bash expands ${PROJECT_DATA_DIR}-style references).
 # Limitation (same as docker compose interpolation): values must not contain unescaped `$`,
 # backticks or unbalanced quotes — see .env.example.
+# Loads ENV_FILE and exports mode-dependent variables of the obs stack (CADDY_MODE,
+# GRAFANA_ROOT_URL, GRAFANA_SERVE_FROM_SUB_PATH, GLITCHTIP_PUBLIC_URL) for every docker compose
+# call (shell env wins over --env-file). $(1)=--check: guard of obs-up/obs-config;
+# --lenient: obs-down/ps/logs (CADDY_MODE may be missing in an old .env).
+define obs_env
+$(call load_env,$(ENV_FILE)); \
+obs_exports=$$(bash ops/scripts/obs_mode.sh $(1)) || exit 1; eval "$$obs_exports"
+endef
+
 define load_env
 test -f "$(1)" || { echo "ERROR: $(1) not found ($(if $(filter $(abspath .env),$(abspath $(1))),make env,make env-test))"; exit 1; }; \
 set -a; source "$(1)"; set +a
@@ -75,7 +84,9 @@ install: ## Install dependencies (uv sync) and pre-commit hooks
 env: ## Generate ENV_FILE from .env.example with random secrets (SKIP if exists; FORCE=1 regenerates, backup .bak.<ts>)
 	@set -e; f="$(ENV_FILE)"; \
 	if [ -e "$$f" ] && [ "$(FORCE)" != "1" ]; then echo "SKIP: $$f exists (FORCE=1 to regenerate)"; exit 0; fi; \
-	if [ ! -e "$$f" ]; then bash ops/scripts/env_test.sh --init .env.example "$$f"; exit 0; fi; \
+	if [ ! -e "$$f" ]; then \
+		OBS_AUTH_IMPLICIT="$(if $(filter env,$(MAKECMDGOALS)),0,1)" \
+			bash ops/scripts/env_test.sh --init .env.example "$$f"; exit 0; fi; \
 	rm -f "$$f.new"; \
 	bash ops/scripts/env_test.sh --init .env.example "$$f.new"; \
 	bak="$$f.bak.$$(date +%Y%m%d%H%M%S)"; \
@@ -190,15 +201,26 @@ clean: ## Stop test stack, remove test data dir and caches
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
 
-obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (docker compose config)
-	$(OBS_COMPOSE) config --quiet && echo "docker-compose.obs.yml OK ($(ENV_FILE))"
+obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (CADDY_MODE/VPS_IP/domains/OBS_AUTH_* + compose config)
+	@$(call obs_env,--check); \
+	$(OBS_COMPOSE) config --quiet && echo "docker-compose.obs.yml OK ($(ENV_FILE), CADDY_MODE=$$CADDY_MODE)"
 
 obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy, bootstrap GlitchTip
+	@$(call obs_env,--check); \
 	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
 obs-bootstrap: ## Idempotent GlitchTip admin/org/team/project from ENV_FILE; writes SENTRY_DSN (backup .bak)
-	@bash ops/scripts/obs_bootstrap.sh "$(ENV_FILE)"
+	@$(call obs_env); \
+	bash ops/scripts/obs_bootstrap.sh "$(ENV_FILE)"
+
+# Password: interactive (hidden) or generated (empty answer / no tty), PASSWORD_STDIN=1 reads stdin.
+obs-auth: ## Set Caddy Basic Auth (OBS_AUTH_USER/OBS_AUTH_HASH in ENV_FILE), recreate caddy if running
+	@bash ops/scripts/obs_auth.sh "$(ENV_FILE)"
+	@$(call obs_env); \
+	if [ -n "$$($(OBS_COMPOSE) ps -q caddy 2>/dev/null)" ]; then \
+		$(OBS_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout $(WAIT_TIMEOUT) caddy; \
+	else echo "caddy is not running: the new credentials apply on make obs-up"; fi
 
 # One-off: drops ONLY the GlitchTip database (OBS_POSTGRES_DB) in obs-postgres, re-runs
 # migrations and bootstrap. Other databases and services are not touched.
@@ -206,7 +228,7 @@ obs-glitchtip-reset: ## DESTRUCTIVE: recreate GlitchTip DB and bootstrap from EN
 	@if [ "$(CONFIRM)" != "1" ]; then \
 		echo "ERROR: obs-glitchtip-reset deletes ALL GlitchTip data (users, projects, events)."; \
 		echo "       Run: make obs-glitchtip-reset CONFIRM=1 [ENV_FILE=...]"; exit 1; fi
-	@$(call load_env,$(ENV_FILE)); \
+	@$(call obs_env); \
 	db="$${OBS_POSTGRES_DB:-glitchtip}"; user="$${OBS_POSTGRES_USER:-glitchtip}"; \
 	[[ "$$db" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ && "$$user" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ ]] \
 		|| { echo "ERROR: OBS_POSTGRES_DB/OBS_POSTGRES_USER must be plain identifiers"; exit 1; }; \
@@ -219,13 +241,13 @@ obs-glitchtip-reset: ## DESTRUCTIVE: recreate GlitchTip DB and bootstrap from EN
 	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
 obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
-	$(OBS_COMPOSE) down
+	@$(call obs_env,--lenient); $(OBS_COMPOSE) down
 
 obs-ps: ## Show observability stack services
-	$(OBS_COMPOSE) ps
+	@$(call obs_env,--lenient); $(OBS_COMPOSE) ps
 
 obs-logs: ## Follow observability logs (SERVICE=grafana to filter)
-	$(OBS_COMPOSE) logs -f --tail=200 $(SERVICE)
+	@$(call obs_env,--lenient); $(OBS_COMPOSE) logs -f --tail=200 $(SERVICE)
 
 agent-config: ## Validate main compose with the observability profile (Alloy)
 	@$(agent_compose) config --quiet && echo "docker-compose.yml + profile observability OK ($(ENV_FILE))"

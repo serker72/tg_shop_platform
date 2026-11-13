@@ -25,6 +25,9 @@ scrape_configs:
     static_configs:
       - targets: ["loki:3100"]
 
+  # Metrics path depends on CADDY_MODE: with GF_SERVER_SERVE_FROM_SUB_PATH=true (ip) Grafana
+  # answers /metrics with 301 to the public ROOT_URL, so the target file (mounted by compose from
+  # grafana_targets.<CADDY_MODE>.yml) sets __metrics_path__.
   - job_name: grafana
-    static_configs:
-      - targets: ["grafana:3000"]
+    file_sd_configs:
+      - files: ["/etc/prometheus-targets/grafana.yml"]

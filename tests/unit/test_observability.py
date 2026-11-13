@@ -316,7 +316,9 @@ def test_before_send_transaction_scrubs_spans(monkeypatch: pytest.MonkeyPatch) -
     captured: dict[str, Any] = {}
     monkeypatch.setattr(sentry_sdk, "init", lambda **kw: captured.update(kw))
     monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a: None)
-    settings = Settings(_env_file=None, observability={"sentry_dsn": "https://k@gt.local/1"})
+    settings = Settings(
+        _env_file=None, observability={"sentry_dsn": "http://k@glitchtip-web:8000/1"}
+    )
     assert init_sentry(settings, component="test") is True
     hook = captured["before_send_transaction"]
     transaction: Any = {

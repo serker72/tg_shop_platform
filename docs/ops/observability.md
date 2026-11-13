@@ -28,7 +28,46 @@ test `tg_shop_platform_test_obs`; dev и test работают одноврем�
 кроме Caddy, публикуются только на `127.0.0.1:${*_PORT_HOST}`. Приложение отправляет логи/
 метрики через порты хоста (на VPS 2 — через VPN). Prometheus видит хост как
 `host.docker.internal` (host-gateway) для скрейпа метрик приложения.
-Caddy публикуется на `${CADDY_BIND_ADDRESS:-0.0.0.0}:80/443`.
+Caddy публикуется на `${CADDY_BIND_ADDRESS:-0.0.0.0}:80/443` и закрывает **всё** HTTP Basic Auth
+(`OBS_AUTH_USER` / `OBS_AUTH_HASH`, без исключений; заголовок `Authorization` в Grafana/GlitchTip
+не передаётся).
+
+## Доступ через Caddy (`CADDY_MODE`)
+
+| Режим | Адреса | TLS |
+|---|---|---|
+| `ip` (в `.env.example`) | `https://<VPS_IP>/` — GlitchTip, `https://<VPS_IP>/grafana/` — Grafana | `tls internal` (самоподписанный: предупреждение браузера, `curl -k`) |
+| `domain` | `https://<GRAFANA_DOMAIN>/`, `https://<GLITCHTIP_DOMAIN>/` (можно `grafana.<ip>.nip.io`) | Let's Encrypt, `*.localhost` — внутренний CA |
+
+http → https редиректит сам Caddy, **но на стандартный порт 443**: при нестандартном
+`CADDY_HTTPS_PORT_HOST` (test-стек: 20443) редирект с `http://host:<CADDY_HTTP_PORT_HOST>/` ведёт на
+`https://host/` и не работает — открывайте сразу `https://host:<CADDY_HTTPS_PORT_HOST>/`. На
+прод-портах 80/443 ограничения нет; ROOT_URL Grafana и `GLITCHTIP_DOMAIN` содержат порт и не
+затронуты. Конфиги: `ops/observability/caddy/Caddyfile.ip` / `.domain`
+(монтируется `Caddyfile.${CADDY_MODE}`). `GF_SERVER_ROOT_URL`, `GF_SERVER_SERVE_FROM_SUB_PATH` и
+`GLITCHTIP_DOMAIN` вычисляются из `CADDY_MODE` скриптом `ops/scripts/obs_mode.sh` во всех целях
+`make obs-*`; `make obs-up`/`obs-config` дополнительно проверяют `VPS_IP` (ip) или домены (domain)
+и наличие `OBS_AUTH_*`. `CADDY_MODE` обязателен для всех obs-целей, кроме `obs-down`/`obs-ps`/
+`obs-logs` (старый `.env` без него не переводится молча в режим `ip`). При прямом
+`docker compose` действуют дефолты режима `ip`.
+
+Prometheus скрейпит Grafana по пути, зависящему от режима: в `ip` (sub path) `/metrics` отвечает
+301 на публичный ROOT_URL, поэтому compose монтирует
+`ops/observability/prometheus/grafana_targets.${CADDY_MODE}.yml` (`__metrics_path__`
+`/grafana/metrics` или `/metrics`). Healthcheck Grafana — `/api/health` (200 в обоих режимах).
+
+### Обновление существующего .env
+
+`.env`, созданный до Basic Auth: добавьте `CADDY_MODE` (`domain` — если доступ уже был по
+`GRAFANA_DOMAIN`/`GLITCHTIP_DOMAIN`; `ip` + `VPS_IP`), `OBS_AUTH_USER=admin`, `OBS_AUTH_HASH=`,
+затем `make obs-auth` и `make obs-up`. `SENTRY_DSN` с публичным хостом (`glitchtip.localhost`,
+домен) теперь отвергается при старте приложения — очистите его и выполните `make obs-bootstrap`.
+
+Учётные данные: `make env` создаёт `OBS_AUTH_USER=admin` и случайный пароль (показывается один
+раз; без docker — предупреждение), `make obs-auth` задаёт новый пароль (интерактивно; пустой ответ —
+сгенерировать; `PASSWORD_STDIN=1` — из stdin) и пересоздаёт запущенный caddy. В `.env` хранится только
+`OBS_AUTH_HASH` = base64 bcrypt-хеша (`$` в `.env` недопустим; `basic_auth` Caddy 2.10 принимает
+base64-хеш напрямую). Вход: Basic Auth → затем логин Grafana/GlitchTip.
 
 ## Порты (dev / test)
 
@@ -60,13 +99,20 @@ Alertmanager silences/notifications `720h`.
 
 ## Доступ локально
 
-- Grafana: http://127.0.0.1:3000 (логин `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`)
-  или через Caddy: `https://grafana.localhost` (внутренний CA Caddy → `curl -k`/исключение
-  в браузере). Источники Prometheus, Loki, Alertmanager подключены через provisioning.
-- GlitchTip: http://127.0.0.1:8000 или `https://glitchtip.localhost`. Регистрация выключена;
-  вход — `GLITCHTIP_ADMIN_EMAIL` / `GLITCHTIP_ADMIN_PASSWORD` из `.env` (см. «GlitchTip bootstrap»).
-- Проверка: `curl -u admin:$GRAFANA_ADMIN_PASSWORD http://127.0.0.1:3000/api/datasources`,
-  `curl http://127.0.0.1:8000/_health/`.
+Локально: `CADDY_MODE=ip`, `VPS_IP=127.0.0.1`.
+
+- Grafana: `https://127.0.0.1/grafana/` через Caddy (Basic Auth, затем `GRAFANA_ADMIN_USER` /
+  `GRAFANA_ADMIN_PASSWORD`) или напрямую http://127.0.0.1:3000/grafana/ (в режиме `domain` —
+  http://127.0.0.1:3000/). Источники Prometheus, Loki, Alertmanager подключены через provisioning.
+- GlitchTip UI: `https://127.0.0.1/` через Caddy (Basic Auth, затем `GLITCHTIP_ADMIN_EMAIL` /
+  `GLITCHTIP_ADMIN_PASSWORD` из `.env`, см. «GlitchTip bootstrap»); регистрация выключена.
+  Порт `127.0.0.1:${GLITCHTIP_PORT_HOST}` — для приёма событий, `/_health/` и API на сервере
+  (ссылки UI строятся от `GLITCHTIP_DOMAIN` = публичный адрес Caddy).
+- Проверка: `curl -k -u admin:<пароль Basic Auth> https://127.0.0.1/grafana/api/health`,
+  `curl http://127.0.0.1:8000/_health/`; без `-u` Caddy отвечает 401.
+- API GlitchTip / `sentry-cli` — только на сервере через SSH, мимо Caddy (Authorization не
+  проксируется): `docker run --rm --network host -e SENTRY_URL=http://127.0.0.1:8000
+  -e SENTRY_AUTH_TOKEN=... getsentry/sentry-cli releases list --org tgshopplatform`.
 
 ## GlitchTip bootstrap
 
@@ -95,7 +141,11 @@ Alertmanager silences/notifications `720h`.
 - DSN: `grep ^SENTRY_DSN= .env`. Применить: пересоздать ботов — `make agent-up` с
   `ALLOY_SINGLE_HOST=1` (overlay `ops/observability/alloy/compose.single-host.yml` подключает
   `master_bot`/`bot_worker` к сети `${PROJECT_NAME}_obs_default`, где резолвится `glitchtip-web`).
-  DSN из UI GlitchTip содержит хост `GLITCHTIP_DOMAIN` и из контейнеров не подходит.
+  DSN из UI GlitchTip содержит публичный адрес и из контейнеров не подходит.
+- Публичный DSN запрещён: хост `SENTRY_DSN` (валидатор `ObservabilitySettings`, ошибка при
+  запуске) и `GLITCHTIP_INTERNAL_URL` (`ops/scripts/check_internal_url.sh` в obs-bootstrap)
+  — только IP из 10/8, 172.16/12, 192.168/16, 127/8, 100.64/10, `::1`, `fc00::/7` или имя
+  без точки (`glitchtip-web`, `localhost`).
 - Вход: UI (см. «Доступ локально») или API allauth
   `POST /_allauth/browser/v1/auth/login` `{"email": ..., "password": ...}`.
 - Сброс (разово, **удаляет все данные GlitchTip**: пользователей, проекты, события):

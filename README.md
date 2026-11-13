@@ -55,10 +55,21 @@
    `make agent-up`) сам вызовет `make env`, если `.env` ещё нет. Команда копирует
    `.env.example`, подставляет случайные пароли (`change_me*`, `ENCRYPTION_KEY`,
    `POSTGRES_MONITORING_PASSWORD`) и ставит на файл права `600`. Существующий `.env` она
-   не трогает. После этого заполните вручную: `MASTER_BOT_TOKEN` (обязательно), а также
-   `ALERT_TELEGRAM_BOT_TOKEN` / `ALERT_TELEGRAM_CHAT_ID`, `GRAFANA_DOMAIN` /
-   `GLITCHTIP_DOMAIN` и URL для Alloy (см. ниже). Для локальной разработки поставьте
-   `PROJECT_ENVIRONMENT=loc`.
+   не трогает. Также генерируется Basic Auth для Caddy: `OBS_AUTH_USER=admin` и случайный
+   пароль — **он выводится один раз, сохраните его** (в `.env` только base64 bcrypt-хеш
+   `OBS_AUTH_HASH`; без docker хеш останется пустым — выполните `make obs-auth`; новый пароль —
+   тоже `make obs-auth`). После этого заполните вручную: `MASTER_BOT_TOKEN` (обязательно), а также
+   `ALERT_TELEGRAM_BOT_TOKEN` / `ALERT_TELEGRAM_CHAT_ID`, режим доступа к мониторингу
+   (`CADDY_MODE=ip` + `VPS_IP` — `https://<VPS_IP>/` GlitchTip и `https://<VPS_IP>/grafana/`,
+   самоподписанный сертификат, браузер покажет предупреждение; или `CADDY_MODE=domain` +
+   `GRAFANA_DOMAIN` / `GLITCHTIP_DOMAIN` с Let's Encrypt, подойдёт `grafana.<ip>.nip.io`) и URL
+   для Alloy (см. ниже). Вход: Basic Auth → затем логин Grafana/GlitchTip. Для локальной
+   разработки поставьте `PROJECT_ENVIRONMENT=loc` и `VPS_IP=127.0.0.1`.
+
+   > ⚠️ Пароль Basic Auth печатается **один раз** (блок `SAVE THIS PASSWORD`). Если `.env` создан
+   > неявно (`make init-dirs`, `make obs-up`, `make migrate`, ...), блок легко пропустить в
+   > длинном выводе, а в CI он попадёт в лог — в CI создавайте `.env` заранее. Потеряли пароль —
+   > задайте новый: `make obs-auth`.
 
    > ⚠️ `make env FORCE=1` сначала генерирует новый файл в `.env.new`, затем сохраняет текущий
    > в `.env.bak.<YYYYmmddHHMMSS>` (права 600, не перезаписывается) и заменяет его.
@@ -66,11 +77,23 @@
    > **старые** пароли, а новый `ENCRYPTION_KEY` не расшифрует уже сохранённые секреты.
    > На рабочих данных `FORCE=1` не используйте.
 
+   **Обновление существующего .env** (созданного до появления Basic Auth в Caddy): допишите
+   переменные из `.env.example`, иначе `make obs-up` / `make obs-config` / `make obs-auth`
+   откажутся работать (молчаливого перехода на режим `ip` нет):
+   - `CADDY_MODE=domain` — если мониторинг уже открывался по `GRAFANA_DOMAIN` / `GLITCHTIP_DOMAIN`
+     (оставьте их), или `CADDY_MODE=ip` + `VPS_IP=<публичный IP VPS 2>`;
+   - `OBS_AUTH_USER=admin` и пустой `OBS_AUTH_HASH=`, затем `make obs-auth` (пароль показывается
+     один раз) и `make obs-up`;
+   - `SENTRY_DSN` с публичным хостом (например `glitchtip.localhost` или домен из UI GlitchTip)
+     теперь отвергается при запуске приложения: очистите его и выполните `make obs-bootstrap`
+     (DSN строится из `GLITCHTIP_INTERNAL_URL`, только приватный IP или имя Docker-сервиса).
+
 4. **Stage/prod на двух серверах** (VPS 1 — приложение, VPS 2 — наблюдаемость; сеть между
    ними — VPN, см. [docs/ops/network.md](docs/ops/network.md)):
    - VPS 2: **до** `make obs-up` укажите в `.env` `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>`
-     (на этом адресе публикуются Loki, Prometheus и GlitchTip) и
-     `GLITCHTIP_INTERNAL_URL=http://<VPN-IP VPS 2>:8000`. Затем выполните `make obs-up`:
+     (на этом адресе публикуются Loki, Prometheus и GlitchTip),
+     `GLITCHTIP_INTERNAL_URL=http://<VPN-IP VPS 2>:8000` (только приватный адрес: публичный
+     DSN запрещён и приложение с ним не стартует), `CADDY_MODE` и `VPS_IP`/домены. Затем `make obs-up`:
      поднимется стек наблюдаемости, в GlitchTip будет создан проект, а в `.env` запишется
      `SENTRY_DSN` с хостом из `GLITCHTIP_INTERNAL_URL`.
    - VPS 1: `ALLOY_SINGLE_HOST=0` (значение по умолчанию). В `OBS_LOKI_PUSH_URL` и
@@ -84,7 +107,10 @@
 5. **Один хост** (stage/локально): в `.env` выставьте `ALLOY_SINGLE_HOST=1` и укажите URL
    `http://loki:3100/loki/api/v1/push` и `http://prometheus:9090/api/v1/write` (закомментированы
    в `.env.example`). Затем сначала `make obs-up`, потом `make agent-up`: Alloy подключается
-   к сети obs-стека, поэтому она должна уже существовать.
+   к сети obs-стека, поэтому она должна уже существовать. Приложение шлёт ошибки на
+   `glitchtip-web:8000` через Docker-сеть. API GlitchTip / `sentry-cli` — только на сервере
+   через SSH: `docker run --rm --network host -e SENTRY_URL=http://127.0.0.1:8000
+   -e SENTRY_AUTH_TOKEN=... getsentry/sentry-cli ...` (на двух серверах — по VPN).
 
 6. **Локальная разработка**: в `.env` поставьте `PROJECT_ENVIRONMENT=loc` и
    `PROJECT_DATA_DIR` в домашнем каталоге (например `/home/<user>/tg_shop_platform_data`;

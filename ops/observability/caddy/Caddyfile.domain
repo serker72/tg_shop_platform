@@ -1,0 +1,32 @@
+# CADDY_MODE=domain: Grafana and GlitchTip on their own domains, automatic HTTPS
+# (Let's Encrypt; *.localhost -> Caddy internal CA; nip.io names work: grafana.<ip>.nip.io).
+# http -> https redirect is the default behaviour of Caddy.
+# Everything is behind HTTP Basic Auth (OBS_AUTH_USER / OBS_AUTH_HASH = base64 of a bcrypt hash,
+# accepted by basic_auth as is). Parse-time {$VAR} is used on purpose: runtime {env.VAR}
+# placeholders are not resolved when basic_auth accounts are provisioned.
+# The Authorization header is stripped before proxying, so Basic credentials never reach upstreams.
+
+(obs_auth) {
+	basic_auth {
+		{$OBS_AUTH_USER} {$OBS_AUTH_HASH}
+	}
+}
+
+{$GRAFANA_DOMAIN} {
+	import obs_auth
+	encode zstd gzip
+	reverse_proxy grafana:3000 {
+		header_up -Authorization
+	}
+}
+
+{$GLITCHTIP_DOMAIN} {
+	import obs_auth
+	encode zstd gzip
+	request_body {
+		max_size 50MB
+	}
+	reverse_proxy glitchtip-web:8000 {
+		header_up -Authorization
+	}
+}

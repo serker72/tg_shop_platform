@@ -1,0 +1,4 @@
+# CADDY_MODE=ip: Grafana is served from /grafana (GF_SERVER_SERVE_FROM_SUB_PATH=true).
+- targets: ["grafana:3000"]
+  labels:
+    __metrics_path__: /grafana/metrics

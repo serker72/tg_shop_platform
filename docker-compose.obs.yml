@@ -30,7 +30,8 @@ x-glitchtip: &glitchtip
     REDIS_URL: redis://:${OBS_REDIS_PASSWORD:?OBS_REDIS_PASSWORD не задан}@obs-redis:6379/0
     SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?GLITCHTIP_SECRET_KEY не задан}
     PORT: "8000"
-    GLITCHTIP_DOMAIN: https://${GLITCHTIP_DOMAIN:?GLITCHTIP_DOMAIN не задан}:${CADDY_HTTPS_PORT_HOST:-443}
+    # Public URL behind Caddy; computed by the Makefile (ops/scripts/obs_mode.sh) from CADDY_MODE.
+    GLITCHTIP_DOMAIN: ${GLITCHTIP_PUBLIC_URL:-https://${VPS_IP:-127.0.0.1}:${CADDY_HTTPS_PORT_HOST:-443}}
     DEFAULT_FROM_EMAIL: ${GLITCHTIP_FROM_EMAIL:-glitchtip@localhost}
     # consolemail:// = e-mails are only written to the container log
     EMAIL_URL: ${GLITCHTIP_EMAIL_URL:-consolemail://}
@@ -83,6 +84,11 @@ services:
       - type: bind
         source: ./ops/observability/prometheus
         target: /etc/prometheus
+        read_only: true
+      # Grafana metrics path for the current CADDY_MODE (sub path in ip mode)
+      - type: bind
+        source: ./ops/observability/prometheus/grafana_targets.${CADDY_MODE:-ip}.yml
+        target: /etc/prometheus-targets/grafana.yml
         read_only: true
       - type: bind
         source: ${OBS_PROMETHEUS_DATA_DIR:?OBS_PROMETHEUS_DATA_DIR не задан — см. .env.example, затем make init-dirs}
@@ -148,7 +154,10 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD не задан}
-      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:?GRAFANA_DOMAIN не задан}:${CADDY_HTTPS_PORT_HOST:-443}/
+      # Computed by the Makefile (ops/scripts/obs_mode.sh) from CADDY_MODE:
+      # ip -> https://<VPS_IP>:<port>/grafana/ + sub path; domain -> https://<GRAFANA_DOMAIN>:<port>/
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://${VPS_IP:-127.0.0.1}:${CADDY_HTTPS_PORT_HOST:-443}/grafana/}
+      GF_SERVER_SERVE_FROM_SUB_PATH: ${GRAFANA_SERVE_FROM_SUB_PATH:-true}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
@@ -173,6 +182,7 @@ services:
       loki:
         condition: service_healthy
     healthcheck:
+      # /api/health answers 200 without the prefix in both modes (checked with sub path on)
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
       interval: 10s
       timeout: 5s
@@ -297,14 +307,19 @@ services:
     restart: unless-stopped
     logging: *logging
     environment:
-      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:?GRAFANA_DOMAIN не задан}
-      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:?GLITCHTIP_DOMAIN не задан}
+      # Basic Auth in front of everything (base64 bcrypt hash, see Caddyfile.*)
+      OBS_AUTH_USER: ${OBS_AUTH_USER:?OBS_AUTH_USER не задан}
+      OBS_AUTH_HASH: ${OBS_AUTH_HASH:?OBS_AUTH_HASH не задан — выполните make obs-auth}
+      # CADDY_MODE=ip uses VPS_IP, CADDY_MODE=domain the domains (checked by make obs-up)
+      VPS_IP: ${VPS_IP:-127.0.0.1}
+      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-grafana.localhost}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-glitchtip.localhost}
       # certificates, ACME account and autosave config live in the bind-mounted dir
       XDG_DATA_HOME: /caddy/data
       XDG_CONFIG_HOME: /caddy/config
     volumes:
       - type: bind
-        source: ./ops/observability/caddy/Caddyfile
+        source: ./ops/observability/caddy/Caddyfile.${CADDY_MODE:-ip}
         target: /etc/caddy/Caddyfile
         read_only: true
       - type: bind

@@ -11,6 +11,8 @@
 # 3. Parses the marker GLITCHTIP_BOOTSTRAP_OK and writes
 #    SENTRY_DSN=<scheme>://<public_key>@<host of GLITCHTIP_INTERNAL_URL>/<project_id>.
 #    For PROJECT_ENVIRONMENT=test SENTRY_DSN is not written (test stack reports nothing).
+#    The host of GLITCHTIP_INTERNAL_URL must be internal (check_internal_url.sh), otherwise
+#    the script fails before bootstrap and SENTRY_DSN is not touched.
 # Secrets (password, DSN) are never printed.
 set -euo pipefail
 
@@ -62,6 +64,9 @@ ensure_default GLITCHTIP_TEAM_SLUG platform
 ensure_default GLITCHTIP_PROJECT_NAME tg-shop-platform
 ensure_default GLITCHTIP_PROJECT_PLATFORM python
 ensure_default GLITCHTIP_INTERNAL_URL http://glitchtip-web:8000
+# SENTRY_DSN is built from this host: only private IPs / Docker service names (fail early).
+bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$(get_env GLITCHTIP_INTERNAL_URL)" \
+    || { echo "ERROR: fix GLITCHTIP_INTERNAL_URL in $env_file; SENTRY_DSN is not written" >&2; exit 1; }
 [[ -n $(get_env GLITCHTIP_ADMIN_PASSWORD) ]] \
     || set_env GLITCHTIP_ADMIN_PASSWORD "$(openssl rand -hex 24)"
 [[ -n $(get_env GLITCHTIP_PROJECT_PUBLIC_KEY) ]] \

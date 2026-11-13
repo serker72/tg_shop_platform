@@ -1,0 +1,4 @@
+# CADDY_MODE=domain: Grafana is served from the root of its own domain.
+- targets: ["grafana:3000"]
+  labels:
+    __metrics_path__: /metrics

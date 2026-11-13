@@ -1,0 +1,41 @@
+# CADDY_MODE=ip: access by the public IP of VPS 2 (VPS_IP), self-signed certificate
+# (tls internal). https://<VPS_IP>/ -> GlitchTip, https://<VPS_IP>/grafana/ -> Grafana
+# (GF_SERVER_SERVE_FROM_SUB_PATH=true: the /grafana prefix is kept in the proxied path).
+# http -> https redirect is the default behaviour of Caddy.
+# Everything is behind HTTP Basic Auth (OBS_AUTH_USER / OBS_AUTH_HASH = base64 of a bcrypt hash,
+# accepted by basic_auth as is). Parse-time {$VAR} is used on purpose: runtime {env.VAR}
+# placeholders are not resolved when basic_auth accounts are provisioned.
+# The Authorization header is stripped before proxying, so Basic credentials never reach upstreams.
+
+{
+	# Clients connecting by IP send no SNI: serve the certificate issued for VPS_IP.
+	default_sni {$VPS_IP}
+}
+
+(obs_auth) {
+	basic_auth {
+		{$OBS_AUTH_USER} {$OBS_AUTH_HASH}
+	}
+}
+
+{$VPS_IP} {
+	tls internal
+	import obs_auth
+	encode zstd gzip
+
+	@grafana path /grafana /grafana/*
+	handle @grafana {
+		reverse_proxy grafana:3000 {
+			header_up -Authorization
+		}
+	}
+
+	handle {
+		request_body {
+			max_size 50MB
+		}
+		reverse_proxy glitchtip-web:8000 {
+			header_up -Authorization
+		}
+	}
+}

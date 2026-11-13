@@ -13,7 +13,9 @@ Invalid values raise ``ValidationError`` when ``Settings`` is constructed, not o
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
@@ -300,6 +302,55 @@ class LogsSettings(BaseSettings):
     file_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
 
 
+# Networks where GlitchTip may live (SENTRY_DSN host); the same list is in
+# ops/scripts/check_internal_url.sh. Explicit on purpose: ``ip_address.is_private`` also
+# covers other special ranges (169.254/16, 2001:db8::/32, ...) and changes between Pythons.
+_INTERNAL_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "127.0.0.0/8",
+        "100.64.0.0/10",  # Tailscale CGNAT
+        "::1/128",
+        "fc00::/7",
+    )
+)
+_SERVICE_NAME_RE: Final = re.compile(r"^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$")
+_HAS_LETTER_RE: Final = re.compile(r"[a-z]")
+_HEX_RE: Final = re.compile(r"^0x[0-9a-f]*$")
+
+
+def is_internal_host(host: str) -> bool:
+    """Private/loopback/CGNAT IP or a name without dots (Docker service, ``localhost``)."""
+    host = host.strip().lower().strip("[]")
+    if not host:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return _is_service_name(host)
+    return any(addr in net for net in _INTERNAL_NETWORKS)
+
+
+def _is_service_name(host: str) -> bool:
+    """Docker service name: no dots, at least one letter, not a numeric IPv4 form.
+
+    glibc ``getaddrinfo`` resolves ``134744072``, ``0x08080808``, ``017700000001`` (decimal/
+    hex/octal ``inet_aton`` forms) to IP addresses, so they are rejected as names.
+    """
+    if not _SERVICE_NAME_RE.match(host) or not _HAS_LETTER_RE.search(host):
+        return False
+    if _HEX_RE.match(host):
+        return False
+    try:
+        socket.inet_aton(host)
+    except OSError:
+        return True
+    return False
+
+
 class ObservabilitySettings(BaseSettings):
     """Health/metrics HTTP server and Sentry (GlitchTip) error reporting.
 
@@ -313,6 +364,8 @@ class ObservabilitySettings(BaseSettings):
     """
 
     model_config = _base_config("OBSERVABILITY_")
+    # SENTRY_DSN carries the project key: never echo inputs in validation errors.
+    model_config["hide_input_in_errors"] = True
 
     # Inside a container the server must listen on all interfaces (scraped over the network).
     http_host: str = "0.0.0.0"  # noqa: S104
@@ -343,6 +396,27 @@ class ObservabilitySettings(BaseSettings):
     @classmethod
     def _empty_sentry_to_none(cls, value: object) -> object:
         return _normalise_empty_secret(value)
+
+    @field_validator("sentry_dsn", mode="after")
+    @classmethod
+    def _sentry_dsn_internal_only(cls, value: SecretStr | None) -> SecretStr | None:
+        """GlitchTip is reachable only inside Docker/VPN: a public DSN host fails startup."""
+        if value is None:
+            return None
+        parts = urlsplit(value.get_secret_value().strip())
+        try:
+            host = parts.hostname or ""
+            _ = parts.port  # ValueError for a port outside 0..65535 / non-numeric
+        except ValueError:
+            host = ""
+        if parts.scheme not in ("http", "https") or not is_internal_host(host):
+            msg = (
+                f"SENTRY_DSN must point to an internal GlitchTip address, got host {host!r}: "
+                "use a private IP (10/8, 172.16/12, 192.168/16, 127/8, 100.64/10, ::1, fc00::/7) "
+                "or a Docker service name without dots (http://<key>@glitchtip-web:8000/<id>)"
+            )
+            raise ValueError(msg)
+        return value
 
 
 # ``Settings`` field name -> nested section class.
