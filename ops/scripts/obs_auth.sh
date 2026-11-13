@@ -7,7 +7,8 @@
 #   stdin is a terminal   -> asked interactively (hidden; empty answer = generate);
 #   otherwise             -> generated (openssl rand), printed ONCE to stderr.
 # The password is hashed by `caddy hash-password` (bcrypt) in a one-shot container of
-# CADDY_IMAGE (env file) or the image pinned in docker-compose.obs.yml; the plaintext goes
+# CADDY_AUTH_IMAGE (env file) or the official image pinned below (no bouncer module needed;
+# the stack itself runs an own build, ops/observability/caddy/Dockerfile); the plaintext goes
 # through stdin of the container, never through argv. The env file gets
 #   OBS_AUTH_USER (kept; empty -> admin) and OBS_AUTH_HASH = base64 of the bcrypt hash
 # (bcrypt hashes contain `$`, which `source`/compose would expand). The password itself is
@@ -31,7 +32,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     exit 3
 fi
 
-image=$(get_env CADDY_IMAGE)
+image=$(get_env CADDY_AUTH_IMAGE)
 image=${image:-$DEFAULT_CADDY_IMAGE}
 user=$(get_env OBS_AUTH_USER)
 user=${user:-admin}

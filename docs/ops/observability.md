@@ -342,3 +342,42 @@ curl -sG http://127.0.0.1:3100/loki/api/v1/query_range \
 
 Известные ограничения: collector `diskstats` пишет в лог ошибку про `/run/udev/data` (нет udev в
 контейнере — метрики дисков собираются без udev-свойств).
+
+## Защита от сканеров и брутфорса
+
+- **Catch-all.** В обоих режимах `http:// { abort }` и `https:// { abort }`: запрос с чужим `Host` (или HTTP/1.0 без Host) получает сброс соединения (curl exit 52). Свои адреса (`VPS_IP` в ip-режиме, домены в domain-режиме) по HTTP получают 308 → HTTPS, ACME HTTP-01 работает. В ip-режиме TLS-рукопожатие с любым SNI получает сертификат `VPS_IP` (`default_sni`), после чего запрос с чужим Host сбрасывается; в domain-режиме неизвестный SNI вообще не получает сертификата (TLS-ошибка, curl exit 35) — такие попытки в access.log не попадают.
+- **Access-log** (JSON, `OBS_CADDY_LOGS_DIR/access.log`, ротация 50 MiB × 5, права 0640): ровно одна строка на каждый HTTP-запрос — на свои сайты и на оба catch-all; сброшенные запросы — со `status 0`. Файл заранее создаёт `make init-dirs`: файловый источник CrowdSec не подхватывает файл, появившийся после его старта. Runtime-логи Caddy по-прежнему идут в stdout (Alloy).
+- **CrowdSec** (сервис `crowdsec`, `crowdsecurity/crowdsec:v1.8.2`, переопределяется `CROWDSEC_IMAGE`) читает только этот файл (ro), доступа к Docker нет. Коллекция `crowdsecurity/caddy` = парсер caddy + `base-http-scenarios` + `http-cve`. Подбор пароля Basic Auth ловит `crowdsecurity/http-generic-bf`: парсер помечает 401 с `WWW-Authenticate: Basic` как `auth_fail`, бан после 6 неудач (5 + 1 за 10 с). Сброшенные catch-all запросы (`status 0`) разбираются парсером и учитываются сценариями по пути/User-Agent (sensitive-files, CVE, backdoors, bad-user-agent…), но не сценариями по кодам ответа (`http-probing` считает 403/404). Бан — 4 часа (профиль образа по умолчанию). Community blocklist (CAPI) подключается автоматически, Console (`cscli console enroll`) — опционально.
+- **Первый старт CrowdSec требует сети**: образ скачивает hub (коллекции, парсеры) — без доступа в интернет контейнер не становится healthy.
+- **Bouncer** встроен в Caddy (своя сборка: Caddy 2.10.2 + `caddy-crowdsec-bouncer/http` v0.13.0), опрашивает LAPI `http://crowdsec:8080` раз в 15 с; забаненный IP получает 403 ещё до запроса пароля. Bouncer **fail-open**: caddy стартует после запуска crowdsec (`service_started`), а при недоступном CrowdSec продолжает обслуживать запросы (Basic Auth остаётся), баны временно не применяются. Это видно алертами: `CrowdsecDown` (`up{job="crowdsec"} == 0` 5 мин) и `CrowdsecBouncerNoPulls` (CrowdSec жив, но bouncer ~10 мин не забирает решения — например, после смены ключа). Метрики CrowdSec (:6060) скрейпит Prometheus внутри obs-сети, на хост порт не публикуется (как и LAPI 8080).
+- **Whitelist**: `crowdsecurity/whitelists` (127/8, ::1, 10/8, 172.16/12, 192.168/16) + `ops/observability/crowdsec/parsers/s02-enrich/tgsp-whitelist.yaml` (VPN 10.10.0.0/24, Tailscale 100.64.0.0/10, Docker, fd00::/8). Переменные окружения в парсерах CrowdSec не подставляются — другой диапазон VPN правится в файле, затем `docker compose ... restart crowdsec`.
+- **Какой IP видит Caddy** (проверено на стенде): запросы с самого хоста на 127.0.0.1 и с адреса хоста из других docker-сетей приходят через docker-proxy с IP шлюза obs-сети (`172.x.0.1`, whitelist) — их CrowdSec не банит. Внешние клиенты (iptables DNAT) видны с реальным IP.
+- **IPv6**: не задавайте `CADDY_BIND_ADDRESS=::` при выключенном IPv6 в Docker — IPv6-клиенты пойдут через docker-proxy и будут видны как IP шлюза (whitelist), то есть CrowdSec их не забанит. Оставляйте `0.0.0.0` или включите IPv6 в Docker (`ip6tables`).
+- **Баны**: `make obs-bans` — список решений; `make obs-bans UNBAN=<ip>` — снять бан (значение проверяется как IP). Не баньте вручную IP шлюза Docker (`172.x.0.1`): `cscli decisions add` применяется и к адресам из whitelist, и это отрежет весь локальный доступ.
+- **Аргументы make**: GNU make раскрывает аргументы (`X=...`) до запуска цели — `$(shell …)` в значении выполнится. Не вставляйте в аргументы make непроверенный текст (например, IP из логов — сначала проверьте его). `UNBAN` дополнительно защищён (`unexport` + проверка IP).
+- **Ресурсы**: crowdsec `mem_limit: 256m`.
+
+### Ротация ключа bouncer
+
+Образ регистрирует bouncer `caddy` из `BOUNCER_KEY_caddy` только если его ещё нет (`/docker_start.sh`, `register_bouncer`). После смены `CROWDSEC_BOUNCER_KEY` при сохранённых данных LAPI отвечает bouncer'у 403, баны молча не применяются (алерт `CrowdsecBouncerNoPulls`). Процедура: изменить ключ в `.env` (`openssl rand -hex 32`) → `make obs-crowdsec-rekey` (поднимает crowdsec, удаляет bouncer `caddy`, если он зарегистрирован, затем пересоздаёт crowdsec — регистрация с новым ключом — и caddy; ошибка удаления прерывает цель) → `docker compose ... exec crowdsec cscli bouncers list` показывает свежий `Last API pull`.
+
+### Проверка защиты на проде (с внешнего IP, не из whitelist)
+
+```bash
+curl -sv -H 'Host: x' http://<VPS_IP>/            # сброс соединения (curl exit 52)
+curl -skv -H 'Host: x' https://<VPS_IP>/          # сброс после TLS (ip-режим)
+for i in $(seq 6); do curl -sk -o /dev/null -w '%{http_code}\n' -u admin:wrong https://<VPS_IP>/; done
+sleep 20; curl -sk -o /dev/null -w '%{http_code}\n' https://<VPS_IP>/   # 403 — IP забанен
+make obs-bans                                      # на VPS 2: решение с вашим IP
+make obs-bans UNBAN=<ваш IP>                       # доступ восстановлен
+```
+
+### Сборка образа Caddy и зеркала Go
+
+Образ Caddy собирается локально (`make obs-up` / `make obs-validate`, `ops/observability/caddy/Dockerfile`): xcaddy скачивает Go-модули. `proxy.golang.org` отдаёт архивы через `storage.googleapis.com`, который в части регионов отвечает `403 ... not available in your location` (так же `google.golang.org/api`), поэтому по умолчанию `GOPROXY="https://goproxy.cn|https://proxy.golang.org|direct"` — первым стоит зеркало goproxy.cn (proxy.golang.org в части регионов зависает/403 на storage.googleapis.com; goproxy.io отдаёт zip с 403). Контрольные суммы проверяются по `sum.golang.org` (Go берёт sumdb через `/sumdb/` прокси), так что зеркало не может подменить модуль. Другое зеркало — `CADDY_BUILD_GOPROXY` в `.env` (в кавычках); `GOSUMDB=off` не использовать.
+
+Проверка без запуска стека: `make obs-validate` (сборка образа + `caddy validate` для `Caddyfile.<CADDY_MODE>`; монтируется только Caddyfile). `make obs-config` остаётся быстрым (только `docker compose config` и проверка переменных).
+
+### Обновление существующего .env (CrowdSec)
+
+Добавьте переменные **до** любых obs-команд: со старым `.env` падают даже `make obs-down` / `obs-ps` / `obs-logs` / `obs-bans` (compose проверяет обязательные переменные `:?`). Добавить в `.env`: `CROWDSEC_BOUNCER_KEY=<вывод openssl rand -hex 32>`, `OBS_CADDY_LOGS_DIR="${PROJECT_DATA_DIR}/obs/caddy-logs"`, `OBS_CROWDSEC_DATA_DIR="${PROJECT_DATA_DIR}/obs/crowdsec"`. `make env FORCE=1` — только для новой установки: он перегенерирует все секреты. Переменная `CADDY_IMAGE` больше не используется (образ Caddy собирается локально; для `make obs-auth` — `CADDY_AUTH_IMAGE`). Затем `make init-dirs && make obs-up`.

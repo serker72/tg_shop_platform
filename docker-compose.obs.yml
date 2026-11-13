@@ -302,11 +302,60 @@ services:
       retries: 5
       start_period: 60s
 
-  caddy:
-    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}
+  # CrowdSec security engine + LAPI: reads only the JSON access log of Caddy (no Docker access),
+  # decisions are pulled by the bouncer inside Caddy. LAPI 8080 is NOT published on the host.
+  crowdsec:
+    image: ${CROWDSEC_IMAGE:-crowdsecurity/crowdsec:v1.8.2@sha256:65b74942f7e7ed5c60fde4ac15fc4ba715904c398c8b16dd451f4907d90347d4}
     restart: unless-stopped
     logging: *logging
     environment:
+      # caddy parser + base-http-scenarios (http-generic-bf: Basic Auth 401s, probing, ...) + http-cve
+      COLLECTIONS: crowdsecurity/caddy
+      # Registered at start with this key (also used by the bouncer in Caddy)
+      BOUNCER_KEY_caddy: ${CROWDSEC_BOUNCER_KEY:?CROWDSEC_BOUNCER_KEY не задан — добавьте в .env CROWDSEC_BOUNCER_KEY=<вывод openssl rand -hex 32>}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - type: bind
+        source: ${OBS_CROWDSEC_DATA_DIR:?OBS_CROWDSEC_DATA_DIR не задан — см. .env.example, затем make init-dirs}/config
+        target: /etc/crowdsec
+      - type: bind
+        source: ${OBS_CROWDSEC_DATA_DIR:?OBS_CROWDSEC_DATA_DIR не задан}/data
+        target: /var/lib/crowdsec/data
+      - type: bind
+        source: ./ops/observability/crowdsec/acquis.d/caddy.yaml
+        target: /etc/crowdsec/acquis.d/caddy.yaml
+        read_only: true
+      - type: bind
+        source: ./ops/observability/crowdsec/parsers/s02-enrich/tgsp-whitelist.yaml
+        target: /etc/crowdsec/parsers/s02-enrich/tgsp-whitelist.yaml
+        read_only: true
+      - type: bind
+        source: ${OBS_CADDY_LOGS_DIR:?OBS_CADDY_LOGS_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /var/log/caddy
+        read_only: true
+    # Prometheus metrics on :6060 inside the obs network (scraped by prometheus, not published)
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "cscli", "lapi", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  caddy:
+    # Own build: official Caddy + CrowdSec bouncer module (ops/observability/caddy/Dockerfile).
+    build:
+      context: ./ops/observability/caddy
+      args:
+        # Go module mirrors for xcaddy (see .env.example: CADDY_BUILD_GOPROXY/GOSUMDB)
+        GOPROXY: ${CADDY_BUILD_GOPROXY:-https://goproxy.cn|https://proxy.golang.org|direct}
+        GOSUMDB: ${CADDY_BUILD_GOSUMDB:-sum.golang.org}
+    image: ${PROJECT_NAME:-tg_shop_platform}-obs-caddy:2.10.2-crowdsec-v0.13.0
+    pull_policy: build
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      CROWDSEC_BOUNCER_KEY: ${CROWDSEC_BOUNCER_KEY:?CROWDSEC_BOUNCER_KEY не задан — добавьте в .env CROWDSEC_BOUNCER_KEY=<вывод openssl rand -hex 32>}
       # Basic Auth in front of everything (base64 bcrypt hash, see Caddyfile.*)
       OBS_AUTH_USER: ${OBS_AUTH_USER:?OBS_AUTH_USER не задан}
       OBS_AUTH_HASH: ${OBS_AUTH_HASH:?OBS_AUTH_HASH не задан — выполните make obs-auth}
@@ -325,6 +374,10 @@ services:
       - type: bind
         source: ${OBS_CADDY_DATA_DIR:?OBS_CADDY_DATA_DIR не задан — см. .env.example, затем make init-dirs}
         target: /caddy
+      # JSON access log for CrowdSec (runtime logs stay on stdout -> Alloy)
+      - type: bind
+        source: ${OBS_CADDY_LOGS_DIR:?OBS_CADDY_LOGS_DIR не задан — см. .env.example, затем make init-dirs}
+        target: /var/log/caddy
     ports:
       # The only service exposed beyond loopback (CADDY_BIND_ADDRESS, default 0.0.0.0).
       - "${CADDY_BIND_ADDRESS:-0.0.0.0}:${CADDY_HTTP_PORT_HOST:-80}:80"
@@ -334,6 +387,10 @@ services:
         condition: service_healthy
       glitchtip-web:
         condition: service_healthy
+      # Fail-open bouncer: caddy serves (Basic Auth stays) even if CrowdSec is down; bans then
+      # do not apply until it is back (alerts CrowdsecDown / CrowdsecBouncerNoPulls).
+      crowdsec:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
       interval: 10s

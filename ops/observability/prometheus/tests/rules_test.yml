@@ -3,6 +3,7 @@
 #     prom/prometheus:v3.6.0 test rules rules_test.yml
 rule_files:
   - ../rules/platform.yml
+  - ../rules/observability.yml
 
 evaluation_interval: 15s
 
@@ -207,3 +208,41 @@ tests:
             exp_annotations:
               summary: "pg_partman metrics are missing while PostgreSQL is up"
               description: "pg_partman_maintenance_age_seconds is absent for 15 minutes: Alloy custom queries fail (monitoring role lacks USAGE on schema partman / SELECT on partman.part_config) or pg_partman is not configured. PgPartmanBgwDown is blind."
+
+  # CrowdSec (observability stack)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="crowdsec", instance="crowdsec:6060"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: CrowdsecDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: crowdsec, instance: "crowdsec:6060"}
+            exp_annotations:
+              summary: "CrowdSec is down"
+              description: "Prometheus cannot scrape crowdsec:6060 for 5 minutes: scanners and Basic Auth brute force are not banned (Caddy keeps serving). Check: make obs-ps / make obs-logs SERVICE=crowdsec."
+      - eval_time: 7m
+        alertname: CrowdsecBouncerNoPulls
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="crowdsec", instance="crowdsec:6060"}'
+        values: "1x25"
+      - series: 'cs_lapi_bouncer_requests_total{bouncer="caddy", route="/v1/decisions/stream", method="GET"}'
+        values: "0+4x5 20x19"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrowdsecBouncerNoPulls
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: CrowdsecBouncerNoPulls
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Caddy bouncer does not pull CrowdSec decisions"
+              description: "No authenticated requests of bouncer caddy to CrowdSec LAPI for 10 minutes: bans are not applied. After a key change run make obs-crowdsec-rekey; see docs/ops/observability.md."
+      - eval_time: 17m
+        alertname: CrowdsecDown
+        exp_alerts: []

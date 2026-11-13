@@ -28,6 +28,11 @@ scrape_configs:
   # Metrics path depends on CADDY_MODE: with GF_SERVER_SERVE_FROM_SUB_PATH=true (ip) Grafana
   # answers /metrics with 301 to the public ROOT_URL, so the target file (mounted by compose from
   # grafana_targets.<CADDY_MODE>.yml) sets __metrics_path__.
+  # CrowdSec engine/LAPI metrics (:6060 inside the obs network, not published)
+  - job_name: crowdsec
+    static_configs:
+      - targets: ["crowdsec:6060"]
+
   - job_name: grafana
     file_sd_configs:
       - files: ["/etc/prometheus-targets/grafana.yml"]

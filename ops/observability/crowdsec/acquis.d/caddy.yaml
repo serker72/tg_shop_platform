@@ -1,0 +1,6 @@
+# JSON access log of Caddy (shared bind dir OBS_CADDY_LOGS_DIR, read-only here).
+# CrowdSec has no access to Docker: it reads only this file.
+filenames:
+  - /var/log/caddy/access.log
+labels:
+  type: caddy

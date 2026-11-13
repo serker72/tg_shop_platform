@@ -22,7 +22,8 @@ READY_TIMEOUT ?= 60
 # Observability stack (docker-compose.obs.yml); uses the same ENV_FILE (ENV_FILE=.env.test for test)
 OBS_COMPOSE = $(COMPOSE) -f docker-compose.obs.yml --env-file $(ENV_FILE)
 OBS_DIRS := OBS_POSTGRES_DATA_DIR OBS_REDIS_DATA_DIR OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR \
-	OBS_LOKI_DATA_DIR OBS_ALERTMANAGER_DATA_DIR OBS_CADDY_DATA_DIR
+	OBS_LOKI_DATA_DIR OBS_ALERTMANAGER_DATA_DIR OBS_CADDY_DATA_DIR OBS_CADDY_LOGS_DIR \
+	OBS_CROWDSEC_DATA_DIR
 # Dirs of services running as APP_UID:APP_GID (`user:` in docker-compose.obs.yml): must stay writable
 OBS_APP_UID_DIRS := OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR OBS_LOKI_DATA_DIR \
 	OBS_ALERTMANAGER_DATA_DIR
@@ -45,7 +46,7 @@ endef
 
 .PHONY: help install env init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down test-alerts test-report clean archive-audit \
-	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset obs-auth \
+	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset obs-auth obs-bans obs-validate obs-crowdsec-rekey \
 	agent-config agent-up agent-down agent-logs
 
 # Loads $(1) into the recipe shell (bash expands ${PROJECT_DATA_DIR}-style references).
@@ -142,6 +143,14 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 		mkdir -p "$${!var}" 2>/dev/null || deny "$${!var}"; \
 		echo "OK $$var=$${!var}"; \
 	done; \
+	if [ -n "$${OBS_CROWDSEC_DATA_DIR:-}" ]; then \
+		mkdir -p "$$OBS_CROWDSEC_DATA_DIR/data" "$$OBS_CROWDSEC_DATA_DIR/config" 2>/dev/null \
+			|| deny "$$OBS_CROWDSEC_DATA_DIR"; \
+	fi; \
+	if [ -n "$${OBS_CADDY_LOGS_DIR:-}" ] && [ ! -e "$$OBS_CADDY_LOGS_DIR/access.log" ]; then \
+		{ touch "$$OBS_CADDY_LOGS_DIR/access.log" && chmod 640 "$$OBS_CADDY_LOGS_DIR/access.log"; } 2>/dev/null \
+			|| deny "$$OBS_CADDY_LOGS_DIR"; \
+	fi; \
 	for var in $(OBS_APP_UID_DIRS); do \
 		[ -n "$${!var:-}" ] || continue; \
 		probe="$${!var}/.init-dirs-probe"; \
@@ -246,13 +255,34 @@ clean: ## Stop test stack, remove test data dir and caches
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
 
-obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (CADDY_MODE/VPS_IP/domains/OBS_AUTH_* + compose config)
+obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (CADDY_MODE/VPS_IP/domains/OBS_AUTH_*/CROWDSEC_BOUNCER_KEY + compose config)
 	@$(call obs_env,--check); \
 	$(OBS_COMPOSE) config --quiet && echo "docker-compose.obs.yml OK ($(ENV_FILE), CADDY_MODE=$$CADDY_MODE)"
 
+# Builds the own Caddy image (Go modules: network on the first build) and validates
+# Caddyfile.<CADDY_MODE> in it; only the Caddyfile is mounted (no data dirs needed).
+obs-validate: ## Build the Caddy image and run caddy validate for Caddyfile.<CADDY_MODE> (ENV_FILE)
+	@$(call obs_env,--check); \
+	$(OBS_COMPOSE) build caddy && img=$$($(OBS_COMPOSE) config --images | grep -m1 -- '-obs-caddy:') && \
+	docker run --rm -e VPS_IP -e GRAFANA_DOMAIN -e GLITCHTIP_DOMAIN -e OBS_AUTH_USER -e OBS_AUTH_HASH \
+		-e CROWDSEC_BOUNCER_KEY -v "$(CURDIR)/ops/observability/caddy/Caddyfile.$$CADDY_MODE:/etc/caddy/Caddyfile:ro" \
+		"$$img" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+	&& echo "Caddyfile.$$CADDY_MODE OK ($$img)"
+
+# The image registers the bouncer only if it does not exist yet: after changing
+# CROWDSEC_BOUNCER_KEY the old registration must be deleted, otherwise LAPI answers 403.
+obs-crowdsec-rekey: ## Re-register the Caddy bouncer after changing CROWDSEC_BOUNCER_KEY (recreates crowdsec + caddy)
+	@$(call obs_env,--check); set -e; \
+	$(OBS_COMPOSE) up -d --no-deps --wait --wait-timeout $(WAIT_TIMEOUT) crowdsec; \
+	if $(OBS_COMPOSE) exec -T crowdsec cscli bouncers list -o json | grep -Eq '"name": *"caddy"'; then \
+		$(OBS_COMPOSE) exec -T crowdsec cscli bouncers delete caddy; \
+	else echo "bouncer caddy is not registered: nothing to delete"; fi; \
+	$(OBS_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout $(WAIT_TIMEOUT) crowdsec; \
+	$(OBS_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout $(WAIT_TIMEOUT) caddy
+
 obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy, bootstrap GlitchTip
 	@$(call obs_env,--check); \
-	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT)
+	$(OBS_COMPOSE) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
 obs-bootstrap: ## Idempotent GlitchTip admin/org/team/project from ENV_FILE; writes SENTRY_DSN (backup .bak)
@@ -287,6 +317,22 @@ obs-glitchtip-reset: ## DESTRUCTIVE: recreate GlitchTip DB and bootstrap from EN
 
 obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
 	@$(call obs_env,--lenient); $(OBS_COMPOSE) down
+
+# UNBAN: GNU make exports command-line variables to recipe environments and EXPANDS them on
+# export (`UNBAN='$(shell ...)'` would run), so it is unexported; the recipe reads the raw text
+# via $(value) inside single quotes (no shell expansion) and validates it as an IP before use.
+unexport UNBAN
+UNBAN_SQ = '$(subst ','\'',$(value UNBAN))'
+obs-bans: ## CrowdSec decisions (bans) of the public Caddy; UNBAN=<ip> removes the ban of one IP
+	@unban=$(UNBAN_SQ); \
+	if [ -n "$$unban" ]; then \
+		python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$$unban" 2>/dev/null \
+			|| { echo "ERROR: UNBAN is not an IP address" >&2; exit 1; }; \
+	fi; \
+	$(call obs_env,--lenient); \
+	if [ -n "$$unban" ]; then \
+		$(OBS_COMPOSE) exec -T crowdsec cscli decisions delete --ip "$$unban"; \
+	else $(OBS_COMPOSE) exec -T crowdsec cscli decisions list; fi
 
 obs-ps: ## Show observability stack services
 	@$(call obs_env,--lenient); $(OBS_COMPOSE) ps

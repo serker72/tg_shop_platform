@@ -1,0 +1,31 @@
+# Alerts of the observability stack itself (scraped directly by Prometheus, no env/host labels).
+# Unit tests: ../tests/rules_test.yml.
+groups:
+  - name: observability-stack
+    rules:
+      # The Caddy bouncer is fail-open: without CrowdSec nobody is banned (Basic Auth still works).
+      - alert: CrowdsecDown
+        expr: up{job="crowdsec"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CrowdSec is down"
+          description: >-
+            Prometheus cannot scrape crowdsec:6060 for 5 minutes: scanners and Basic Auth brute
+            force are not banned (Caddy keeps serving). Check: make obs-ps / make obs-logs SERVICE=crowdsec.
+
+      # CrowdSec is up, but the bouncer does not pull decisions (e.g. CROWDSEC_BOUNCER_KEY changed
+      # without make obs-crowdsec-rekey -> LAPI answers 403; such requests are not counted).
+      - alert: CrowdsecBouncerNoPulls
+        expr: >-
+          (sum(increase(cs_lapi_bouncer_requests_total{bouncer="caddy"}[5m])) or vector(0)) == 0
+          and on() up{job="crowdsec"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Caddy bouncer does not pull CrowdSec decisions"
+          description: >-
+            No authenticated requests of bouncer caddy to CrowdSec LAPI for 10 minutes: bans are
+            not applied. After a key change run make obs-crowdsec-rekey; see docs/ops/observability.md.

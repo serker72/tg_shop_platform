@@ -1,10 +1,35 @@
 # CADDY_MODE=domain: Grafana and GlitchTip on their own domains, automatic HTTPS
 # (Let's Encrypt; *.localhost -> Caddy internal CA; nip.io names work: grafana.<ip>.nip.io).
-# http -> https redirect is the default behaviour of Caddy.
-# Everything is behind HTTP Basic Auth (OBS_AUTH_USER / OBS_AUTH_HASH = base64 of a bcrypt hash,
-# accepted by basic_auth as is). Parse-time {$VAR} is used on purpose: runtime {env.VAR}
-# placeholders are not resolved when basic_auth accounts are provisioned.
+# http -> https redirect for the configured domains (and ACME HTTP-01) is the default behaviour
+# of Caddy; any other Host on port 80/443 hits a catch-all and the connection is aborted
+# (an unknown SNI gets no certificate at all).
+# Everything is behind the CrowdSec bouncer (banned IP -> 403 before Basic Auth) and HTTP Basic
+# Auth (OBS_AUTH_USER / OBS_AUTH_HASH = base64 of a bcrypt hash, accepted by basic_auth as is).
+# Parse-time {$VAR} is used on purpose: runtime {env.VAR} placeholders are not resolved when
+# basic_auth accounts are provisioned.
 # The Authorization header is stripped before proxying, so Basic credentials never reach upstreams.
+# Access log (JSON) goes to /var/log/caddy/access.log, read by CrowdSec; runtime logs stay on stdout.
+
+{
+	# CrowdSec LAPI inside the obs network (port 8080 is not published on the host).
+	crowdsec {
+		api_url http://crowdsec:8080
+		api_key {$CROWDSEC_BOUNCER_KEY}
+		ticker_interval 15s
+	}
+	order crowdsec first
+}
+
+(access_log) {
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50MiB
+			roll_keep 5
+			mode 0640
+		}
+		format json
+	}
+}
 
 (obs_auth) {
 	basic_auth {
@@ -12,7 +37,20 @@
 	}
 }
 
+http:// {
+	import access_log
+	abort
+}
+
+# Any other Host on HTTPS (scanners) is aborted too and logged (no site-level log = no line).
+https:// {
+	import access_log
+	abort
+}
+
 {$GRAFANA_DOMAIN} {
+	import access_log
+	crowdsec
 	import obs_auth
 	encode zstd gzip
 	reverse_proxy grafana:3000 {
@@ -21,6 +59,8 @@
 }
 
 {$GLITCHTIP_DOMAIN} {
+	import access_log
+	crowdsec
 	import obs_auth
 	encode zstd gzip
 	request_body {

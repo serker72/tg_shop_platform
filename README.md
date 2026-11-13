@@ -87,6 +87,16 @@
    - `SENTRY_DSN` с публичным хостом (например `glitchtip.localhost` или домен из UI GlitchTip)
      теперь отвергается при запуске приложения: очистите его и выполните `make obs-bootstrap`
      (DSN строится из `GLITCHTIP_INTERNAL_URL`, только приватный IP или имя Docker-сервиса).
+   - `CROWDSEC_BOUNCER_KEY=<вывод openssl rand -hex 32>`, `OBS_CADDY_LOGS_DIR`, `OBS_CROWDSEC_DATA_DIR`
+     (см. `.env.example`) — **до** любых obs-команд (иначе падают даже `make obs-down`/`obs-ps`),
+     затем `make init-dirs && make obs-up`. `make env FORCE=1` здесь не используйте — он
+     перегенерирует все секреты.
+
+   **Защита публичного Caddy:** запросы на чужие адреса сбрасываются (catch-all), CrowdSec
+   по access-логу Caddy блокирует сканеры и подбор пароля Basic Auth (бан 4 ч); список банов —
+   `make obs-bans`, снять — `make obs-bans UNBAN=<ip>` (не баньте вручную IP шлюза Docker
+   `172.x.0.1` — отрежете весь локальный доступ). Смена ключа bouncer — `make obs-crowdsec-rekey`,
+   проверка Caddyfile — `make obs-validate`. Подробнее: [docs/ops/observability.md](docs/ops/observability.md).
 
 4. **Stage/prod на двух серверах** (VPS 1 — приложение, VPS 2 — наблюдаемость; сеть между
    ними — VPN, см. [docs/ops/network.md](docs/ops/network.md)):

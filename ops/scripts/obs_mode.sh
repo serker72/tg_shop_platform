@@ -9,7 +9,8 @@
 #   ip:     https://<VPS_IP>:<port>/grafana/ + true;  GlitchTip https://<VPS_IP>:<port>
 #   domain: https://<GRAFANA_DOMAIN>:<port>/ + false; GlitchTip https://<GLITCHTIP_DOMAIN>:<port>
 # --check (obs-up / obs-config): the variables of the selected mode must be set and
-#   OBS_AUTH_USER / OBS_AUTH_HASH must be present (base64 of a bcrypt hash, `make obs-auth`).
+#   OBS_AUTH_USER / OBS_AUTH_HASH must be present (base64 of a bcrypt hash, `make obs-auth`),
+#   CROWDSEC_BOUNCER_KEY must be hex (>= 32 chars; `make env` generates it).
 # Without --check missing VPS_IP/domains fall back to defaults, but CADDY_MODE is still required:
 # an old .env without it must not silently switch a domain server to the ip mode
 # (obs-auth recreates caddy, obs-glitchtip-reset recreates GlitchTip with these values).
@@ -85,6 +86,10 @@ if (( check )); then
     bcrypt_re="^[$]2[aby][$]"
     [[ $decoded =~ $bcrypt_re ]] \
         || die "OBS_AUTH_HASH must be base64 of a bcrypt hash (without \$); run: make obs-auth"
+    [[ ${CROWDSEC_BOUNCER_KEY:-} =~ ^[0-9a-fA-F]{32,}$ ]] \
+        || die "CROWDSEC_BOUNCER_KEY is empty or not hex (>= 32 chars): generate one" \
+            "(openssl rand -hex 32) and add CROWDSEC_BOUNCER_KEY=<hex> to the env file" \
+            "(make env FORCE=1 only for a NEW installation: it regenerates ALL secrets)"
 fi
 
 printf 'export CADDY_MODE=%s GRAFANA_ROOT_URL=%s GRAFANA_SERVE_FROM_SUB_PATH=%s GLITCHTIP_PUBLIC_URL=%s\n' \

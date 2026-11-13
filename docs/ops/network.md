@@ -157,3 +157,5 @@ timedatectl                 # "System clock synchronized: yes"
 установкой chrony не требуется — пакет chrony заменяет его). Часовой пояс серверов — UTC.
 Контроль: `chronyc tracking` в чек-листе деплоя; при появлении node exporter — алерт на
 `node_timex_offset_seconds` > 1 с (node exporter в текущем obs-стеке не развёрнут).
+
+**Защита публичного Caddy (VPS 2):** HTTP-запросы с чужим Host сбрасываются (catch-all `abort`); CrowdSec банит сканеры и подбор Basic Auth по access-логу Caddy, LAPI CrowdSec (8080) и его метрики (6060) на хост не публикуются. VPN/Docker/loopback — в whitelist. Подробнее: [observability.md](observability.md#защита-от-сканеров-и-брутфорса).

@@ -1,0 +1,18 @@
+# Never ban own addresses. CrowdSec parsers do not expand environment variables, so the list
+# is static. crowdsecurity/whitelists (installed by the image) already covers 127.0.0.0/8, ::1,
+# 10.0.0.0/8 (WireGuard 10.10.0.0/24), 172.16.0.0/12 (Docker bridges; localhost requests via
+# docker-proxy are seen as the gateway IP) and 192.168.0.0/16; this file makes it explicit and
+# adds Tailscale CGNAT 100.64.0.0/10 and IPv6 ULA (Docker IPv6 / VPN). Edit and restart crowdsec
+# if the VPN uses another range.
+name: tgsp/whitelist
+description: "tg_shop_platform: loopback, Docker, VPN (WireGuard/Tailscale)"
+whitelist:
+  reason: "tg_shop_platform own networks"
+  ip:
+    - "::1"
+  cidr:
+    - "127.0.0.0/8"
+    - "10.10.0.0/24"
+    - "172.16.0.0/12"
+    - "100.64.0.0/10"
+    - "fd00::/8"
