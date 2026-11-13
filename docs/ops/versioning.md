@@ -39,6 +39,30 @@ make version                     # 0.1.N.<коммит>
 Если после `git fetch --tags` тега нет — его не отправили на remote: выполнить
 `git push origin milestone-N` в репозитории, где тег создан.
 
+## Тег сдачи вехи
+
+Аннотированный тег `v{версия}`, где версия — вывод `ops/scripts/version.sh` на коммите сдачи
+(без `+dirty`). Веха I: `v0.1.1.24` на коммите отчёта `3716134`.
+
+- Ставится на коммит с финальным отчётом `docs/reports/milestone-N-tests.md`.
+- Сообщение тега: коммит, на котором прогонялись тесты (поле «проверенный commit» в отчёте),
+  и итоги прогона.
+- `milestone-N` остаётся тегом начала вехи и не переносится. `version.sh` и
+  `app/core/version.py` считают версию только от `milestone-N`, поэтому тег сдачи версию
+  не меняет.
+- Поле **Git** отчёта `make test-report` — `git describe --tags --always`, т.е. ближайший
+  тег любого вида: после тега сдачи там будет `v0.1.1.24-<n>-g<sha>`, а не `milestone-1-…`.
+  На версию это не влияет.
+
+```bash
+git tag -a v<версия> <sha> -m "Milestone N accepted (tests verified on <sha>)
+
+<итоги>"
+git push origin v<версия>
+```
+
+Существующие теги не переносить и не перезаписывать: без `git tag -f` и `git push --force`.
+
 ## Где видна версия
 
 - `make version` / `ops/scripts/version.sh` — версия; `--commit` — короткий хеш;
