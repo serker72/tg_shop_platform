@@ -23,6 +23,12 @@ metrics_generator:
   registry:
     external_labels:
       source: tempo
+  processor:
+    service_graphs:
+      # DB node name: peer.service -> server.address -> network.peer.address -> first of this list
+      # (Tempo default [db.namespace, db.name, db.system, db.system.name] names the node after
+      # db.name). Global-only key: not available in overrides. Node = db.system ("postgresql").
+      database_name_attributes: ["db.system", "db.system.name"]
   storage:
     path: /var/tempo/generator/wal
     remote_write:

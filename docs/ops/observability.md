@@ -182,6 +182,8 @@ urgentry; в событии Sentry есть `contexts.trace` (trace_id из OTel
   `traces_spanmetrics_latency_bucket`, `traces_service_graph_request_total`,
   `traces_service_graph_request_failed_total` (лейблы `service`, `span_name`, `span_kind`,
   `status_code`). Алерт `TempoDown`.
+  Узел БД в Service map: `peer.service` → `server.address` → `network.peer.address` → первый из
+  `metrics_generator.processor.service_graphs.database_name_attributes` (у нас `db.system` → `postgresql`).
 - **Grafana:** источник Tempo (uid `tempo`), Loki derivedFields по structured metadata `trace_id`
   (`matcherType: label`), tracesToLogsV2 (трейс → логи), дашборд `tracing-red` (RED по
   span-metrics). Панель Service map (`queryType: serviceMap`) Grafana строит на фронтенде
