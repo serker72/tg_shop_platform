@@ -197,6 +197,7 @@ services:
     image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
     restart: "no"
     logging: *logging
+    mem_limit: ${MINIO_INIT_MEM_LIMIT:-128m}
     depends_on:
       minio:
         condition: service_healthy
@@ -420,7 +421,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
-    mem_limit: 64m
+    mem_limit: ${DOCKER_SOCKET_PROXY_MEM_LIMIT:-64m}
 
 networks:
   default: {}

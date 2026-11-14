@@ -206,7 +206,7 @@ services:
     ports:
       # Sentry SDK of VPS 1 sends events over VPN (like Loki/Prometheus ingest), see docs/ops/network.md
       - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${URGENTRY_PORT_HOST:-8000}:8080"
-    mem_limit: 256m
+    mem_limit: ${URGENTRY_MEM_LIMIT:-256m}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 10s
@@ -235,7 +235,7 @@ services:
       - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${TEMPO_OTLP_GRPC_PORT_HOST:-4317}:4317"
       - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${TEMPO_OTLP_HTTP_PORT_HOST:-4318}:4318"
       - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${TEMPO_PORT_HOST:-3200}:3200"
-    mem_limit: 512m
+    mem_limit: ${TEMPO_MEM_LIMIT:-512m}
     depends_on:
       prometheus:
         condition: service_healthy
@@ -272,7 +272,7 @@ services:
         target: /var/log/caddy
         read_only: true
     # Prometheus metrics on :6060 inside the obs network (scraped by prometheus, not published)
-    mem_limit: 256m
+    mem_limit: ${CROWDSEC_MEM_LIMIT:-512m}
     healthcheck:
       test: ["CMD", "cscli", "lapi", "status"]
       interval: 15s
