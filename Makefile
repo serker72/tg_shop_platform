@@ -67,7 +67,7 @@ vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
 endef
 
-.PHONY: help install env init-dirs env-test version up ready down migrate lint format format-check check test \
+.PHONY: help install env env-check init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down test-alerts test-report clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-auth obs-bans obs-validate obs-crowdsec-rekey \
 	agent-config agent-up agent-down agent-logs
@@ -137,6 +137,7 @@ INIT_DIRS_DEPS := $(if $(filter $(abspath .env),$(abspath $(ENV_FILE))),env)
 # app containers running as APP_UID, so it must be writable by us or owned by APP_UID.
 # A permission problem ends with a chown hint instead of a raw `mkdir: Permission denied`.
 init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE (.env is generated if missing)
+	@bash ops/scripts/env_check.sh --warn .env.example "$(ENV_FILE)"
 	@$(call load_env,$(ENV_FILE)); \
 	deny() { \
 		owner="$${APP_UID:-$$(id -u)}:$${APP_GID:-$$(id -g)}"; root="$${PROJECT_DATA_DIR%/}"; \
@@ -188,6 +189,9 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 			|| { echo "ERROR: $$d must be owned by 10001:10001 (urgentry/Tempo): sudo chown 10001:10001 $$d" >&2; exit 1; }; \
 		echo "OK $$var owned by 10001:10001"; \
 	done
+
+env-check: ## Check ENV_FILE and TEST_ENV_FILE have all keys of .env.example (names only, rc=1 if missing)
+	@bash ops/scripts/env_check.sh .env.example "$(ENV_FILE)" "$(TEST_ENV_FILE)"
 
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
 	@bash ops/scripts/env_test.sh "$(ENV_FILE)" "$(TEST_ENV_FILE)"
