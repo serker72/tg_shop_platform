@@ -352,8 +352,8 @@ obs-logs: ## Follow observability logs (SERVICE=grafana to filter)
 # Same image (tag + digest) as the alloy service in docker-compose.yml.
 ALLOY_CHECK_IMAGE ?= grafana/alloy:v1.11.3@sha256:8c7256f412feb9f5f48f9f6f9394dc97ca887f63dea9304f347970ecc1787669
 ALLOY_CONFIG := ops/observability/alloy/config.alloy
-otel-smoke: ## Tracing smoke in master_bot: span -> SQL -> RabbitMQ -> Sentry error; prints TRACE_ID
-	@$(agent_compose) exec -T master_bot python - < ops/scripts/otel_smoke.py
+otel-smoke: ## Tracing smoke in master_bot: span -> SQL -> RabbitMQ -> Sentry error; prints TRACE_ID (output also to container stdout -> Loki)
+	@$(agent_compose) exec -T master_bot bash -o pipefail -c 'python - 2>&1 | tee /proc/1/fd/1' < ops/scripts/otel_smoke.py
 
 agent-config: ## Validate main compose (profile observability) + Alloy config (fmt + validate)
 	@$(agent_tempo_guard)

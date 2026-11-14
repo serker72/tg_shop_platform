@@ -60,6 +60,8 @@
 - `make otel-smoke` — в контейнере `master_bot` создаётся span, выполняется SQL, сообщение
   публикуется и принимается через RabbitMQ, отправляется тестовая ошибка в urgentry; в конце
   печатаются `TRACE_ID <32 hex>` и `SENTRY_EVENT_ID` (секреты не выводятся).
+  Вывод дублируется в stdout PID 1 контейнера (`tee /proc/1/fd/1`), поэтому строки смоука
+  попадают в `docker logs` → Alloy → Loki (обычный `docker exec` пишет только в терминал).
 - Grafana → дашборд **Tracing RED** (uid `tracing-red`): запросы/ошибки/латентность
   `master_bot` по span-метрикам Tempo (обновление ~1 мин).
 - Explore → источник *Tempo* → вставить `TRACE_ID`: дерево `otel.smoke` → `connect`/`select` →
@@ -67,6 +69,9 @@
   (или Explore → Loki: `{service=~".+"} | trace_id="<TRACE_ID>"`).
 - urgentry (`https://<VPS_IP>/`) → issue `RuntimeError: otel smoke forced error`; в событии
   контекст `trace` с тем же `trace_id`; секреты замаскированы.
+  Через API (на сервере, из obs-сети, `Authorization: Bearer $URGENTRY_BOOTSTRAP_PAT`):
+  `/api/0/projects/urgentry-org/default/issues/`, событие —
+  `/api/0/projects/urgentry-org/default/events/<SENTRY_EVENT_ID>/` (поле `groupID` = id issue).
 
 ### 5. Оповещения о сбоях (2 мин)
 - `make test-alerts` — promtool проверяет правила алертов и их unit-тесты (все SUCCESS).

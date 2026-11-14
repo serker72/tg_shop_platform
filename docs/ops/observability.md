@@ -111,7 +111,10 @@ Alertmanager silences/notifications `720h`.
   `ip` занимает корень `/`, Grafana — `/grafana/`.
 - Проверка: `curl -k -u admin:<пароль Basic Auth> https://127.0.0.1/grafana/api/health`;
   без `-u` Caddy отвечает 401. urgentry: `/healthz` (healthcheck контейнера).
-- API urgentry — на сервере по PAT (`Authorization: Bearer $URGENTRY_BOOTSTRAP_PAT`), мимо Caddy.
+- API urgentry — на сервере по PAT (`Authorization: Bearer $URGENTRY_BOOTSTRAP_PAT`), мимо Caddy
+  (из obs-сети `http://urgentry:8080`): org `urgentry-org`, project slug `default` —
+  `/api/0/projects/`, `/api/0/projects/urgentry-org/default/issues/`,
+  `/api/0/projects/urgentry-org/default/events/<event_id>/`.
 
 
 ## urgentry (журнал ошибок) и bootstrap

@@ -1,6 +1,7 @@
 """OpenTelemetry end-to-end smoke: span -> SQL -> RabbitMQ publish/consume -> Sentry error.
 
-Run inside the master_bot container (``make otel-smoke``: the file is piped to ``python -``).
+Run inside the master_bot container (``make otel-smoke``: the file is piped to ``python -``;
+output is tee'd to PID 1 stdout so that ``docker logs``/Alloy/Loki see the smoke log lines).
 Prints only ``TRACE_ID <32 hex>`` and ``SENTRY_EVENT_ID <hex>`` - no settings or secrets.
 Then: Grafana Explore -> Tempo -> trace id; Loki ``{service=~".+"} | trace_id="<id>"``;
 urgentry issue "otel smoke forced error" with the same ``contexts.trace.trace_id``.
