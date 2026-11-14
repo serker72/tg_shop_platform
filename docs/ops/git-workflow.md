@@ -7,11 +7,14 @@
 
 | Ветка | От чего создаётся | Назначение | Куда вливается |
 |---|---|---|---|
-| `development` | — | интеграционная ветка; её состояние разворачивается на Staging | — |
+| `master` | `development` | production; её состояние разворачивается на Production (VPS1, VPS2) | — |
+| `development` | — | интеграционная ветка; её состояние разворачивается на Staging | `master` через PR, после принятия вехи заказчиком |
 | `feature/milestone-{N}` | `development` | вся работа над вехой N | `development` через PR, после закрытия вехи |
 | `bugfix/milestone-{N}` | `development` | исправление замечаний заказчика по сданной вехе N | `development` через PR |
 
-- Прямые коммиты в `development` запрещены — только слияние PR в интерфейсе GitHub.
+- Прямые коммиты в `development` и `master` запрещены — только слияние PR в интерфейсе GitHub.
+- В `master` вливается только `development` через PR, после того как заказчик принял веху.
+  Режим слияния — **Create a merge commit**, как и для PR в `development`.
 - После слияния PR ветка `feature/milestone-{N}` / `bugfix/milestone-{N}` удаляется
   (локально и на remotes).
 - Новая ветка всегда создаётся от актуального `development`:
@@ -27,6 +30,8 @@
 feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging ──▶ тестирование заказчиком
                                  ▲                                     │
                                  └──PR── bugfix/milestone-N ◀── замечания
+
+заказчик принял веху N ──▶ development ──PR──▶ master ──CI/CD──▶ Production (VPS1, VPS2)
 ```
 
 1. Веха N закрыта в `feature/milestone-{N}` → PR в `development` → слияние → ветка удаляется.
@@ -35,15 +40,20 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
 4. Найденные ошибки исправляются в `bugfix/milestone-{N}` (от `development`) → PR в
    `development` → Staging обновляется → повторное тестирование.
 5. Шаги 3–4 повторяются, пока не устранены все замечания.
+6. Заказчик принял веху N → PR `development` → `master` → слияние запускает CI/CD, который
+   обновляет Production (VPS1, VPS2).
 
 Параллельно с устранением замечаний по вехе N идёт работа над вехой N+1 в
 `feature/milestone-{N+1}` (создаётся от `development` после слияния PR вехи N).
 
 ## CI/CD
 
-Триггер обновления Staging — слияние PR в `development` (push в `development` на GitHub).
-Реализуется на GitHub Actions в вехе II (см. [delivery-milestones.md](../delivery-milestones.md),
-Этап II). До этого Staging обновляется вручную.
+Два триггера:
+
+| Событие | Окружение | Когда реализуется |
+|---|---|---|
+| слияние PR в `development` (push в `development` на GitHub) | Staging | веха II, GitHub Actions (см. [delivery-milestones.md](../delivery-milestones.md), Этап II); до этого Staging обновляется вручную |
+| слияние PR в `master` (push в `master` на GitHub) | Production (VPS1, VPS2) | когда появятся серверы Production; до этого — только описание |
 
 ## Теги и версия
 
@@ -68,6 +78,17 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
 Тег сдачи `v{версия}` по-прежнему аннотированный и не переносится. На каком коммите его
 ставить в новой схеме — см. открытые вопросы.
 
+`master` и теги:
+
+- Тег сдачи вехи ставится в истории `development` (по правилу из открытого вопроса 3) —
+  до вливания в `master`, т.к. в `master` попадает только принятая заказчиком веха.
+- PR `development` → `master` в режиме **Create a merge commit** создаёт в `master` новый
+  merge-коммит. Его версия отличается от версии коммита с тегом сдачи и от версии, которая
+  работала на Staging; коммит с тегом сдачи достижим из `master`.
+- На Production работает версия merge-коммита в `master`; однозначный идентификатор —
+  пара `version` + `commit`.
+- Ставить ли отдельный тег релиза на merge-коммит в `master` — см. открытые вопросы.
+
 ## Открытые вопросы
 
 1. **GitHub — основной `origin`.** Сейчас `origin` — gitflic, `github` — GitHub. GitHub
@@ -84,3 +105,8 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
    `feature/milestone-{N+1}` (`pyproject.toml` = `0.1.{N+1}`, тег `milestone-{N+1}`),
    исправления вехи N, сделанные от `development`, получат версию `0.1.{N+1}.*`. Нужна ли
    отдельная нумерация для bugfix вехи N — не решено.
+5. **Тег релиза в `master`.** Ставить ли отдельный тег на merge-коммит PR `development` →
+   `master` (сборка Production), его формат и соотношение с тегом сдачи `v{версия}` — не
+   решено.
+6. **Защита веток `master`/`development`** (branch protection rules в GitHub) — настроить при
+   детализации CI/CD вехи II.
