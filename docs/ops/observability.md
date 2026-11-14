@@ -356,11 +356,38 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
 - **Алерты Loki ruler** (`ops/observability/loki/rules/docker-events.yml`, bind в
   `/etc/loki/rules/fake`, tenant `fake` при `auth_enabled: false`, доставка
   `ruler.alertmanager_url`): `ContainerOomKilled` (critical, `action="oom"` за 5 мин),
-  `ContainerExit137` (warning, `die` с `exit_code=137` за 5 мин), `ContainerRestartLoop`
-  (warning, > 3 `restart` за 15 мин). Группировка `compose_service, container_name`: у
-  контейнеров вне compose `compose_service` пуст, имя различает их.
+  `ContainerExit137` (warning, `die` с `exit_code=137` и `cause!="docker_kill"` за 5 мин),
+  `ContainerRestartLoop` (warning, > 3 `restart` за 15 мин). Группировка
+  `compose_service, container_name`: у контейнеров вне compose `compose_service` пуст, имя
+  различает их.
 
-Где смотреть: Grafana → Explore → Loki `{service="docker-events"}` (или
+**Причина `die` 137 (поле `cause`).** Код 137 = SIGKILL, его дают и OOM killer, и сам Docker:
+`docker stop`/`restart` шлёт `StopSignal` (SIGTERM), ждёт таймаут (10 с) и добивает SIGKILL
+(moby `daemon/stop.go`). Если процесс игнорирует SIGTERM (`sleep` как PID 1), штатный
+`docker restart` раньше давал ложный `ContainerExit137`. Sidecar (`CauseTracker` в
+`docker_events.py`) хранит последние `kill`/`oom` по id контейнера (окно 60 с по `timeNano`,
+не больше 512 контейнеров, история удаляется на `die`) и добавляет к `die` с `exit_code=137`:
+
+| `cause` | Когда | Алерт `ContainerExit137` |
+|---|---|---|
+| `oom` | перед `die` было `oom` (OOM killer cgroup) | да (+ `ContainerOomKilled`) |
+| `docker_kill` | перед `die` было `kill` (в выводе `signal`, обычно `9`) — `docker stop`/`restart`/`rm -f`/`kill`, в т. ч. `docker kill -s KILL` (намеренное действие, ожидаемо) | нет |
+| `unknown` | ни `oom`, ни `kill` в окне | да |
+
+Для остальных `die` поля `cause` нет. Метка Loki не добавляется (`cause` — поле JSON,
+кардинальность прежняя). Последовательности проверены на Docker Engine 29.9.3:
+stop/restart → `kill signal=15` → `kill signal=9` → `die exitCode=137` (→ `restart`);
+`docker kill -s KILL` → `kill signal=9` → `die 137`; OOM → `oom` → `die 137` без `kill`.
+Ограничение: `kill -9` процесса контейнера с хоста в обход Docker не порождает `kill` и
+классифицируется как `unknown` (алерт будет; на стенде не проверялось — нужен root).
+
+Подробности в Loki: `{service="docker-events", action="die"} | json | cause!=""`.
+
+Где смотреть: дашборд **Platform overview** (`platform_overview`) → строка «OOM и перезапуски
+контейнеров»: «OOM-kill на хосте» (`increase(node_vmstat_oom_kill[5m])`), «События контейнеров
+(OOM, перезапуски)» (oom/restart по `action` + ряд «die 137 (не docker_kill)»), «Журнал
+событий Docker» (oom/die/restart/kill); без событий счётчики показывают 0. Grafana → Explore →
+Loki `{service="docker-events"}` (или
 `{service="docker-events", action="oom"}`), Alertmanager; правила Loki —
 `GET http://loki:3100/loki/api/v1/rules`, состояние — `/prometheus/api/v1/alerts`.
 
@@ -372,9 +399,10 @@ docker run -d --name restart-probe alpine:3.20 sleep 600
 for i in 1 2 3 4; do docker restart -t 1 restart-probe; done; docker rm -f restart-probe
 ```
 
-Ожидается: в Loki `action=oom` и `action=die` с `exit_code: 137` для `oom-probe`, четыре
-`restart`; `node_vmstat_oom_kill` +1; `HostOomKill`, `ContainerOomKilled`, `ContainerExit137`,
-`ContainerRestartLoop` — firing и видны в Alertmanager (`/api/v2/alerts`).
+Ожидается: в Loki `action=oom` и `action=die` с `exit_code: 137`, `cause: oom` для `oom-probe`;
+четыре `restart` и `die` 137 с `cause: docker_kill`, `signal: 9` для `restart-probe`;
+`node_vmstat_oom_kill` +1; `HostOomKill`, `ContainerOomKilled`, `ContainerExit137` (только для
+`oom-probe`), `ContainerRestartLoop` — firing и видны в Alertmanager (`/api/v2/alerts`).
 
 ### Переменные
 

@@ -88,6 +88,18 @@
   `ssh -L 9090:127.0.0.1:9090 <хост>` и `http://127.0.0.1:9090/alerts`.
 - Говорить: «если фоновый процесс, создающий разделы журналов, остановился — придёт
   оповещение». Доставка в Telegram — после появления отдельного сервера.
+- **OOM и перезапуски** (пробы не трогают рабочие сервисы):
+  ```bash
+  docker run --rm --name oom-demo -m 16m --memory-swap 16m alpine sh -c 'tail /dev/zero'  # rc 137
+  docker run -d --name stop-demo alpine sleep 3600 && docker restart stop-demo; docker rm -f stop-demo
+  ```
+  Ожидать: для `oom-demo` в Loki `die` с `exit_code: 137`, `cause: oom`; через 1–2 мин firing
+  `ContainerOomKilled`, `ContainerExit137` (Loki) и `HostOomKill` (Prometheus). Для `stop-demo` —
+  `die` 137 с `cause: docker_kill` (штатный `docker restart` добил SIGKILL) и **без** алерта.
+  Где смотреть в Grafana: дашборд **Platform overview** → строка «OOM и перезапуски контейнеров»;
+  **Alerting → Alert rules** → Data source-managed (Loki, группа `docker-events`; Prometheus,
+  группа `node`); **Alerting → Alert groups** с выбранным Alertmanager; **Explore** → Loki
+  `{service="docker-events"} | json`.
 
 ### 6. Безопасность (3 мин)
 - **Токены зашифрованы:** таблицы ботов появятся на Этапе II, поэтому показываем механизм тестом:
