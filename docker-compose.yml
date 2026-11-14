@@ -366,6 +366,38 @@ services:
       start_period: 20s
     mem_limit: ${ALLOY_MEM_LIMIT:-512m}
 
+  # Docker events sidecar: container oom/die/restart/kill -> one JSON line per event in stdout
+  # (collected by Alloy like any container log: {service="docker-events"}, label action).
+  # Docker API only via docker-socket-proxy (GET /events, EVENTS=1): no docker.sock, no caps.
+  # Healthcheck: heartbeat file touched on every successful (re)connect of the stream.
+  docker-events:
+    build:
+      context: ./ops/observability/docker-events
+    profiles: ["observability"]
+    restart: unless-stopped
+    logging: *logging
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=1m
+    environment:
+      DOCKER_EVENTS_URL: ${DOCKER_EVENTS_URL:-http://docker-socket-proxy:2375}
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
+    networks:
+      - docker_api
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time() - os.path.getmtime('/tmp/docker-events.alive') > 180)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: ${DOCKER_EVENTS_MEM_LIMIT:-32m}
+
   # Read-only Docker API for Alloy (discovery.docker, loki.source.docker). HAProxy in front of
   # docker.sock: only GET to the allowed path groups below, everything else -> 403.
   # Not published; reachable only from the internal network docker_api (alloy only).

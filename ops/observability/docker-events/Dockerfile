@@ -1,0 +1,12 @@
+# Docker events sidecar (docker-compose.yml, service docker-events): standard library only.
+FROM python:3.13-alpine@sha256:9ef1a599f863231c3d91e941389bfdc4a2d6070557243d54df1a4e57015b960e
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+COPY docker_events.py /app/docker_events.py
+
+# non-root (numeric, no /etc/passwd entry needed); the root fs is read-only at runtime
+USER 10001:10001
+
+ENTRYPOINT ["python", "/app/docker_events.py"]

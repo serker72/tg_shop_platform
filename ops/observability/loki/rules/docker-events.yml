@@ -1,0 +1,48 @@
+# Loki ruler (tenant `fake`: auth_enabled: false) -> Alertmanager (ruler.alertmanager_url).
+# Source: docker-events sidecar ({service="docker-events"}, stream label `action`).
+# Grouping: compose_service + container_name — containers outside compose (one-off probes)
+# have no compose_service and are still distinguishable by name; both are alert labels only,
+# not Loki index labels.
+groups:
+  - name: docker-events
+    rules:
+      - alert: ContainerOomKilled
+        expr: >-
+          sum by (compose_service, container_name) (count_over_time(
+          {service="docker-events", action="oom"}
+          | json container_name="container", compose_service="compose_service" [5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "OOM kill of container {{ $labels.container_name }}"
+          description: >-
+            The kernel OOM killer killed a process of container {{ $labels.container_name }}
+            (compose service {{ $labels.compose_service }}) in the last 5 minutes. Check mem_limit
+            (*_MEM_LIMIT in .env) and Loki {service="docker-events"}; see docs/ops/observability.md.
+
+      - alert: ContainerExit137
+        expr: >-
+          sum by (compose_service, container_name) (count_over_time(
+          {service="docker-events", action="die"}
+          | json container_name="container", compose_service="compose_service", exit_code="exit_code"
+          | exit_code="137" [5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.container_name }} exited with code 137"
+          description: >-
+            Container {{ $labels.container_name }} (compose service {{ $labels.compose_service }})
+            was killed by SIGKILL (OOM or docker kill/stop timeout) in the last 5 minutes.
+
+      - alert: ContainerRestartLoop
+        expr: >-
+          sum by (compose_service, container_name) (count_over_time(
+          {service="docker-events", action="restart"}
+          | json container_name="container", compose_service="compose_service" [15m])) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.container_name }} restarts too often"
+          description: >-
+            Container {{ $labels.container_name }} (compose service {{ $labels.compose_service }})
+            restarted {{ $value }} times in 15 minutes. Check its logs in Loki.

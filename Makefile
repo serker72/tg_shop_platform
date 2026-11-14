@@ -43,6 +43,16 @@ if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ]; then files="$$files -f $(ALLOY_SINGLE_H
 $(COMPOSE) $$files --env-file $(ENV_FILE) --profile observability
 endef
 
+# Main stack (no observability profile). ALLOY_SINGLE_HOST=1 adds the same overlay as
+# agent_compose: otherwise `make up` recreates master_bot/bot_worker without the obs network
+# (SENTRY_DSN -> caddy:8081 breaks) on a single host.
+define stack_compose
+$(call load_env,$(ENV_FILE)); \
+files="-f docker-compose.yml"; \
+if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ]; then files="$$files -f $(ALLOY_SINGLE_HOST_FILE)"; fi; \
+$(COMPOSE) $$files --env-file $(ENV_FILE)
+endef
+
 # Exports APP_VERSION/APP_COMMIT/APP_BUILD_TIME (image build args) into the recipe shell.
 # A missing milestone tag fails the recipe with a hint (see docs/ops/versioning.md).
 # Alloy starts with an empty OBS_TEMPO_OTLP_ENDPOINT (logs/metrics keep flowing), but its
@@ -187,7 +197,7 @@ version: ## Print the application version (0.1.<milestone>.<commit>[+dirty])
 
 up: ## Build and start the stack in background (image gets the current version), then make ready
 	@$(version_env); \
-	$(COMPOSE) --env-file $(ENV_FILE) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
+	$(stack_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory ready ENV_FILE=$(ENV_FILE)
 
 ready: ## Wait for /health/ready = 200 in master_bot and bot_worker (READY_TIMEOUT=60 s)
@@ -370,8 +380,8 @@ agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wai
 	$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory ready ENV_FILE=$(ENV_FILE)
 
-agent-down: ## Stop only Alloy + docker-socket-proxy (the main stack keeps running)
-	@$(agent_compose) rm -s -f alloy docker-socket-proxy
+agent-down: ## Stop only Alloy + docker-events + docker-socket-proxy (the main stack keeps running)
+	@$(agent_compose) rm -s -f alloy docker-events docker-socket-proxy
 
 agent-logs: ## Follow Alloy logs
 	@$(agent_compose) logs -f --tail=200 alloy

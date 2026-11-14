@@ -69,6 +69,23 @@ loki.process "json" {
 		}
 	}
 
+	// docker-events sidecar: the Docker event action becomes a label (oom|die|restart|kill)
+	stage.match {
+		selector = "{service=\"docker-events\"}"
+
+		stage.json {
+			expressions = {
+				action = "action",
+			}
+		}
+
+		stage.labels {
+			values = {
+				action = "",
+			}
+		}
+	}
+
 	// trace_id is high-cardinality: structured metadata, not a label
 	stage.structured_metadata {
 		values = {
