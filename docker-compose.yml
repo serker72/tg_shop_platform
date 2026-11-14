@@ -266,6 +266,7 @@ services:
       ALLOY_HOST_LABEL: ${ALLOY_HOST_LABEL:-}
       OBS_LOKI_PUSH_URL: ${OBS_LOKI_PUSH_URL:-}
       OBS_PROMETHEUS_REMOTE_WRITE_URL: ${OBS_PROMETHEUS_REMOTE_WRITE_URL:-}
+      OBS_TEMPO_OTLP_ENDPOINT: ${OBS_TEMPO_OTLP_ENDPOINT:-}
       POSTGRES_DB: ${POSTGRES_DB:-}
       POSTGRES_MONITORING_USER: ${POSTGRES_MONITORING_USER:-monitoring}
       POSTGRES_MONITORING_PASSWORD: ${POSTGRES_MONITORING_PASSWORD:-}
@@ -306,6 +307,10 @@ services:
         read_only: true
         bind:
           propagation: rslave
+    # OTLP receiver for the app (gRPC / HTTP): compose networks only, NOT published to the host.
+    expose:
+      - "4317"
+      - "4318"
     ports:
       # Alloy UI / debug (127.0.0.1 only)
       - "127.0.0.1:${ALLOY_PORT_HOST:-12345}:12345"

@@ -1,6 +1,7 @@
 # Single-host override (dev / test): Alloy joins the obs stack network so that
-# OBS_LOKI_PUSH_URL / OBS_PROMETHEUS_REMOTE_WRITE_URL can point to http://loki:3100 and
-# http://prometheus:9090. Ports of the obs stack are published on 127.0.0.1 only, which is
+# OBS_LOKI_PUSH_URL / OBS_PROMETHEUS_REMOTE_WRITE_URL / OBS_TEMPO_OTLP_ENDPOINT can point to
+# http://loki:3100, http://prometheus:9090 and tempo:4317 (OTLP gRPC).
+# Ports of the obs stack are published on 127.0.0.1 only, which is
 # NOT reachable from containers via host.docker.internal (host-gateway = docker0 address).
 # Used by `make agent-up` when ALLOY_SINGLE_HOST=1. Requires a running obs stack
 # (make obs-up with the same ENV_FILE). On VPS 1 in production do not use this file:

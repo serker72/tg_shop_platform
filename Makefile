@@ -342,8 +342,16 @@ obs-ps: ## Show observability stack services
 obs-logs: ## Follow observability logs (SERVICE=grafana to filter)
 	@$(call obs_env,--lenient); $(OBS_COMPOSE) logs -f --tail=200 $(SERVICE)
 
-agent-config: ## Validate main compose with the observability profile (Alloy)
+# Same image (tag + digest) as the alloy service in docker-compose.yml.
+ALLOY_CHECK_IMAGE ?= grafana/alloy:v1.11.3@sha256:8c7256f412feb9f5f48f9f6f9394dc97ca887f63dea9304f347970ecc1787669
+ALLOY_CONFIG := ops/observability/alloy/config.alloy
+agent-config: ## Validate main compose (profile observability) + Alloy config (fmt + validate)
 	@$(agent_compose) config --quiet && echo "docker-compose.yml + profile observability OK ($(ENV_FILE))"
+	@docker run --rm -v "$(CURDIR)/$(dir $(ALLOY_CONFIG)):/c:ro" --entrypoint /bin/alloy $(ALLOY_CHECK_IMAGE) \
+		fmt /c/$(notdir $(ALLOY_CONFIG)) | diff -u $(ALLOY_CONFIG) - \
+		|| { echo "ERROR: $(ALLOY_CONFIG) is not alloy-fmt formatted (see diff above)" >&2; exit 1; }
+	@docker run --rm -v "$(CURDIR)/$(dir $(ALLOY_CONFIG)):/c:ro" --entrypoint /bin/alloy $(ALLOY_CHECK_IMAGE) \
+		validate /c/$(notdir $(ALLOY_CONFIG)) && echo "$(ALLOY_CONFIG): alloy fmt + validate OK"
 
 agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
 	@$(version_env); \

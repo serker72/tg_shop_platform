@@ -2,6 +2,8 @@
 // Logs:    Docker JSON logs of the compose project -> loki.write (OBS_LOKI_PUSH_URL).
 // Metrics: node / postgres / redis exporters + RabbitMQ (rabbitmq_prometheus, :15692) +
 //          app (/metrics of master_bot, bot_worker) -> remote_write (OBS_PROMETHEUS_REMOTE_WRITE_URL).
+// Traces:  OTLP from the app (gRPC :4317 / HTTP :4318, network `default` only) -> Tempo
+//          (OTLP gRPC, OBS_TEMPO_OTLP_ENDPOINT). The app never talks to Tempo directly.
 // Common labels: env (PROJECT_ENVIRONMENT), host (ALLOY_HOST_LABEL, default: container hostname).
 // Secrets come only from the container environment (sys.env), never from this file.
 
@@ -179,5 +181,50 @@ prometheus.remote_write "obs" {
 	external_labels = {
 		env  = coalesce(sys.env("PROJECT_ENVIRONMENT"), "unknown"),
 		host = coalesce(sys.env("ALLOY_HOST_LABEL"), constants.hostname),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Traces: OTLP receiver -> memory_limiter -> batch -> Tempo (OTLP gRPC)
+// ---------------------------------------------------------------------------
+// Ports 4317/4318 are only exposed inside the compose network `default` (not published).
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		traces = [otelcol.processor.memory_limiter.default.input]
+	}
+}
+
+otelcol.processor.memory_limiter "default" {
+	check_interval = "1s"
+	limit          = "200MiB"
+
+	output {
+		traces = [otelcol.processor.batch.default.input]
+	}
+}
+
+otelcol.processor.batch "default" {
+	output {
+		traces = [otelcol.exporter.otlp.tempo.input]
+	}
+}
+
+// Single host: tempo:4317 (obs network); VPS 1 -> VPS 2: <VPN IP of VPS 2>:4317.
+// Plain gRPC without TLS: traffic stays inside the docker network / VPN tunnel.
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = sys.env("OBS_TEMPO_OTLP_ENDPOINT")
+
+		tls {
+			insecure = true
+		}
 	}
 }
