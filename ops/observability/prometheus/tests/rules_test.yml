@@ -284,3 +284,18 @@ tests:
       - eval_time: 13m
         alertname: HostOomKill
         exp_alerts: []
+
+  # Known behaviour (documented in docs/ops/observability.md): the first sample of the series is
+  # already after the OOM (Alloy started < 15 s before it), increase() has no "before" point,
+  # so HostOomKill does not fire; only Loki ContainerOomKilled/ContainerExit137 catch this OOM.
+  - interval: 1m
+    input_series:
+      - series: 'node_vmstat_oom_kill{job="node", instance="vps1", env="loc", host="vps1"}'
+        values: "7x40"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HostOomKill
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HostOomKill
+        exp_alerts: []

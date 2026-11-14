@@ -362,6 +362,14 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
   `compose_service, container_name`: у контейнеров вне compose `compose_service` пуст, имя
   различает их.
 
+**Ограничение `HostOomKill` после старта Alloy.** Alloy снимает `node_*` раз в 15 с, а
+`increase(node_vmstat_oom_kill[5m])` нужны две точки: до OOM и после. OOM в первые ~15 с после
+старта (пересоздания) Alloy попадает уже в первую точку ряда, и `HostOomKill` его не видит —
+такой OOM видят только Loki-алерты `ContainerOomKilled`/`ContainerExit137`. Поэтому OOM-пробу
+проводить не раньше чем через 30 с после `make agent-up`, когда `node_vmstat_oom_kill` уже
+есть в Prometheus. Метка `instance` у `job="node"` равна `host` (`ALLOY_HOST_LABEL`), а не
+hostname контейнера Alloy: при пересоздании Alloy ряд не рвётся.
+
 **Причина `die` 137 (поле `cause`).** Код 137 = SIGKILL, его дают и OOM killer, и сам Docker:
 `docker stop`/`restart` шлёт `StopSignal` (SIGTERM), ждёт таймаут (10 с) и добивает SIGKILL
 (moby `daemon/stop.go`). Если процесс игнорирует SIGTERM (`sleep` как PID 1), штатный

@@ -91,6 +91,10 @@
 - Говорить: «если фоновый процесс, создающий разделы журналов, остановился — придёт
   оповещение». Доставка в Telegram — после появления отдельного сервера.
 - **OOM и перезапуски** (пробы не трогают рабочие сервисы):
+  Перед OOM-пробой подождать ≥30 с после `make agent-up` и убедиться, что `node_vmstat_oom_kill`
+  есть в Prometheus (Explore → Prometheus). Alloy снимает метрики раз в 15 с, а `increase` в
+  `HostOomKill` нужны две точки: значение до OOM и после. Если OOM случился раньше первой точки,
+  `HostOomKill` не сработает (сработают только Loki-алерты).
   ```bash
   docker run --rm --name oom-demo -m 16m --memory-swap 16m alpine sh -c 'tail /dev/zero'  # rc 137
   docker run -d --name stop-demo alpine sleep 3600 && docker restart stop-demo; docker rm -f stop-demo
