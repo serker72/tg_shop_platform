@@ -1,5 +1,6 @@
 # Loki ruler (tenant `fake`: auth_enabled: false) -> Alertmanager (ruler.alertmanager_url).
 # Source: docker-events sidecar ({service="docker-events"}, stream label `action`).
+# ContainerRestartLoop counts `die`: restart-policy restarts emit die -> start, not `restart`.
 # Grouping: compose_service + container_name — containers outside compose (one-off probes)
 # have no compose_service and are still distinguishable by name; both are alert labels only,
 # not Loki index labels.
@@ -39,12 +40,15 @@ groups:
       - alert: ContainerRestartLoop
         expr: >-
           sum by (compose_service, container_name) (count_over_time(
-          {service="docker-events", action="restart"}
-          | json container_name="container", compose_service="compose_service" [15m])) > 3
+          {service="docker-events", action="die"}
+          | json container_name="container", compose_service="compose_service", cause="cause"
+          | cause!="docker_kill" [15m])) > 3
         labels:
           severity: warning
         annotations:
           summary: "Container {{ $labels.container_name }} restarts too often"
           description: >-
             Container {{ $labels.container_name }} (compose service {{ $labels.compose_service }})
-            restarted {{ $value }} times in 15 minutes. Check its logs in Loki.
+            died {{ $value }} times in 15 minutes (restart policy loop: die -> start; Docker emits
+            `restart` only for the `docker restart` API, docker stop/restart SIGKILL has
+            cause=docker_kill and is ignored). Check its logs in Loki.

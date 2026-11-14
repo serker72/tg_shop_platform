@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import urllib.parse
 from pathlib import Path
@@ -271,5 +272,66 @@ def test_make_agent_down_and_single_host_up() -> None:
         ).stdout
 
     assert "docker-events" in dry("agent-down")
-    # `make up` must keep the single-host overlay (bots stay in the obs network)
-    assert "compose.single-host.yml" in dry("up")
+
+
+@pytest.mark.parametrize(
+    ("single_host", "net_exists", "overlay", "warn"),
+    [("0", True, False, False), ("1", True, True, False), ("1", False, False, True)],
+)
+def test_make_up_single_host_overlay_args(
+    tmp_path: Path, single_host: str, net_exists: bool, overlay: bool, warn: bool
+) -> None:
+    """Real ``docker compose`` argv of ``make up`` (docker stub in PATH, not ``make -n``)."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "docker.log"
+    bin_dir.mkdir()
+    stub = bin_dir / "docker"
+    stub.write_text(
+        f'#!/bin/sh\necho "$*" >> "{log}"\n'
+        f'if [ "$1 $2" = "network inspect" ]; then exit {0 if net_exists else 1}; fi\nexit 1\n'
+    )
+    stub.chmod(0o755)
+    env_file = tmp_path / "stub.env"
+    env_file.write_text(f"PROJECT_NAME=stubproj\nALLOY_SINGLE_HOST={single_host}\n")
+    makefile = os.environ.get("TGSP_MAKEFILE", str(ROOT / "Makefile"))
+    proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        ["make", "-f", makefile, "up", f"ENV_FILE={env_file}"],  # noqa: S607
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    calls = log.read_text().splitlines() if log.exists() else []
+    ups = [c for c in calls if c.startswith("compose ") and " up -d" in c]
+    assert len(ups) == 1, (calls, proc.stderr)
+    assert ("compose.single-host.yml" in ups[0]) is overlay
+    assert f"--env-file {env_file}" in ups[0]
+    if single_host == "1":
+        assert "network inspect stubproj_obs_default" in calls
+    assert ("WARN: obs-стек не поднят" in proc.stderr) is warn
+
+
+def test_restart_loop_rule_counts_policy_restarts() -> None:
+    """Restart policy emits die -> start (no ``restart`` event): the rule counts ``die``."""
+    rules = yaml.safe_load((ROOT / "ops/observability/loki/rules/docker-events.yml").read_text())
+    exprs = {r["alert"]: r["expr"] for g in rules["groups"] for r in g["rules"]}
+    expr = exprs["ContainerRestartLoop"]
+    assert 'action="die"' in expr
+    assert 'cause!="docker_kill"' in expr
+    assert 'action="restart"' not in expr
+
+
+def test_dedup_keeps_distinct_events_with_same_time_nano() -> None:
+    watcher, emitted, _ = _watcher([])
+    lines = []
+    for cid, action in (("a", "die"), ("b", "die"), ("a", "kill")):
+        event = _event(action, {**ATTRS, "exitCode": "1", "signal": "9"}, nano=T0)
+        event["Actor"]["ID"] = cid
+        lines.append(json.dumps(event).encode())
+    for line in lines + lines:  # second pass = replay by ``since``
+        watcher.handle_line(line)
+    assert [(r["action"]) for r in emitted] == ["die", "die", "kill"]
+    older = _event("die", {**ATTRS, "exitCode": "1"}, nano=T0 - 1)
+    watcher.handle_line(json.dumps(older).encode())
+    assert len(emitted) == 3
+    assert len(watcher.seen) <= de.SEEN_MAX

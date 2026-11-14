@@ -7,9 +7,9 @@ so the events land in Loki as ``{service="docker-events"}`` with the label ``act
 
 Resilience: a broken stream or an unreachable proxy is logged (JSON, stderr) and retried with
 an exponential pause up to 30 s; the process never exits on its own. An idle stream is
-re-opened every ``READ_TIMEOUT`` seconds with ``since`` (duplicates are skipped by
-``timeNano``), and each successful connection touches the heartbeat file used by the
-docker healthcheck. Standard library only.
+re-opened every ``READ_TIMEOUT`` seconds with ``since`` (duplicates are skipped by the
+key ``(timeNano, id, Action)``), and each successful connection touches the heartbeat file
+used by the docker healthcheck. Standard library only.
 """
 
 from __future__ import annotations
@@ -36,6 +36,8 @@ LOGGER = "docker_events"
 # die 137 classification: recent kill/oom per container id (event time, not wall clock).
 CAUSE_WINDOW_NS = 60 * 1_000_000_000
 CAUSE_MAX_CONTAINERS = 512
+# Dedup of events replayed by ``since``: keys (timeNano, id, Action) of the newest timeNano.
+SEEN_MAX = 256
 
 
 def events_path(since: int | None = None) -> str:
@@ -162,6 +164,7 @@ class Watcher:
         self.connect, self.emit, self.sleep, self.beat, self.now = connect, emit, sleep, beat, now
         self.delay = 1.0
         self.last_nano = 0
+        self.seen: OrderedDict[tuple[int, str, str], None] = OrderedDict()
         self.since: int | None = None  # start of the previous successful connection
         self.causes = CauseTracker()
 
@@ -194,9 +197,18 @@ class Watcher:
             return
         event = json.loads(line)
         time_nano = int(event.get("timeNano") or 0)
-        if time_nano and time_nano <= self.last_nano:
-            return  # replayed by ``since`` after a reconnect
-        self.last_nano = max(self.last_nano, time_nano)
+        if time_nano:
+            actor_id = str((event.get("Actor") or {}).get("ID") or event.get("id") or "")
+            key = (time_nano, actor_id, str(event.get("Action") or event.get("status") or ""))
+            if time_nano < self.last_nano or key in self.seen:
+                return  # replayed by ``since`` after a reconnect
+            self.seen[key] = None
+            self.last_nano = max(self.last_nano, time_nano)
+            # different events may share timeNano: keep only keys of the newest one (bounded)
+            while self.seen and (
+                len(self.seen) > SEEN_MAX or next(iter(self.seen))[0] < self.last_nano
+            ):
+                self.seen.popitem(last=False)
         record = format_event(event)
         if record is not None:
             self.causes.observe(event, record)

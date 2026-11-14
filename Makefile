@@ -45,12 +45,26 @@ endef
 
 # Main stack (no observability profile). ALLOY_SINGLE_HOST=1 adds the same overlay as
 # agent_compose: otherwise `make up` recreates master_bot/bot_worker without the obs network
-# (SENTRY_DSN -> caddy:8081 breaks) on a single host.
+# (SENTRY_DSN -> caddy:8081 breaks) on a single host. The overlay declares the obs network as
+# external, so it is added only when that network exists (obs stack up); otherwise the bots
+# start without it (WARN) and `make agent-up` joins them after `make obs-up`.
 define stack_compose
 $(call load_env,$(ENV_FILE)); \
 files="-f docker-compose.yml"; \
-if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ]; then files="$$files -f $(ALLOY_SINGLE_HOST_FILE)"; fi; \
+if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ]; then \
+	if docker network inspect "$${PROJECT_NAME:-tg_shop_platform}_obs_default" >/dev/null 2>&1; then \
+		files="$$files -f $(ALLOY_SINGLE_HOST_FILE)"; \
+	else echo "WARN: obs-стек не поднят: боты запущены без obs-сети; после make obs-up выполните make agent-up" >&2; fi; \
+fi; \
 $(COMPOSE) $$files --env-file $(ENV_FILE)
+endef
+
+# agent-up with ALLOY_SINGLE_HOST=1 needs the obs network: Alloy without the obs stack is useless.
+define agent_obs_net_guard
+$(call load_env,$(ENV_FILE)); \
+net="$${PROJECT_NAME:-tg_shop_platform}_obs_default"; \
+if [ "$${ALLOY_SINGLE_HOST:-0}" = "1" ] && ! docker network inspect "$$net" >/dev/null 2>&1; then \
+	echo "ERROR: network $$net not found (ALLOY_SINGLE_HOST=1): run make obs-up first" >&2; exit 1; fi
 endef
 
 # Exports APP_VERSION/APP_COMMIT/APP_BUILD_TIME (image build args) into the recipe shell.
@@ -380,6 +394,7 @@ agent-config: ## Validate main compose (profile observability) + Alloy config (f
 
 agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
 	@$(agent_tempo_guard)
+	@$(agent_obs_net_guard)
 	@$(version_env); \
 	$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory ready ENV_FILE=$(ENV_FILE)
