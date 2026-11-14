@@ -8,6 +8,9 @@ import re
 import traceback
 from pathlib import Path
 from types import ModuleType
+from typing import Any
+
+import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "scripts" / "otel_smoke.py"
 
@@ -57,6 +60,45 @@ def test_otel_smoke_demo_queries_are_read_only() -> None:
     for query in module.DEMO_QUERIES:
         assert query.lstrip().upper().startswith("SELECT ")
         assert not re.search(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\b", query, re.I)
+
+
+def test_otel_smoke_failing_query_is_read_only() -> None:
+    module = _load()
+    assert module.FAILING_QUERY.upper().startswith("SELECT ")
+    assert not re.search(
+        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE)\b", module.FAILING_QUERY, re.I
+    )
+
+
+@pytest.mark.parametrize(
+    ("deep", "span_name", "exc_type"),
+    [
+        (False, "otel.smoke.failing_operation", "RuntimeError"),
+        (True, "process_order", "OrderProcessingError"),
+    ],
+)
+def test_otel_smoke_failing_span_is_error(deep: bool, span_name: str, exc_type: str) -> None:
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import StatusCode
+
+    module = _load()
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    with tracer.start_as_current_span("otel.smoke") as root:
+        exc = module.raise_forced_error(tracer, deep)
+    assert type(exc).__name__ == exc_type
+    spans: dict[str, Any] = {s.name: s for s in exporter.get_finished_spans()}
+    failing = spans[span_name]
+    assert failing.status.status_code is StatusCode.ERROR
+    assert failing.status.description == exc_type
+    assert failing.parent is not None and failing.parent.span_id == root.get_span_context().span_id
+    events: list[Any] = [e for e in failing.events if e.name == "exception"]
+    assert len(events) == 1 and events[0].attributes["exception.type"].endswith(exc_type)
+    assert spans["otel.smoke"].status.status_code is StatusCode.UNSET
 
 
 def test_otel_smoke_prints_no_settings() -> None:

@@ -10,6 +10,16 @@ urgentry issue "otel smoke forced error" with the same ``contexts.trace.trace_id
 read-only SELECTs with JOIN/WHERE (visible as ``db.statement`` in Tempo) and, instead of the
 plain error, a 3-level exception chain (``raise ... from ...``) with a 13+ frame stack and
 non-secret locals (urgentry issue "OrderProcessingError").
+
+Error spans (dashboard ``tracing-red``: Errors / Error ratio / Failed requests). The exception is
+caught inside the script, and ``start_as_current_span`` sets ERROR only for exceptions escaping
+the ``with`` block, so it is raised in a dedicated child span (``otel.smoke.failing_operation``;
+``process_order`` for ``--deep-error``) marked explicitly via ``record_exception`` +
+``set_status(Status(StatusCode.ERROR, <exception type>))``. The root ``otel.smoke`` stays UNSET:
+the smoke itself succeeds, the error is intentional and handled. One read-only ``SELECT`` from a
+missing table gives an ERROR on the SQLAlchemy CLIENT span (instrumentation ``handle_error``),
+i.e. a failed ``master_bot -> postgresql`` service-graph edge
+(``traces_service_graph_request_failed_total``).
 """
 
 from __future__ import annotations
@@ -17,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections.abc import Sequence
+from typing import Any
 
 QUEUE = "otel-smoke-q"
 
@@ -31,6 +42,35 @@ DEMO_QUERIES: tuple[str, ...] = (
     "SELECT s.is_maintenance_mode, s.iam_cache_ttl_seconds, s.file_logs_retention_days "
     "FROM system_settings AS s WHERE s.id = 1",
 )
+
+# Read-only query that fails on purpose (missing relation) -> ERROR on the DB client span.
+FAILING_QUERY = "SELECT 1 FROM otel_smoke_missing_table"
+
+
+def mark_span_error(span: Any, exc: BaseException) -> None:
+    """Official OTel API: exception event + ERROR status; description = type name only."""
+    from opentelemetry.trace import Status, StatusCode
+
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+
+
+def raise_forced_error(tracer: Any, deep: bool) -> BaseException:
+    """Create the demo exception inside its own child span marked ERROR; returns the exception."""
+    name = "process_order" if deep else "otel.smoke.failing_operation"
+    with tracer.start_as_current_span(
+        name, record_exception=False, set_status_on_exception=False
+    ) as span:
+        exc: BaseException
+        if deep:
+            exc = build_deep_error()
+        else:
+            try:
+                raise RuntimeError("otel smoke forced error")
+            except RuntimeError as err:
+                exc = err
+        mark_span_error(span, exc)
+    return exc
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -153,6 +193,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
     import sentry_sdk
     from faststream.rabbit import RabbitQueue
     from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
 
     from app.core.config import get_settings
     from app.core.logging import configure_logging, get_logger
@@ -183,7 +224,8 @@ async def main(argv: Sequence[str] | None = None) -> int:
     try:
         async with broker:
             await broker.start()
-            with get_tracer("otel_smoke").start_as_current_span("otel.smoke") as span:
+            tracer = get_tracer("otel_smoke")
+            with tracer.start_as_current_span("otel.smoke") as span:
                 async with engine.connect() as conn:
                     await conn.execute(text("select 1"))
                     if args.deep_error:
@@ -192,14 +234,12 @@ async def main(argv: Sequence[str] | None = None) -> int:
                 log.info("otel smoke start")
                 await broker.publish("ping", queue=QUEUE)
                 await asyncio.wait_for(consumed.wait(), 10)
-                exc: BaseException
-                if args.deep_error:
-                    exc = build_deep_error()
-                else:
-                    try:
-                        raise RuntimeError("otel smoke forced error")
-                    except RuntimeError as err:
-                        exc = err
+                try:  # separate connection: the failed statement does not touch the one above
+                    async with engine.connect() as conn:
+                        await conn.execute(text(FAILING_QUERY))
+                except DBAPIError:
+                    log.info("otel smoke failing select done")
+                exc = raise_forced_error(tracer, args.deep_error)
                 log.warning("otel smoke error captured")
                 if sentry_on:
                     event_id = sentry_sdk.capture_exception(exc)
