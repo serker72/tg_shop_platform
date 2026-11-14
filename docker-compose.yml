@@ -36,6 +36,8 @@ x-app: &app
   env_file: ${APP_ENV_FILE:-.env}
   restart: unless-stopped
   logging: *logging
+  # db_update/master_bot/bot_worker (idle ~140 MiB)
+  mem_limit: ${APP_MEM_LIMIT:-384m}
 
 services:
   postgres:
@@ -57,6 +59,27 @@ services:
       - "pg_partman_bgw.role=${POSTGRES_USER}"
       - "-c"
       - "pg_partman_bgw.dbname=${POSTGRES_DB}"
+      # Memory/WAL tuning (PostgreSQL 17 docs, "Resource Consumption"/"WAL"). Defaults = prod start
+      # of VPS 1 (8 GB RAM, PG_MEM_LIMIT 2g): shared_buffers ~25% of the PG budget, see .env.example.
+      - "-c"
+      - "shared_buffers=${PG_SHARED_BUFFERS:-512MB}"
+      - "-c"
+      - "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}"
+      - "-c"
+      - "work_mem=${PG_WORK_MEM:-8MB}"
+      - "-c"
+      - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}"
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-100}"
+      - "-c"
+      - "wal_compression=${PG_WAL_COMPRESSION:-lz4}"
+      - "-c"
+      - "checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION_TARGET:-0.9}"
+      - "-c"
+      - "max_wal_size=${PG_MAX_WAL_SIZE:-2GB}"
+    # Docker default /dev/shm is 64 MB: parallel workers allocate DSM there.
+    shm_size: ${PG_SHM_SIZE:-256m}
+    mem_limit: ${PG_MEM_LIMIT:-2g}
     volumes:
       - type: bind
         source: ${POSTGRES_DATA_DIR:?POSTGRES_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
@@ -83,12 +106,15 @@ services:
       - "-c"
       - >-
         umask 077
-        && printf 'requirepass "%s"\nappendonly yes\n'
+        && printf 'requirepass "%s"\nappendonly yes\nmaxmemory ${REDIS_MAXMEMORY:-256mb}\nmaxmemory-policy noeviction\n'
         "$$(printf '%s' "$$REDISCLI_AUTH" | sed 's/[\\"]/\\&/g')" > /tmp/redis.conf
         && chown redis:redis /tmp/redis.conf
         && exec docker-entrypoint.sh redis-server /tmp/redis.conf
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD не задан}
+    # maxmemory (above) < mem_limit: room for AOF rewrite fork and client buffers.
+    # noeviction is kept on purpose (permission cache/sessions): at the limit writes fail with OOM.
+    mem_limit: ${REDIS_MEM_LIMIT:-512m}
     volumes:
       - type: bind
         source: ${REDIS_DATA_DIR:?REDIS_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
@@ -116,9 +142,16 @@ services:
       - type: bind
         source: ${RABBITMQ_DATA_DIR:?RABBITMQ_DATA_DIR не задан — скопируйте .env.example в .env и укажите каталог данных}
         target: /var/lib/rabbitmq
+      - type: bind
+        source: ./ops/rabbitmq/conf.d/20-memory.conf
+        target: /etc/rabbitmq/conf.d/20-memory.conf
+        read_only: true
     ports:
       - "127.0.0.1:${RABBITMQ_PORT_HOST:-5672}:5672"
       - "127.0.0.1:${RABBITMQ_MGMT_PORT_HOST:-15672}:15672"
+    # vm_memory_high_watermark is set absolute in ops/rabbitmq/conf.d/20-memory.conf
+    # (below mem_limit; an absolute threshold is recommended for containers, rabbitmq.com/docs/memory).
+    mem_limit: ${RABBITMQ_MEM_LIMIT:-768m}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -144,6 +177,7 @@ services:
     ports:
       - "127.0.0.1:${MINIO_API_PORT_HOST:-9000}:9000"
       - "127.0.0.1:${MINIO_CONSOLE_PORT_HOST:-9001}:9001"
+    mem_limit: ${MINIO_MEM_LIMIT:-512m}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -325,6 +359,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    mem_limit: ${ALLOY_MEM_LIMIT:-512m}
 
   # Read-only Docker API for Alloy (discovery.docker, loki.source.docker). HAProxy in front of
   # docker.sock: only GET to the allowed path groups below, everything else -> 403.
@@ -381,6 +416,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
+    mem_limit: 64m
 
 networks:
   default: {}
