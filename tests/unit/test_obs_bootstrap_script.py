@@ -8,9 +8,13 @@ reads the default project key via the API and writes ``SENTRY_DSN``. The script 
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -210,3 +214,85 @@ def test_internal_url_must_be_caddy_ingest(tmp_path: Path, url: str, warned: boo
     assert _values(env_file.read_text(encoding="utf-8"))["SENTRY_DSN"] == (
         f"http://{PUBLIC_KEY_HEX}@{host}/1"
     )
+
+
+# Event retention: GET settings goes through the fake docker (wget in the urgentry container),
+# the PUT goes from host python3 to URGENTRY_API_URL -> a local HTTP server records it.
+class _SettingsHandler(BaseHTTPRequestHandler):
+    requests: ClassVar[list[tuple[str, str, dict[str, object]]]] = []
+
+    def do_PUT(self) -> None:  # noqa: N802 - http.server API
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).requests.append((self.path, self.headers["Authorization"], body))
+        answer = json.dumps({"eventRetentionDays": body["eventRetentionDays"]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(answer)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+def _argv_logging_python(tmp_path: Path) -> tuple[Path, Path]:
+    """Wrapper dir with python3 that appends its argv to a log, then runs the real python3."""
+    wrapdir = tmp_path / "wrapbin"
+    wrapdir.mkdir()
+    log = tmp_path / "python3.argv"
+    real = shutil.which("python3") or "python3"
+    wrapper = wrapdir / "python3"
+    wrapper.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >>"{log}"\nexec "{real}" "$@"\n')
+    wrapper.chmod(0o755)
+    return wrapdir, log
+
+
+@pytest.mark.parametrize(("env_days", "expected"), [("", 30), ("14", 14)])
+def test_event_retention_is_set_via_settings_api(
+    tmp_path: Path, env_days: str, expected: int
+) -> None:
+    _SettingsHandler.requests = []
+    server = HTTPServer(("127.0.0.1", 0), _SettingsHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    wrapdir, argv_log = _argv_logging_python(tmp_path)
+    env_text = _EMPTY_ENV + (f"URGENTRY_EVENT_RETENTION_DAYS={env_days}\n" if env_days else "")
+    try:
+        result, env_file, _ = _run(
+            tmp_path,
+            env_text,
+            extra_env={
+                "FAKE_RETENTION_DAYS": "90",
+                "URGENTRY_API_URL": f"http://127.0.0.1:{server.server_port}",
+                "PATH": f"{wrapdir}:{tmp_path / 'fakebin'}:/usr/local/bin:/usr/bin:/bin",
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.returncode == 0, result.stderr
+    assert f"eventRetentionDays: 90 -> {expected}" in result.stdout
+    [(path, auth, body)] = _SettingsHandler.requests
+    assert path == "/api/0/projects/urgentry-org/default/settings/"
+    pat = _values(env_file.read_text(encoding="utf-8"))["URGENTRY_BOOTSTRAP_PAT"]
+    assert pat
+    assert auth == f"Bearer {pat}"
+    # current settings are kept, only the retention changes; policies are derived by urgentry
+    assert body == {"name": "Default", "status": "active", "eventRetentionDays": expected}
+    # the PAT reaches python3 via the environment only: never in argv or in the output
+    assert argv_log.read_text(encoding="utf-8")
+    assert pat not in argv_log.read_text(encoding="utf-8")
+    assert pat not in result.stdout + result.stderr
+
+
+def test_event_retention_default_30_up_to_date(tmp_path: Path) -> None:
+    # FAKE_RETENTION_DAYS defaults to 30 and no API server is listening on URGENTRY_API_URL:
+    # a PUT attempt would fail the script.
+    result, _, _ = _run(
+        tmp_path,
+        _EMPTY_ENV,
+        extra_env={"URGENTRY_API_URL": "http://127.0.0.1:9"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "urgentry eventRetentionDays=30 is up to date" in result.stdout
+    assert "->" not in result.stdout
