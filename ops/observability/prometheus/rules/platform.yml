@@ -169,3 +169,13 @@ groups:
           description: >-
             Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }}
             ({{ $labels.device }}); PostgreSQL/MinIO/log writes will start failing.
+
+      # node_exporter vmstat collector (enabled by default in Alloy prometheus.exporter.unix,
+      # fields ^(oom_kill|...)): kernel OOM killer invocations on the host.
+      - alert: HostOomKill
+        expr: increase(node_vmstat_oom_kill[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "OOM kill on host {{ $labels.host }}"
+          description: "The kernel OOM killer fired on host {{ $labels.host }} (env={{ $labels.env }}) in the last 5 minutes. Which container: docker-events in Loki ({service=\"docker-events\"}) or docker inspect -f '{{ \"{{\" }}.State.OOMKilled{{ \"}}\" }}' <container>."

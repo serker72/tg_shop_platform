@@ -268,3 +268,19 @@ tests:
       - eval_time: 7m
         alertname: TempoDown
         exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'node_vmstat_oom_kill{job="node", instance="n1", env="loc", host="vps1"}'
+        values: "3 3 3 4 4 4 4 4 4 4 4 4 4 4"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HostOomKill
+        exp_alerts:
+          - exp_labels: {severity: warning, job: node, instance: n1, env: loc, host: vps1}
+            exp_annotations:
+              summary: "OOM kill on host vps1"
+              description: "The kernel OOM killer fired on host vps1 (env=loc) in the last 5 minutes. Which container: docker-events in Loki ({service=\"docker-events\"}) or docker inspect -f '{{.State.OOMKilled}}' <container>."
+      - eval_time: 13m
+        alertname: HostOomKill
+        exp_alerts: []
