@@ -19,7 +19,8 @@
 1. В `pyproject.toml`: `version = "0.1.N"` (новая веха `N`), затем `uv lock` (версия проекта
    записана в `uv.lock`).
 2. Тег на первом коммите вехи: `git tag -a milestone-N <sha> -m "Milestone N start"`
-   (и `git push origin milestone-N`, когда репозиторий публикуется).
+   (и `git push origin milestone-N && git push gitflic milestone-N`; `origin` — GitHub,
+   `gitflic` — зеркало).
 
 Без тега `ops/scripts/version.sh` (и сборка через `make up/agent-up/migrate/test-integration`)
 завершается ошибкой с подсказкой; приложение при этом не падает, а сообщает `0.1.N+unknown`.
@@ -37,7 +38,7 @@ make version                     # 0.1.N.<коммит>
 ```
 
 Если после `git fetch --tags` тега нет — его не отправили на remote: выполнить
-`git push origin milestone-N` в репозитории, где тег создан.
+`git push origin milestone-N` (и `git push gitflic milestone-N`) в репозитории, где тег создан.
 
 ## Тег сдачи вехи
 
@@ -67,7 +68,8 @@ make version                     # 0.1.N.<коммит>
 git tag -a v<версия> <sha> -m "Milestone N accepted (tests verified on <sha>)
 
 <итоги>"
-git push origin v<версия>
+git push origin v<версия>    # GitHub
+git push gitflic v<версия>   # зеркало gitflic
 ```
 
 Существующие теги не переносить и не перезаписывать: без `git tag -f` и `git push --force`.

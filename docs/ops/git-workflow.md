@@ -20,9 +20,19 @@
 - Новая ветка всегда создаётся от актуального `development`:
 
   ```bash
-  git fetch github
-  git switch -c feature/milestone-N github/development
+  git fetch origin
+  git switch -c feature/milestone-N origin/development
   ```
+
+## Remotes
+
+| Remote | Репозиторий | Назначение |
+|---|---|---|
+| `origin` | GitHub (`github.com`) | основной: PR, CI/CD |
+| `gitflic` | gitflic (`gitflic.ru`) | зеркало |
+
+Remotes переименованы 2026-11-14 (раньше `origin` = gitflic, `github` = GitHub). Ветки и
+теги отправляются в оба: `git push origin <ref>` и `git push gitflic <ref>`.
 
 ## Цикл сдачи вехи
 
@@ -91,9 +101,8 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
 
 ## Открытые вопросы
 
-1. **GitHub — основной `origin`.** Сейчас `origin` — gitflic, `github` — GitHub. GitHub
-   должен стать основным `origin` (PR и CI/CD — на GitHub); переименование remotes пока не
-   выполнено, команды в этом документе используют `github`.
+1. ~~**GitHub — основной `origin`.**~~ Решено 2026-11-14: remotes переименованы, `origin` —
+   GitHub (PR и CI/CD), `gitflic` — прежний `origin` (см. раздел «Remotes»).
 2. **Синхронизация gitflic.** Как обновлять второй репозиторий (gitflic) после слияния PR на
    GitHub (вручную `git push`, зеркалирование, шаг CI) — не решено.
 3. **Коммит тега сдачи.** Действующее правило: тег = версия коммита с отчётом
