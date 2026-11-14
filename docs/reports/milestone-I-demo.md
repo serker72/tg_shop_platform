@@ -72,6 +72,8 @@
   Через API (на сервере, из obs-сети, `Authorization: Bearer $URGENTRY_BOOTSTRAP_PAT`):
   `/api/0/projects/urgentry-org/default/issues/`, событие —
   `/api/0/projects/urgentry-org/default/events/<SENTRY_EVENT_ID>/` (поле `groupID` = id issue).
+  Ссылка на issue в UI: `https://<VPS_IP>/issues/<issue_id>/` (поле `permalink` из API
+  urgentry v0.2.11 даёт неработающий путь `/organizations/<org>/issues/<id>/`).
 
 ### 5. Оповещения о сбоях (2 мин)
 - `make test-alerts` — promtool проверяет правила алертов и их unit-тесты (все SUCCESS).

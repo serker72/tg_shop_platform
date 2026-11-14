@@ -115,6 +115,9 @@ Alertmanager silences/notifications `720h`.
   (из obs-сети `http://urgentry:8080`): org `urgentry-org`, project slug `default` —
   `/api/0/projects/`, `/api/0/projects/urgentry-org/default/issues/`,
   `/api/0/projects/urgentry-org/default/events/<event_id>/`.
+- Ссылка на issue в UI urgentry: `https://<host>/issues/<issue_id>/` (`<issue_id>` — поле `id`
+  issue или `groupID` события). Поле `permalink` из API urgentry v0.2.11 даёт неработающий путь
+  `/organizations/<org>/issues/<id>/` — не использовать.
 
 
 ## urgentry (журнал ошибок) и bootstrap
