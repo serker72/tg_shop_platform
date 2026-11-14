@@ -139,6 +139,13 @@ discovery.relabel "node" {
 		target_label = "job"
 		replacement  = "node"
 	}
+
+	// instance = host label: default instance is the Alloy container hostname, which changes on
+	// re-create and breaks node_* series (increase() in HostOomKill loses the "before" point).
+	rule {
+		target_label = "instance"
+		replacement  = coalesce(sys.env("ALLOY_HOST_LABEL"), constants.hostname)
+	}
 }
 
 discovery.relabel "postgres" {
