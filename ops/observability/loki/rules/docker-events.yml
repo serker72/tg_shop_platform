@@ -24,15 +24,17 @@ groups:
         expr: >-
           sum by (compose_service, container_name) (count_over_time(
           {service="docker-events", action="die"}
-          | json container_name="container", compose_service="compose_service", exit_code="exit_code"
-          | exit_code="137" [5m])) > 0
+          | json container_name="container", compose_service="compose_service", exit_code="exit_code", cause="cause"
+          | exit_code="137" | cause!="docker_kill" [5m])) > 0
         labels:
           severity: warning
         annotations:
           summary: "Container {{ $labels.container_name }} exited with code 137"
           description: >-
             Container {{ $labels.container_name }} (compose service {{ $labels.compose_service }})
-            was killed by SIGKILL (OOM or docker kill/stop timeout) in the last 5 minutes.
+            was killed by SIGKILL in the last 5 minutes (sidecar cause oom or unknown; docker
+            stop/restart/kill have cause=docker_kill and are ignored). See cause in Loki
+            {service="docker-events", action="die"} | json.
 
       - alert: ContainerRestartLoop
         expr: >-

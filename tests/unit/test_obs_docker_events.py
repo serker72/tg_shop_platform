@@ -97,6 +97,78 @@ def test_events_path_filters() -> None:
     assert "since" not in de.events_path()
 
 
+SEC = 1_000_000_000
+T0 = 1_700_000_000 * SEC
+
+
+def _run(*events: tuple[str, dict[str, str], int], cid: str = "c1") -> list[dict[str, Any]]:
+    """Feed raw events through the Watcher line handler; return emitted records."""
+    watcher, emitted, _ = _watcher([])
+    for action, extra, nano in events:
+        event = _event(action, {**ATTRS, **extra}, nano=nano)
+        event["Actor"]["ID"] = cid
+        watcher.handle_line(json.dumps(event).encode())
+    return emitted
+
+
+def test_cause_oom() -> None:
+    out = _run(("oom", {}, T0), ("die", {"exitCode": "137"}, T0 + SEC // 10))
+    assert out[-1]["cause"] == "oom"
+    assert "signal" not in out[-1]
+
+
+def test_cause_docker_kill_on_stop_timeout() -> None:
+    out = _run(
+        ("kill", {"signal": "15"}, T0),
+        ("kill", {"signal": "9"}, T0 + 10 * SEC),
+        ("die", {"exitCode": "137"}, T0 + 10 * SEC + 1),
+    )
+    assert (out[-1]["cause"], out[-1]["signal"]) == ("docker_kill", "9")
+
+
+def test_cause_unknown_without_history_and_none_for_clean_exit() -> None:
+    assert _run(("die", {"exitCode": "137"}, T0))[-1]["cause"] == "unknown"
+    out = _run(("kill", {"signal": "15"}, T0), ("die", {"exitCode": "0"}, T0 + 1))
+    assert "cause" not in out[-1]
+    assert "cause" not in _run(("die", {"exitCode": "1"}, T0))[-1]
+
+
+def test_cause_event_outside_window_ignored() -> None:
+    out = _run(("oom", {}, T0), ("die", {"exitCode": "137"}, T0 + 61 * SEC))
+    assert out[-1]["cause"] == "unknown"
+
+
+def test_cause_history_is_per_container_and_consumed_by_die() -> None:
+    tracker = de.CauseTracker()
+    kill = _event("kill", {**ATTRS, "signal": "9"}, nano=T0)
+    tracker.observe(kill, de.format_event(kill))
+    other = _event("die", {**ATTRS, "exitCode": "137"}, nano=T0 + 1)
+    other["Actor"]["ID"] = "other"
+    rec = de.format_event(other)
+    tracker.observe(other, rec)
+    assert rec["cause"] == "unknown"
+    die = _event("die", {**ATTRS, "exitCode": "137"}, nano=T0 + 2)
+    rec = de.format_event(die)
+    tracker.observe(die, rec)
+    assert rec["cause"] == "docker_kill"
+    assert not tracker.recent  # die drops the container history
+
+
+def test_cause_buffer_bounded() -> None:
+    tracker = de.CauseTracker(max_containers=3)
+    for i in range(10):
+        ev = _event("kill", {**ATTRS, "signal": "9"}, nano=T0 + i)
+        ev["Actor"]["ID"] = f"c{i}"
+        tracker.observe(ev, de.format_event(ev))
+    assert list(tracker.recent) == ["c7", "c8", "c9"]
+    assert de.CAUSE_MAX_CONTAINERS >= 100
+    die = _event("die", {**ATTRS, "exitCode": "137"}, nano=T0 + 20)
+    die["Actor"]["ID"] = "c0"  # evicted -> no history
+    rec = de.format_event(die)
+    tracker.observe(die, rec)
+    assert rec["cause"] == "unknown"
+
+
 class _Resp:
     def __init__(self, lines: list[bytes | BaseException], status: int = 200) -> None:
         self.status, self.lines = status, list(lines)
@@ -126,7 +198,7 @@ class _Conn:
         self.closed = True
 
 
-def _watcher(conns: list[_Conn]) -> tuple[Any, list[dict[str, Any]], list[float]]:
+def _watcher(conns: list[Any]) -> tuple[Any, list[dict[str, Any]], list[float]]:
     emitted: list[dict[str, Any]] = []
     sleeps: list[float] = []
     it = iter(conns)

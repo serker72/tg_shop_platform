@@ -21,6 +21,7 @@ import signal
 import sys
 import time
 import urllib.parse
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +33,9 @@ READ_TIMEOUT = float(os.environ.get("DOCKER_EVENTS_READ_TIMEOUT", "60"))
 HEARTBEAT = os.environ.get("DOCKER_EVENTS_HEARTBEAT", "/tmp/docker-events.alive")  # noqa: S108
 DOCKER_URL = os.environ.get("DOCKER_EVENTS_URL", "http://docker-socket-proxy:2375")
 LOGGER = "docker_events"
+# die 137 classification: recent kill/oom per container id (event time, not wall clock).
+CAUSE_WINDOW_NS = 60 * 1_000_000_000
+CAUSE_MAX_CONTAINERS = 512
 
 
 def events_path(since: int | None = None) -> str:
@@ -77,6 +81,51 @@ def format_event(event: dict[str, Any]) -> dict[str, Any] | None:
     return record
 
 
+class CauseTracker:
+    """Explains ``die`` with exit code 137 (SIGKILL) by the preceding events of the container.
+
+    Docker Engine sends ``kill`` (attribute ``signal``) before ``die`` for ``docker stop`` /
+    ``restart`` / ``kill`` / ``rm -f``, and ``oom`` (no ``kill``) before ``die`` when the kernel
+    OOM killer hit the container. ``cause``: ``oom`` | ``docker_kill`` (+ ``signal``) |
+    ``unknown``. Memory is bounded: at most ``max_containers`` ids, oldest dropped first.
+    """
+
+    def __init__(
+        self, window_ns: int = CAUSE_WINDOW_NS, max_containers: int = CAUSE_MAX_CONTAINERS
+    ) -> None:
+        self.window_ns, self.max_containers = window_ns, max_containers
+        self.recent: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def observe(self, event: dict[str, Any], record: dict[str, Any]) -> None:
+        cid = str((event.get("Actor") or {}).get("ID") or event.get("id") or "")
+        if not cid:
+            return
+        time_nano = int(event.get("timeNano") or int(event.get("time") or 0) * 1_000_000_000)
+        action = record["action"]
+        if action in ("oom", "kill"):
+            entry = self.recent.pop(cid, {})
+            entry[action] = (time_nano, record.get("signal", ""))
+            self.recent[cid] = entry
+            while len(self.recent) > self.max_containers:
+                self.recent.popitem(last=False)
+        elif action == "die":
+            entry = self.recent.pop(cid, {})
+            if record.get("exit_code") != 137:
+                return
+
+            def fresh(key: str) -> tuple[int, str] | None:
+                seen = entry.get(key)
+                return seen if seen and 0 <= time_nano - seen[0] <= self.window_ns else None
+
+            if fresh("oom"):
+                record["cause"] = "oom"
+            elif kill := fresh("kill"):
+                record["cause"] = "docker_kill"
+                record["signal"] = kill[1]
+            else:
+                record["cause"] = "unknown"
+
+
 def log_error(msg: str, **fields: Any) -> None:
     line = {"ts": datetime.now(tz=UTC).isoformat(timespec="milliseconds"), "level": "error"}
     line.update(logger=LOGGER, msg=msg, **fields)
@@ -114,6 +163,7 @@ class Watcher:
         self.delay = 1.0
         self.last_nano = 0
         self.since: int | None = None  # start of the previous successful connection
+        self.causes = CauseTracker()
 
     def stream_once(self) -> None:
         """One connection: returns on idle timeout, raises on errors / closed stream."""
@@ -149,6 +199,7 @@ class Watcher:
         self.last_nano = max(self.last_nano, time_nano)
         record = format_event(event)
         if record is not None:
+            self.causes.observe(event, record)
             self.emit(record)
         self.beat()
 
