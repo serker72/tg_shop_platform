@@ -246,3 +246,25 @@ tests:
       - eval_time: 17m
         alertname: CrowdsecDown
         exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo", instance="tempo:3200"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: TempoDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: tempo, instance: "tempo:3200"}
+            exp_annotations:
+              summary: "Tempo is down"
+              description: "Prometheus cannot scrape tempo:3200 for 5 minutes: traces and RED metrics (span-metrics) are not received. Check: make obs-ps / make obs-logs SERVICE=tempo."
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo", instance="tempo:3200"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: TempoDown
+        exp_alerts: []

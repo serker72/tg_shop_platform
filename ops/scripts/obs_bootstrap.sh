@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
-# GlitchTip bootstrap (make obs-bootstrap; called by make obs-up).
-# Usage: ops/scripts/obs_bootstrap.sh <env file>
+# urgentry bootstrap (make obs-bootstrap; called by make obs-up).
+# Usage: ops/scripts/obs_bootstrap.sh [--prepare] <env file>
 #
-# 1. Ensures GLITCHTIP_* bootstrap variables in the env file: missing keys get defaults,
-#    empty GLITCHTIP_ADMIN_PASSWORD (openssl rand -hex 24) / GLITCHTIP_PROJECT_PUBLIC_KEY (UUID4)
-#    are generated. Only these keys and SENTRY_DSN are touched; other lines, order and comments
-#    are kept. Before the first change the env file is copied to <env file>.bak.
-# 2. Runs the one-shot service glitchtip-bootstrap (docker-compose.obs.yml, profile bootstrap),
-#    which creates superuser/organization/team/project/key idempotently.
-# 3. Parses the marker GLITCHTIP_BOOTSTRAP_OK and writes
-#    SENTRY_DSN=<scheme>://<public_key>@<host of GLITCHTIP_INTERNAL_URL>/<project_id>.
+# 1. Ensures URGENTRY_* bootstrap variables in the env file: missing keys get defaults, empty
+#    URGENTRY_BOOTSTRAP_PASSWORD / URGENTRY_BOOTSTRAP_PAT are generated (openssl rand -hex 24).
+#    urgentry creates the owner + PAT from them on the first start (no bootstrap-credentials.txt),
+#    so make obs-up runs `--prepare` (this step only) BEFORE `docker compose up`.
+#    Only these keys and SENTRY_DSN are touched; other lines, order and comments are kept.
+#    Before the first change the env file is copied to <env file>.bak.
+# 2. Waits for /healthz of the running urgentry, reads the default project and its key via the
+#    API (GET /api/0/projects/, /api/0/projects/<org>/<project>/keys/, Bearer PAT; requests run
+#    inside the container, the PAT never appears in host argv) and writes
+#    SENTRY_DSN=<scheme>://<public_key>@<host of URGENTRY_INTERNAL_URL>/<project_id>.
 #    For PROJECT_ENVIRONMENT=test SENTRY_DSN is not written (test stack reports nothing).
-#    The host of GLITCHTIP_INTERNAL_URL must be internal (check_internal_url.sh), otherwise
-#    the script fails before bootstrap and SENTRY_DSN is not touched.
-# Secrets (password, DSN) are never printed.
+#    The host of URGENTRY_INTERNAL_URL must be internal (check_internal_url.sh), otherwise
+#    the script fails before bootstrap and SENTRY_DSN is not touched. Idempotent.
+# Secrets (password, PAT) are never printed.
 # Every value written by set_env is also exported to this process: make obs-bootstrap runs
 # after `set -a; source .env`, and the shell environment wins over `docker compose --env-file`,
-# so a stale (e.g. empty) exported value would otherwise reach glitchtip-bootstrap.
+# so a stale (e.g. empty) exported value would otherwise reach docker compose.
 set -euo pipefail
 
-env_file=${1:?usage: obs_bootstrap.sh <env file>}
+prepare_only=0
+if [[ ${1:-} == --prepare ]]; then prepare_only=1; shift; fi
+env_file=${1:?usage: obs_bootstrap.sh [--prepare] <env file>}
 [[ -f $env_file ]] || { echo "ERROR: $env_file not found (cp .env.example .env)" >&2; exit 1; }
 
 backed_up=0
@@ -49,8 +53,8 @@ set_env() {  # set_env KEY VALUE: replace existing line(s) or append; value prin
         cat "$tmp" >"$env_file"  # keep inode/permissions of the env file
         rm -f "$tmp"
     else
-        if ! grep -q '^# --- GlitchTip bootstrap (make obs-bootstrap) ---$' "$env_file"; then
-            printf '\n# --- GlitchTip bootstrap (make obs-bootstrap) ---\n' >>"$env_file"
+        if ! grep -q '^# --- urgentry bootstrap (make obs-bootstrap) ---$' "$env_file"; then
+            printf '\n# --- urgentry bootstrap (make obs-bootstrap) ---\n' >>"$env_file"
         fi
         printf '%s=%s\n' "$key" "$value" >>"$env_file"
     fi
@@ -60,48 +64,78 @@ set_env() {  # set_env KEY VALUE: replace existing line(s) or append; value prin
 ensure_default() {  # key missing or empty -> default value
     [[ -n $(get_env "$1") ]] || set_env "$1" "$2"
 }
-
-ensure_default GLITCHTIP_ADMIN_EMAIL admin@glitchtip.local
-ensure_default GLITCHTIP_ORG_SLUG tgshopplatform
-ensure_default GLITCHTIP_ORG_NAME TgShopPlatform
-ensure_default GLITCHTIP_TEAM_SLUG platform
-ensure_default GLITCHTIP_PROJECT_NAME tg-shop-platform
-ensure_default GLITCHTIP_PROJECT_PLATFORM python
-ensure_default GLITCHTIP_INTERNAL_URL http://glitchtip-web:8000
-# SENTRY_DSN is built from this host: only private IPs / Docker service names (fail early).
-bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$(get_env GLITCHTIP_INTERNAL_URL)" \
-    || { echo "ERROR: fix GLITCHTIP_INTERNAL_URL in $env_file; SENTRY_DSN is not written" >&2; exit 1; }
-[[ -n $(get_env GLITCHTIP_ADMIN_PASSWORD) ]] \
-    || set_env GLITCHTIP_ADMIN_PASSWORD "$(openssl rand -hex 24)"
-[[ -n $(get_env GLITCHTIP_PROJECT_PUBLIC_KEY) ]] \
-    || set_env GLITCHTIP_PROJECT_PUBLIC_KEY "$(python3 -c 'import uuid; print(uuid.uuid4())')"
-
-out=$(docker compose -f docker-compose.obs.yml --env-file "$env_file" --profile bootstrap \
-    run --rm -T glitchtip-bootstrap 2>&1) || {
-    # Diagnostics (GLITCHTIP_BOOTSTRAP_ERROR ...) pass; only the secret value itself is dropped.
-    admin_password=$(get_env GLITCHTIP_ADMIN_PASSWORD)
-    if [[ -n $admin_password ]]; then
-        echo "$out" | grep -v -F -e "$admin_password" >&2 || true
-    else
-        echo "$out" >&2
+ensure_secret() {  # empty -> random hex; existing value must be hex (URL/env safe)
+    local value
+    value=$(get_env "$1")
+    if [[ -z $value ]]; then
+        set_env "$1" "$(openssl rand -hex 24)"
+    elif ! [[ $value =~ ^[0-9a-fA-F]{32,}$ ]]; then
+        echo "ERROR: $1 in $env_file must be hex (>= 32 chars, openssl rand -hex 24)" >&2; exit 1
     fi
-    echo "ERROR: glitchtip-bootstrap failed" >&2
-    exit 1
 }
-echo "$out" | grep '^glitchtip-bootstrap:' || true
-marker=$(echo "$out" | grep -E '^GLITCHTIP_BOOTSTRAP_OK project_id=[0-9]+ public_key=[0-9a-f]{32}$' | tail -n1)
-[[ -n $marker ]] || { echo "ERROR: bootstrap marker not found" >&2; exit 1; }
-project_id=$(sed -E 's/.*project_id=([0-9]+).*/\1/' <<<"$marker")
-public_key=$(sed -E 's/.*public_key=([0-9a-f]+).*/\1/' <<<"$marker")
-echo "GlitchTip bootstrap OK: project_id=$project_id public_key=${public_key:0:4}…"
+
+ensure_default URGENTRY_BOOTSTRAP_EMAIL admin@urgentry.local
+ensure_default URGENTRY_INTERNAL_URL http://urgentry:8080
+# SENTRY_DSN is built from this host: only private IPs / Docker service names (fail early).
+bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$(get_env URGENTRY_INTERNAL_URL)" \
+    || { echo "ERROR: fix URGENTRY_INTERNAL_URL in $env_file; SENTRY_DSN is not written" >&2; exit 1; }
+ensure_secret URGENTRY_BOOTSTRAP_PASSWORD
+ensure_secret URGENTRY_BOOTSTRAP_PAT
+(( prepare_only )) && exit 0
+
+compose=(docker compose -f docker-compose.obs.yml --env-file "$env_file")
+# GET <path> inside the urgentry container with the PAT from its own environment.
+api() {
+    # shellcheck disable=SC2016  # expanded by sh inside the container
+    "${compose[@]}" exec -T urgentry sh -c \
+        'wget -qO- --header "Authorization: Bearer $URGENTRY_BOOTSTRAP_PAT" "http://127.0.0.1:8080$0"' "$1"
+}
+
+for _ in $(seq 1 60); do
+    if "${compose[@]}" exec -T urgentry wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+        healthy=1; break
+    fi
+    sleep 2
+done
+[[ ${healthy:-0} == 1 ]] || { echo "ERROR: urgentry /healthz is not ok (make obs-logs SERVICE=urgentry)" >&2; exit 1; }
+
+projects=$(api /api/0/projects/) \
+    || { echo "ERROR: urgentry API /api/0/projects/ failed (URGENTRY_BOOTSTRAP_PAT?)" >&2; exit 1; }
+slugs=$(python3 -c '
+import json, sys
+projects = json.load(sys.stdin)
+p = projects[0]
+org = p["organization"]  # urgentry v0.2.11: plain slug string; Sentry: object
+print(org["slug"] if isinstance(org, dict) else org, p["slug"], p.get("id", ""))
+' <<<"$projects") || { echo "ERROR: no project in urgentry API answer" >&2; exit 1; }
+read -r org_slug project_slug project_api_id <<<"$slugs"
+[[ $org_slug =~ ^[A-Za-z0-9_-]+$ && $project_slug =~ ^[A-Za-z0-9_-]+$ ]] \
+    || { echo "ERROR: unexpected organization/project slug from urgentry API" >&2; exit 1; }
+keys=$(api "/api/0/projects/$org_slug/$project_slug/keys/") \
+    || { echo "ERROR: urgentry API keys/ of $org_slug/$project_slug failed" >&2; exit 1; }
+parsed=$(PROJECT_API_ID="$project_api_id" python3 -c '
+import json, os, sys
+from urllib.parse import urlsplit
+keys = [k for k in json.load(sys.stdin) if k.get("isActive", True)]
+k = keys[0]
+dsn = (k.get("dsn") or {}).get("public") or ""
+url = urlsplit(dsn) if dsn else None
+key = (url.username if url else None) or k.get("public") or ""
+pid = (url.path.rstrip("/").rsplit("/", 1)[-1] if url else "") or str(k.get("projectId") or os.environ["PROJECT_API_ID"])
+print(key, pid)
+' <<<"$keys") || { echo "ERROR: no key in urgentry API answer" >&2; exit 1; }
+read -r public_key project_id <<<"$parsed"
+[[ $public_key =~ ^[0-9a-f]{32}$ && $project_id =~ ^[A-Za-z0-9-]+$ ]] \
+    || { echo "ERROR: unexpected public key / project id from urgentry API" >&2; exit 1; }
+echo "urgentry bootstrap OK: project=$org_slug/$project_slug project_id=$project_id public_key=${public_key:0:4}…"
 
 if [[ $(get_env PROJECT_ENVIRONMENT) == test ]]; then
     echo "PROJECT_ENVIRONMENT=test: SENTRY_DSN is not written to $env_file"
     exit 0
 fi
-internal_url=$(get_env GLITCHTIP_INTERNAL_URL)
+internal_url=$(get_env URGENTRY_INTERNAL_URL)
 [[ $internal_url =~ ^(https?)://([^/]+)/?$ ]] \
-    || { echo "ERROR: GLITCHTIP_INTERNAL_URL must look like http://host:port" >&2; exit 1; }
+    || { echo "ERROR: URGENTRY_INTERNAL_URL must look like http://host:port" >&2; exit 1; }
 dsn="${BASH_REMATCH[1]}://${public_key}@${BASH_REMATCH[2]}/${project_id}"
 if [[ $(get_env SENTRY_DSN) == "$dsn" ]]; then
     echo "SENTRY_DSN is up to date"

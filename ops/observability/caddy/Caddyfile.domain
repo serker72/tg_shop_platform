@@ -1,4 +1,4 @@
-# CADDY_MODE=domain: Grafana and GlitchTip on their own domains, automatic HTTPS
+# CADDY_MODE=domain: Grafana and urgentry on their own domains, automatic HTTPS
 # (Let's Encrypt; *.localhost -> Caddy internal CA; nip.io names work: grafana.<ip>.nip.io).
 # http -> https redirect for the configured domains (and ACME HTTP-01) is the default behaviour
 # of Caddy; any other Host on port 80/443 hits a catch-all and the connection is aborted
@@ -58,7 +58,7 @@ https:// {
 	}
 }
 
-{$GLITCHTIP_DOMAIN} {
+{$URGENTRY_DOMAIN} {
 	import access_log
 	crowdsec
 	import obs_auth
@@ -66,7 +66,7 @@ https:// {
 	request_body {
 		max_size 50MB
 	}
-	reverse_proxy glitchtip-web:8000 {
+	reverse_proxy urgentry:8080 {
 		header_up -Authorization
 	}
 }

@@ -3,7 +3,7 @@
 # Usage: ops/scripts/check_internal_url.sh <url>   -> exit 0 internal, 1 otherwise (message on stderr)
 #
 # Allowed host: an IP from 10/8, 172.16/12, 192.168/16, 127/8, 100.64/10 (Tailscale CGNAT),
-# ::1, fc00::/7, or a name without dots (Docker service such as glitchtip-web, localhost).
+# ::1, fc00::/7, or a name without dots (Docker service such as urgentry, localhost).
 # Same rules as app.core.config.is_internal_host (tests/unit/test_internal_url.py keeps
 # both in sync). Only the host is printed, never the URL (a DSN contains the key).
 set -euo pipefail
@@ -59,7 +59,7 @@ if parts.scheme not in ("http", "https") or not internal(host):
     print(
         f"ERROR: host {host!r} is not internal: use a private IP (10/8, 172.16/12, 192.168/16, "
         "127/8, 100.64/10, ::1, fc00::/7) or a Docker service name without dots "
-        "(e.g. http://glitchtip-web:8000); public GlitchTip addresses are forbidden",
+        "(e.g. http://urgentry:8080); public urgentry addresses are forbidden",
         file=sys.stderr,
     )
     sys.exit(1)

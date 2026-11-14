@@ -4,6 +4,15 @@ groups:
   - name: observability-stack
     rules:
       # The Caddy bouncer is fail-open: without CrowdSec nobody is banned (Basic Auth still works).
+      - alert: TempoDown
+        expr: up{job="tempo"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tempo is down"
+          description: "Prometheus cannot scrape tempo:3200 for 5 minutes: traces and RED metrics (span-metrics) are not received. Check: make obs-ps / make obs-logs SERVICE=tempo."
+
       - alert: CrowdsecDown
         expr: up{job="crowdsec"} == 0
         for: 5m

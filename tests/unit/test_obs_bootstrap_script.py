@@ -1,9 +1,9 @@
-"""``ops/scripts/obs_bootstrap.sh``: env precedence over ``--env-file`` and error masking.
+"""``ops/scripts/obs_bootstrap.sh``: urgentry DSN via API, env precedence, secrets masking.
 
-``make obs-bootstrap`` runs the script after ``set -a; source .env``, so empty
-``GLITCHTIP_ADMIN_PASSWORD=`` / ``GLITCHTIP_PROJECT_PUBLIC_KEY=`` are already exported; the
-shell environment wins over ``docker compose --env-file``. Generated values must therefore
-reach ``docker compose run`` through the process environment as well.
+``make obs-up`` runs ``obs_bootstrap.sh --prepare`` before ``docker compose up`` (urgentry creates
+the owner/PAT from ``URGENTRY_BOOTSTRAP_*`` on the first start), then ``make obs-bootstrap``
+reads the default project key via the API and writes ``SENTRY_DSN``. The script runs after
+``set -a; source .env``, so generated values must also be exported to the process environment.
 """
 
 from __future__ import annotations
@@ -25,23 +25,22 @@ pytestmark = [
     pytest.mark.skipif(shutil.which("python3") is None, reason="python3 is required"),
 ]
 
-# Fake docker: `compose ... run ...` dumps its environment to $FAKE_DOCKER_ENV_OUT and prints
-# the bootstrap marker, or (FAKE_DOCKER_FAIL=1) a diagnostic + a line with the password.
+# Fake docker: `compose ... exec ...` dumps its environment to $FAKE_DOCKER_ENV_OUT and answers
+# like urgentry (healthz / projects / keys by the last argument), or (FAKE_DOCKER_FAIL=1) fails
+# the projects request.
 _FAKE_DOCKER = f"""#!/bin/sh
-for arg in "$@"; do
-    if [ "$arg" = run ]; then
-        env >"$FAKE_DOCKER_ENV_OUT"
-        if [ "${{FAKE_DOCKER_FAIL:-0}}" = 1 ]; then
-            echo "GLITCHTIP_BOOTSTRAP_ERROR GLITCHTIP_ADMIN_PASSWORD is empty" >&2
-            echo "leak: $GLITCHTIP_ADMIN_PASSWORD"
-            exit 1
-        fi
-        echo "glitchtip-bootstrap: superuser exists"
-        echo "GLITCHTIP_BOOTSTRAP_OK project_id=1 public_key={PUBLIC_KEY_HEX}"
-        exit 0
-    fi
-done
-exit 0
+case " $* " in *" exec "*) ;; *) exit 0;; esac
+env >"$FAKE_DOCKER_ENV_OUT"
+for last in "$@"; do :; done
+case "$last" in
+    */healthz) echo '{{"status":"ok"}}';;
+    /api/0/projects/)
+        [ "${{FAKE_DOCKER_FAIL:-0}}" = 1 ] && {{ echo "401 Unauthorized" >&2; exit 1; }}
+        echo '[{{"id":"default-project","slug":"default","organization":"urgentry-org"}}]';;
+    /api/0/projects/urgentry-org/default/keys/)
+        echo '[{{"public":"{PUBLIC_KEY_HEX}","isActive":true,"dsn":{{"public":"https://{PUBLIC_KEY_HEX}@127.0.0.1:443/7"}}}}]';;
+    *) echo "unexpected $last" >&2; exit 1;;
+esac
 """
 
 
@@ -54,7 +53,7 @@ def _values(text: str) -> dict[str, str]:
 
 
 def _run(
-    tmp_path: Path, env_text: str, *, fail: bool = False
+    tmp_path: Path, env_text: str, *, fail: bool = False, prepare: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
@@ -64,8 +63,9 @@ def _run(
     env_file = tmp_path / "x.env"
     env_file.write_text(env_text, encoding="utf-8")
     env_out = tmp_path / "docker.env"
+    args = ["--prepare"] if prepare else []
     result = subprocess.run(  # noqa: S603 - fixed script path, arguments are tmp files
-        [shutil.which("bash") or "bash", str(OBS_BOOTSTRAP), str(env_file)],
+        [shutil.which("bash") or "bash", str(OBS_BOOTSTRAP), *args, str(env_file)],
         capture_output=True,
         text=True,
         check=False,
@@ -74,9 +74,9 @@ def _run(
         env={
             "PATH": f"{bindir}:/usr/local/bin:/usr/bin:/bin",
             # as after `set -a; source .env` in make obs-bootstrap
-            "GLITCHTIP_ADMIN_PASSWORD": "",
-            "GLITCHTIP_PROJECT_PUBLIC_KEY": "",
-            "GLITCHTIP_INTERNAL_URL": "",
+            "URGENTRY_BOOTSTRAP_PASSWORD": "",
+            "URGENTRY_BOOTSTRAP_PAT": "",
+            "URGENTRY_INTERNAL_URL": "",
             "FAKE_DOCKER_ENV_OUT": str(env_out),
             "FAKE_DOCKER_FAIL": "1" if fail else "0",
         },
@@ -84,7 +84,7 @@ def _run(
     return result, env_file, env_out
 
 
-_EMPTY_ENV = "PROJECT_ENVIRONMENT=loc\nGLITCHTIP_ADMIN_PASSWORD=\nGLITCHTIP_PROJECT_PUBLIC_KEY=\n"
+_EMPTY_ENV = "PROJECT_ENVIRONMENT=loc\nURGENTRY_BOOTSTRAP_PASSWORD=\nURGENTRY_BOOTSTRAP_PAT=\n"
 
 
 def test_generated_values_reach_docker_despite_empty_shell_env(tmp_path: Path) -> None:
@@ -94,16 +94,29 @@ def test_generated_values_reach_docker_despite_empty_shell_env(tmp_path: Path) -
     written = _values(env_file.read_text(encoding="utf-8"))
     seen = _values(env_out.read_text(encoding="utf-8"))
     for key in (
-        "GLITCHTIP_ADMIN_PASSWORD",
-        "GLITCHTIP_PROJECT_PUBLIC_KEY",
-        "GLITCHTIP_INTERNAL_URL",
-        "GLITCHTIP_ORG_SLUG",
+        "URGENTRY_BOOTSTRAP_PASSWORD",
+        "URGENTRY_BOOTSTRAP_PAT",
+        "URGENTRY_INTERNAL_URL",
+        "URGENTRY_BOOTSTRAP_EMAIL",
     ):
         assert written[key], key
         assert seen[key] == written[key], key
-    assert written["SENTRY_DSN"] == f"http://{PUBLIC_KEY_HEX}@glitchtip-web:8000/1"
-    assert "GlitchTip bootstrap OK" in result.stdout
-    assert written["GLITCHTIP_ADMIN_PASSWORD"] not in result.stdout + result.stderr
+    assert len(written["URGENTRY_BOOTSTRAP_PAT"]) == 48
+    assert written["SENTRY_DSN"] == f"http://{PUBLIC_KEY_HEX}@urgentry:8080/7"
+    assert "urgentry bootstrap OK" in result.stdout
+    output = result.stdout + result.stderr
+    assert written["URGENTRY_BOOTSTRAP_PASSWORD"] not in output
+    assert written["URGENTRY_BOOTSTRAP_PAT"] not in output
+
+
+def test_prepare_only_generates_secrets(tmp_path: Path) -> None:
+    result, env_file, env_out = _run(tmp_path, _EMPTY_ENV, prepare=True)
+
+    assert result.returncode == 0, result.stderr
+    written = _values(env_file.read_text(encoding="utf-8"))
+    assert written["URGENTRY_BOOTSTRAP_PAT"]
+    assert "SENTRY_DSN" not in written
+    assert not env_out.exists()
 
 
 def test_rerun_reports_dsn_up_to_date(tmp_path: Path) -> None:
@@ -118,13 +131,26 @@ def test_rerun_reports_dsn_up_to_date(tmp_path: Path) -> None:
     assert "Updated" not in second.stdout
 
 
-def test_failure_shows_diagnostics_but_not_password(tmp_path: Path) -> None:
+def test_test_environment_does_not_write_dsn(tmp_path: Path) -> None:
+    result, env_file, _ = _run(tmp_path, _EMPTY_ENV.replace("=loc", "=test"))
+
+    assert result.returncode == 0, result.stderr
+    assert "SENTRY_DSN" not in _values(env_file.read_text(encoding="utf-8"))
+
+
+def test_api_failure_does_not_write_dsn_or_secrets(tmp_path: Path) -> None:
     result, env_file, _ = _run(tmp_path, _EMPTY_ENV, fail=True)
 
     assert result.returncode == 1
-    password = _values(env_file.read_text(encoding="utf-8"))["GLITCHTIP_ADMIN_PASSWORD"]
-    assert password
-    assert "GLITCHTIP_BOOTSTRAP_ERROR GLITCHTIP_ADMIN_PASSWORD is empty" in result.stderr
-    assert "ERROR: glitchtip-bootstrap failed" in result.stderr
-    assert password not in result.stdout + result.stderr
+    values = _values(env_file.read_text(encoding="utf-8"))
+    assert "ERROR: urgentry API /api/0/projects/ failed" in result.stderr
+    assert values["URGENTRY_BOOTSTRAP_PAT"] not in result.stdout + result.stderr
+    assert "SENTRY_DSN" not in values
+
+
+def test_non_hex_secret_is_rejected(tmp_path: Path) -> None:
+    result, env_file, _ = _run(tmp_path, "URGENTRY_BOOTSTRAP_PASSWORD=change_me\n")
+
+    assert result.returncode == 1
+    assert "URGENTRY_BOOTSTRAP_PASSWORD" in result.stderr
     assert "SENTRY_DSN" not in _values(env_file.read_text(encoding="utf-8"))

@@ -33,6 +33,12 @@ scrape_configs:
     static_configs:
       - targets: ["crowdsec:6060"]
 
+  # Tempo (no Docker healthcheck in its image): availability via this job -> alert TempoDown.
+  # urgentry /metrics needs URGENTRY_METRICS_TOKEN: not scraped (Docker healthcheck covers it).
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+
   - job_name: grafana
     file_sd_configs:
       - files: ["/etc/prometheus-targets/grafana.yml"]

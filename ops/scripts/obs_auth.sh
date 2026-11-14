@@ -86,7 +86,7 @@ if (( generated )); then
         echo
         echo "##################################################################"
         echo "#  !!! SAVE THIS PASSWORD: it is shown ONCE and NOT stored !!!"
-        echo "#  Basic Auth of Caddy (Grafana/GlitchTip): user=$user password=$pw"
+        echo "#  Basic Auth of Caddy (Grafana/urgentry): user=$user password=$pw"
         if [[ ${OBS_AUTH_IMPLICIT:-0} == 1 ]]; then
             echo "#  $env_file was created implicitly (make init-dirs/obs-up/...);"
             echo "#  the password may scroll away in the output below."

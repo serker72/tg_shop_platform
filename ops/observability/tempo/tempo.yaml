@@ -1,0 +1,51 @@
+# Grafana Tempo 3.1.1, single binary. Based on the official example
+# example/docker-compose/single-binary/tempo.yaml @ v3.1.1 (Tempo 3.x rejects the 2.x sections
+# ingester / compactor / metrics_generator.traces_storage).
+# OTLP from Alloy (VPS 1 over VPN, or the obs network on a single host): gRPC 4317, HTTP 4318.
+# metrics-generator: span-metrics + service-graphs -> Prometheus remote write (RED metrics).
+# Native histograms are not generated (default classic): Prometheus runs without them.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# Trace retention 30 days (same as Loki / Prometheus).
+backend_worker:
+  compaction:
+    block_retention: 720h
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: ["span-metrics", "service-graphs"]
+
+usage_report:
+  reporting_enabled: false

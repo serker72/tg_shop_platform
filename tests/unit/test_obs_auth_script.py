@@ -216,18 +216,18 @@ def test_obs_auth_writes_base64_bcrypt(tmp_path: Path) -> None:
         (
             {"CADDY_MODE": "ip", "VPS_IP": "203.0.113.5", "CADDY_HTTPS_PORT_HOST": "443"},
             "GRAFANA_ROOT_URL=https://203.0.113.5:443/grafana/ GRAFANA_SERVE_FROM_SUB_PATH=true "
-            "GLITCHTIP_PUBLIC_URL=https://203.0.113.5:443",
+            "URGENTRY_PUBLIC_URL=https://203.0.113.5:443",
         ),
         (
             {
                 "CADDY_MODE": "domain",
                 "GRAFANA_DOMAIN": "grafana.1.2.3.4.nip.io",
-                "GLITCHTIP_DOMAIN": "gt.1.2.3.4.nip.io",
+                "URGENTRY_DOMAIN": "gt.1.2.3.4.nip.io",
                 "CADDY_HTTPS_PORT_HOST": "8443",
             },
             "GRAFANA_ROOT_URL=https://grafana.1.2.3.4.nip.io:8443/ "
             "GRAFANA_SERVE_FROM_SUB_PATH=false "
-            "GLITCHTIP_PUBLIC_URL=https://gt.1.2.3.4.nip.io:8443",
+            "URGENTRY_PUBLIC_URL=https://gt.1.2.3.4.nip.io:8443",
         ),
     ],
 )

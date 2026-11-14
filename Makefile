@@ -21,9 +21,15 @@ PROMTOOL_IMAGE ?= $(shell sed -n 's/.*PROMETHEUS_IMAGE:-\([^}]*\)}.*/\1/p' docke
 READY_TIMEOUT ?= 60
 # Observability stack (docker-compose.obs.yml); uses the same ENV_FILE (ENV_FILE=.env.test for test)
 OBS_COMPOSE = $(COMPOSE) -f docker-compose.obs.yml --env-file $(ENV_FILE)
-OBS_DIRS := OBS_POSTGRES_DATA_DIR OBS_REDIS_DATA_DIR OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR \
+OBS_DIRS := OBS_URGENTRY_DATA_DIR OBS_TEMPO_DATA_DIR OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR \
 	OBS_LOKI_DATA_DIR OBS_ALERTMANAGER_DATA_DIR OBS_CADDY_DATA_DIR OBS_CADDY_LOGS_DIR \
 	OBS_CROWDSEC_DATA_DIR
+# Dirs of services running as 10001:10001 (urgentry, Tempo): chowned by make init-dirs
+# (directly as root, otherwise via a one-shot container: no sudo needed)
+OBS_10001_DIRS := OBS_URGENTRY_DATA_DIR OBS_TEMPO_DATA_DIR
+OBS_CHOWN_IMAGE ?= alpine:3.21@sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab
+# Tempo image pinned in docker-compose.obs.yml (config check of obs-validate)
+TEMPO_IMAGE_DEFAULT := $(shell sed -n 's/.*TEMPO_IMAGE:-\([^}]*\)}.*/\1/p' docker-compose.obs.yml | head -n1)
 # Dirs of services running as APP_UID:APP_GID (`user:` in docker-compose.obs.yml): must stay writable
 OBS_APP_UID_DIRS := OBS_GRAFANA_DATA_DIR OBS_PROMETHEUS_DATA_DIR OBS_LOKI_DATA_DIR \
 	OBS_ALERTMANAGER_DATA_DIR
@@ -46,14 +52,14 @@ endef
 
 .PHONY: help install env init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down test-alerts test-report clean archive-audit \
-	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-glitchtip-reset obs-auth obs-bans obs-validate obs-crowdsec-rekey \
+	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-auth obs-bans obs-validate obs-crowdsec-rekey \
 	agent-config agent-up agent-down agent-logs
 
 # Loads $(1) into the recipe shell (bash expands ${PROJECT_DATA_DIR}-style references).
 # Limitation (same as docker compose interpolation): values must not contain unescaped `$`,
 # backticks or unbalanced quotes — see .env.example.
 # Loads ENV_FILE and exports mode-dependent variables of the obs stack (CADDY_MODE,
-# GRAFANA_ROOT_URL, GRAFANA_SERVE_FROM_SUB_PATH, GLITCHTIP_PUBLIC_URL) for every docker compose
+# GRAFANA_ROOT_URL, GRAFANA_SERVE_FROM_SUB_PATH, URGENTRY_PUBLIC_URL) for every docker compose
 # call (shell env wins over --env-file). $(1)=--check: guard of obs-up/obs-config;
 # --lenient: obs-down/ps/logs (CADDY_MODE may be missing in an old .env).
 define obs_env
@@ -156,6 +162,14 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 		probe="$${!var}/.init-dirs-probe"; \
 		{ touch "$$probe" 2>/dev/null && rm -f "$$probe"; } \
 			|| [ "$$(stat -c %u "$${!var}")" = "$${APP_UID:-}" ] || deny "$${!var}"; \
+	done; \
+	for var in $(OBS_10001_DIRS); do \
+		[ -n "$${!var:-}" ] || continue; d="$${!var}"; \
+		[ "$$(stat -c %u:%g "$$d")" = "10001:10001" ] && continue; \
+		{ chown 10001:10001 "$$d" 2>/dev/null \
+			|| docker run --rm -v "$$d:/d" $(OBS_CHOWN_IMAGE) chown 10001:10001 /d; } \
+			|| { echo "ERROR: $$d must be owned by 10001:10001 (urgentry/Tempo): sudo chown 10001:10001 $$d" >&2; exit 1; }; \
+		echo "OK $$var owned by 10001:10001"; \
 	done
 
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
@@ -261,13 +275,17 @@ obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (CADDY_MODE/VPS_IP/
 
 # Builds the own Caddy image (Go modules: network on the first build) and validates
 # Caddyfile.<CADDY_MODE> in it; only the Caddyfile is mounted (no data dirs needed).
-obs-validate: ## Build the Caddy image and run caddy validate for Caddyfile.<CADDY_MODE> (ENV_FILE)
+obs-validate: ## Build the Caddy image, caddy validate Caddyfile.<CADDY_MODE>, tempo -config.verify (ENV_FILE)
 	@$(call obs_env,--check); \
 	$(OBS_COMPOSE) build caddy && img=$$($(OBS_COMPOSE) config --images | grep -m1 -- '-obs-caddy:') && \
-	docker run --rm -e VPS_IP -e GRAFANA_DOMAIN -e GLITCHTIP_DOMAIN -e OBS_AUTH_USER -e OBS_AUTH_HASH \
+	docker run --rm -e VPS_IP -e GRAFANA_DOMAIN -e URGENTRY_DOMAIN -e OBS_AUTH_USER -e OBS_AUTH_HASH \
 		-e CROWDSEC_BOUNCER_KEY -v "$(CURDIR)/ops/observability/caddy/Caddyfile.$$CADDY_MODE:/etc/caddy/Caddyfile:ro" \
 		"$$img" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
-	&& echo "Caddyfile.$$CADDY_MODE OK ($$img)"
+	&& echo "Caddyfile.$$CADDY_MODE OK ($$img)" \
+	&& timg="$${TEMPO_IMAGE:-$(TEMPO_IMAGE_DEFAULT)}" \
+	&& docker run --rm -v "$(CURDIR)/ops/observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro" "$$timg" \
+		-config.file=/etc/tempo/tempo.yaml -config.expand-env=true -config.verify=true \
+	&& echo "tempo.yaml OK ($$timg)"
 
 # The image registers the bouncer only if it does not exist yet: after changing
 # CROWDSEC_BOUNCER_KEY the old registration must be deleted, otherwise LAPI answers 403.
@@ -280,12 +298,14 @@ obs-crowdsec-rekey: ## Re-register the Caddy bouncer after changing CROWDSEC_BOU
 	$(OBS_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout $(WAIT_TIMEOUT) crowdsec; \
 	$(OBS_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout $(WAIT_TIMEOUT) caddy
 
-obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy, bootstrap GlitchTip
+# --prepare: urgentry bootstrap secrets must be in ENV_FILE before its first start.
+obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy), wait for healthy, bootstrap urgentry
+	@bash ops/scripts/obs_bootstrap.sh --prepare "$(ENV_FILE)"
 	@$(call obs_env,--check); \
 	$(OBS_COMPOSE) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
-obs-bootstrap: ## Idempotent GlitchTip admin/org/team/project from ENV_FILE; writes SENTRY_DSN (backup .bak)
+obs-bootstrap: ## Idempotent: urgentry project key via API -> SENTRY_DSN in ENV_FILE (backup .bak)
 	@$(call obs_env); \
 	bash ops/scripts/obs_bootstrap.sh "$(ENV_FILE)"
 
@@ -296,24 +316,6 @@ obs-auth: ## Set Caddy Basic Auth (OBS_AUTH_USER/OBS_AUTH_HASH in ENV_FILE), rec
 	if [ -n "$$($(OBS_COMPOSE) ps -q caddy 2>/dev/null)" ]; then \
 		$(OBS_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout $(WAIT_TIMEOUT) caddy; \
 	else echo "caddy is not running: the new credentials apply on make obs-up"; fi
-
-# One-off: drops ONLY the GlitchTip database (OBS_POSTGRES_DB) in obs-postgres, re-runs
-# migrations and bootstrap. Other databases and services are not touched.
-obs-glitchtip-reset: ## DESTRUCTIVE: recreate GlitchTip DB and bootstrap from ENV_FILE (requires CONFIRM=1)
-	@if [ "$(CONFIRM)" != "1" ]; then \
-		echo "ERROR: obs-glitchtip-reset deletes ALL GlitchTip data (users, projects, events)."; \
-		echo "       Run: make obs-glitchtip-reset CONFIRM=1 [ENV_FILE=...]"; exit 1; fi
-	@$(call obs_env); \
-	db="$${OBS_POSTGRES_DB:-glitchtip}"; user="$${OBS_POSTGRES_USER:-glitchtip}"; \
-	[[ "$$db" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ && "$$user" =~ ^[A-Za-z_][A-Za-z0-9_]*$$ ]] \
-		|| { echo "ERROR: OBS_POSTGRES_DB/OBS_POSTGRES_USER must be plain identifiers"; exit 1; }; \
-	set -e; \
-	$(OBS_COMPOSE) rm -s -f glitchtip-web glitchtip-worker glitchtip-migrate; \
-	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT) obs-postgres; \
-	$(OBS_COMPOSE) exec -T obs-postgres psql -v ON_ERROR_STOP=1 -U "$$user" -d postgres \
-		-c "DROP DATABASE IF EXISTS \"$$db\" WITH (FORCE)" -c "CREATE DATABASE \"$$db\" OWNER \"$$user\""; \
-	$(OBS_COMPOSE) up -d --wait --wait-timeout $(WAIT_TIMEOUT) glitchtip-migrate glitchtip-web glitchtip-worker
-	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
 obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
 	@$(call obs_env,--lenient); $(OBS_COMPOSE) down

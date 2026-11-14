@@ -3,17 +3,17 @@
 # Usage (after the env file is loaded into the environment):
 #   eval "$(bash ops/scripts/obs_mode.sh [--check | --lenient])"
 #
-# Reads CADDY_MODE (ip | domain; required), VPS_IP, GRAFANA_DOMAIN, GLITCHTIP_DOMAIN,
+# Reads CADDY_MODE (ip | domain; required), VPS_IP, GRAFANA_DOMAIN, URGENTRY_DOMAIN,
 # CADDY_HTTPS_PORT_HOST and prints `export ...` for:
-#   CADDY_MODE, GRAFANA_ROOT_URL, GRAFANA_SERVE_FROM_SUB_PATH, GLITCHTIP_PUBLIC_URL
-#   ip:     https://<VPS_IP>:<port>/grafana/ + true;  GlitchTip https://<VPS_IP>:<port>
-#   domain: https://<GRAFANA_DOMAIN>:<port>/ + false; GlitchTip https://<GLITCHTIP_DOMAIN>:<port>
+#   CADDY_MODE, GRAFANA_ROOT_URL, GRAFANA_SERVE_FROM_SUB_PATH, URGENTRY_PUBLIC_URL
+#   ip:     https://<VPS_IP>:<port>/grafana/ + true;  urgentry https://<VPS_IP>:<port>
+#   domain: https://<GRAFANA_DOMAIN>:<port>/ + false; urgentry https://<URGENTRY_DOMAIN>:<port>
 # --check (obs-up / obs-config): the variables of the selected mode must be set and
 #   OBS_AUTH_USER / OBS_AUTH_HASH must be present (base64 of a bcrypt hash, `make obs-auth`),
 #   CROWDSEC_BOUNCER_KEY must be hex (>= 32 chars; `make env` generates it).
 # Without --check missing VPS_IP/domains fall back to defaults, but CADDY_MODE is still required:
 # an old .env without it must not silently switch a domain server to the ip mode
-# (obs-auth recreates caddy, obs-glitchtip-reset recreates GlitchTip with these values).
+# (obs-auth recreates caddy with these values).
 # --lenient (obs-down/ps/logs only: nothing is (re)created) also defaults CADDY_MODE to ip.
 # Invalid values are always rejected (they are interpolated into URLs).
 set -euo pipefail
@@ -28,7 +28,7 @@ esac
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 if [[ -z ${CADDY_MODE:-} ]] && (( ! lenient )); then
-    die "CADDY_MODE is not set: add CADDY_MODE=domain (GRAFANA_DOMAIN/GLITCHTIP_DOMAIN, as before)" \
+    die "CADDY_MODE is not set: add CADDY_MODE=domain (GRAFANA_DOMAIN/URGENTRY_DOMAIN, as before)" \
         "or CADDY_MODE=ip (VPS_IP) to the env file, then make obs-auth and make obs-up;" \
         "see README, section 'Обновление существующего .env'"
 fi
@@ -60,20 +60,20 @@ case $mode in
         fi
         is_ipv4 "$ip" || die "VPS_IP=$ip is not an IPv4 address (for a domain use CADDY_MODE=domain)"
         grafana_url="https://$ip:$port/grafana/"; sub_path=true
-        glitchtip_url="https://$ip:$port"
+        urgentry_url="https://$ip:$port"
         ;;
     domain)
-        gd=${GRAFANA_DOMAIN:-} td=${GLITCHTIP_DOMAIN:-}
+        gd=${GRAFANA_DOMAIN:-} td=${URGENTRY_DOMAIN:-}
         if [[ -z $gd || -z $td ]]; then
             if (( check )); then
-                die "CADDY_MODE=domain requires GRAFANA_DOMAIN and GLITCHTIP_DOMAIN (e.g. grafana.<ip>.nip.io)"
+                die "CADDY_MODE=domain requires GRAFANA_DOMAIN and URGENTRY_DOMAIN (e.g. grafana.<ip>.nip.io)"
             fi
-            gd=${gd:-grafana.localhost} td=${td:-glitchtip.localhost}
+            gd=${gd:-grafana.localhost} td=${td:-urgentry.localhost}
         fi
         is_domain "$gd" || die "GRAFANA_DOMAIN=$gd is not a domain name"
-        is_domain "$td" || die "GLITCHTIP_DOMAIN=$td is not a domain name"
+        is_domain "$td" || die "URGENTRY_DOMAIN=$td is not a domain name"
         grafana_url="https://$gd:$port/"; sub_path=false
-        glitchtip_url="https://$td:$port"
+        urgentry_url="https://$td:$port"
         ;;
     *) die "CADDY_MODE=$mode: expected ip or domain" ;;
 esac
@@ -92,5 +92,5 @@ if (( check )); then
             "(make env FORCE=1 only for a NEW installation: it regenerates ALL secrets)"
 fi
 
-printf 'export CADDY_MODE=%s GRAFANA_ROOT_URL=%s GRAFANA_SERVE_FROM_SUB_PATH=%s GLITCHTIP_PUBLIC_URL=%s\n' \
-    "$mode" "$grafana_url" "$sub_path" "$glitchtip_url"
+printf 'export CADDY_MODE=%s GRAFANA_ROOT_URL=%s GRAFANA_SERVE_FROM_SUB_PATH=%s URGENTRY_PUBLIC_URL=%s\n' \
+    "$mode" "$grafana_url" "$sub_path" "$urgentry_url"

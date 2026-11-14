@@ -1,5 +1,5 @@
 # CADDY_MODE=ip: access by the public IP of VPS 2 (VPS_IP), self-signed certificate
-# (tls internal). https://<VPS_IP>/ -> GlitchTip, https://<VPS_IP>/grafana/ -> Grafana
+# (tls internal). https://<VPS_IP>/ -> urgentry, https://<VPS_IP>/grafana/ -> Grafana
 # (GF_SERVER_SERVE_FROM_SUB_PATH=true: the /grafana prefix is kept in the proxied path).
 # http://<VPS_IP> -> https redirect is the default behaviour of Caddy; any other Host on port 80
 # (scanners, no Host) hits the catch-all and the connection is aborted.
@@ -71,7 +71,7 @@ https:// {
 		request_body {
 			max_size 50MB
 		}
-		reverse_proxy glitchtip-web:8000 {
+		reverse_proxy urgentry:8080 {
 			header_up -Authorization
 		}
 	}

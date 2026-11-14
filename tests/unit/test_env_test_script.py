@@ -128,7 +128,7 @@ def _write_template(tmp_path: Path) -> Path:
                 "ENCRYPTION_KEY=",
                 "POSTGRES_MONITORING_PASSWORD=",
                 "MASTER_BOT_TOKEN=",
-                "GLITCHTIP_ADMIN_PASSWORD=",
+                "URGENTRY_BOOTSTRAP_PASSWORD=",
             ]
         )
         + "\n",
@@ -159,7 +159,7 @@ def test_init_generates_secrets_and_copies_the_rest(tmp_path: Path) -> None:
     assert values["PROJECT_DATA_DIR"] == "/opt/tg_shop_platform_data"
     assert values["LOGS_DATA_DIR"] == "${PROJECT_DATA_DIR}/logs"
     assert values["MASTER_BOT_TOKEN"] == ""
-    assert values["GLITCHTIP_ADMIN_PASSWORD"] == ""
+    assert values["URGENTRY_BOOTSTRAP_PASSWORD"] == ""
     assert "# comment stays" in target.read_text(encoding="utf-8")
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert "POSTGRES_PASSWORD" in result.stdout
