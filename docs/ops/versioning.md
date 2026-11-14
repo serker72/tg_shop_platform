@@ -72,6 +72,9 @@ git push origin v<версия>
 
 Существующие теги не переносить и не перезаписывать: без `git tag -f` и `git push --force`.
 
+С вехи II изменения вливаются в `development` через PR; влияние merge-коммитов на версию и
+выбор коммита для тега сдачи — [git-workflow.md](git-workflow.md#теги-и-версия).
+
 ## Где видна версия
 
 - `make version` / `ops/scripts/version.sh` — версия; `--commit` — короткий хеш;

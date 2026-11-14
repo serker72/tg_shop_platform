@@ -170,4 +170,5 @@
 отчёт отдельным коммитом (в отчёте указан проверенный коммит).
 
 Документация: восстановление — [docs/ops/recovery.md](docs/ops/recovery.md),
-версионирование — [docs/ops/versioning.md](docs/ops/versioning.md).
+версионирование — [docs/ops/versioning.md](docs/ops/versioning.md),
+работа с репозиторием (ветки, PR, с вехи II) — [docs/ops/git-workflow.md](docs/ops/git-workflow.md).
