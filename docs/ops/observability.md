@@ -149,6 +149,16 @@ SQLite в `OBS_URGENTRY_DATA_DIR` (`/data`, владелец uid 10001), пор�
 - Применить DSN: `make agent-up` (с `ALLOY_SINGLE_HOST=1` overlay
   `ops/observability/alloy/compose.single-host.yml` подключает ботов к сети obs-стека, где
   резолвится `caddy`).
+- **Срок хранения событий.** urgentry v0.2.11 сам удаляет старые события (планировщик,
+  `projects.event_retention_days`, по умолчанию 90 дней). `make obs-bootstrap` идемпотентно
+  ставит `URGENTRY_EVENT_RETENTION_DAYS` (по умолчанию 30) через
+  `PUT /api/0/projects/<org>/<project>/settings/` (порт `URGENTRY_PORT_HOST` хоста, PAT из `.env`);
+  ошибки, логи, трейсы, профили и outcomes хранятся столько же. SQLite после удаления не
+  сжимается — файл в `OBS_URGENTRY_DATA_DIR` остаётся на пике, место переиспользуется.
+- **Остатки GlitchTip на существующих стендах.** Если в `${PROJECT_DATA_DIR}/obs/` остались
+  каталоги `db` и `redis` от GlitchTip (их не монтирует ни один сервис), удалите их:
+  `docker run --rm -v ${PROJECT_DATA_DIR}/obs:/p alpine rm -rf /p/db /p/redis`
+  (владельцы — uid контейнеров, поэтому без sudo через alpine).
 - urgentry имеет недокументированный OTLP-эндпоинт (только JSON) — **не используется**: трейсы
   идут в Tempo (см. ниже).
 
