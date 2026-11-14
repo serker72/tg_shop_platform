@@ -322,7 +322,7 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
 |---|---|---|
 | `CONTAINERS=1` | `/containers/json`, `/containers/{id}/json`, `/containers/{id}/logs` | discovery контейнеров и чтение их логов |
 | `NETWORKS=1` | `/networks` | `discovery.docker` вычисляет сетевые метки; без неё — 403 и `Unable to refresh target groups` (проверено) |
-| `EVENTS=1` | `/events` | отслеживание старта/остановки контейнеров |
+| `EVENTS=1` | `/events` | отслеживание старта/остановки контейнеров (Alloy) и поток событий `oom`/`die`/`restart`/`kill` (sidecar `docker-events`) |
 | `VERSION=1`, `PING=1` | `/version`, `/_ping` | согласование версии API клиентом Docker (`HEAD /_ping`, `GET /version` в логах proxy) и healthcheck |
 
 Всё остальное (`INFO`, `IMAGES`, `EXEC`, `POST`, `ALLOW_START/STOP/RESTARTS`, …) = 0 → 403.
@@ -331,6 +331,50 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
 > переменных окружения из `/containers/{id}/json`), сетей и логов контейнеров, но не
 > управление хостом: создание/запуск/exec/удаление контейнеров отклоняются proxy (403).
 > Компрометация самого proxy по-прежнему равна доступу к `docker.sock`.
+
+### OOM и перезапуски контейнеров
+
+Два независимых сигнала, без новых привилегий и без cAdvisor:
+
+- **Хост:** коллектор `vmstat` в `prometheus.exporter.unix` (включён в Alloy v1.11.3 по
+  умолчанию, поле `oom_kill`) → `node_vmstat_oom_kill{job="node"}`; алерт Prometheus
+  `HostOomKill` (`increase(...[5m]) > 0`, warning).
+- **Контейнер:** sidecar `docker-events` (`ops/observability/docker-events/`, Python stdlib на
+  `python:3.13-alpine` по digest, профиль `observability`). Читает поток
+  `GET /events?filters={"type":["container"],"event":["oom","die","restart","kill"]}` через
+  `docker-socket-proxy` (`EVENTS=1`, новых разрешений нет) и пишет в stdout одну JSON-строку на
+  событие: `ts`, `action`, `container`, `compose_service`, `compose_project`, `image`,
+  `exit_code` (для `die`), `signal` (для `kill`); id контейнера не выводится. Alloy забирает
+  stdout как обычный лог (`{service="docker-events"}`) и ставит метку `action` (только она;
+  `stage.match` в `loki.process "json"`).
+  Сервис: сеть только `docker_api`, `read_only`, `cap_drop: [ALL]`, `no-new-privileges`,
+  user `10001`, `tmpfs /tmp` 1m, `mem_limit` `DOCKER_EVENTS_MEM_LIMIT` (32m). Разрыв потока или
+  недоступный proxy → JSON-ошибка `docker_events_stream_error` в stderr и переподключение с
+  паузой 1→30 с (процесс не падает). Простой поток переоткрывается раз в 60 с с `since`
+  (дубли отсекаются по `timeNano`). Healthcheck — возраст файла `/tmp/docker-events.alive`
+  (обновляется при каждом подключении) не больше 180 с.
+- **Алерты Loki ruler** (`ops/observability/loki/rules/docker-events.yml`, bind в
+  `/etc/loki/rules/fake`, tenant `fake` при `auth_enabled: false`, доставка
+  `ruler.alertmanager_url`): `ContainerOomKilled` (critical, `action="oom"` за 5 мин),
+  `ContainerExit137` (warning, `die` с `exit_code=137` за 5 мин), `ContainerRestartLoop`
+  (warning, > 3 `restart` за 15 мин). Группировка `compose_service, container_name`: у
+  контейнеров вне compose `compose_service` пуст, имя различает их.
+
+Где смотреть: Grafana → Explore → Loki `{service="docker-events"}` (или
+`{service="docker-events", action="oom"}`), Alertmanager; правила Loki —
+`GET http://loki:3100/loki/api/v1/rules`, состояние — `/prometheus/api/v1/alerts`.
+
+Проверка (стенд, не трогает рабочие сервисы):
+
+```bash
+docker run --rm --name oom-probe -m 16m --memory-swap 16m alpine:3.20 sh -c 'tail /dev/zero'  # rc 137
+docker run -d --name restart-probe alpine:3.20 sleep 600
+for i in 1 2 3 4; do docker restart -t 1 restart-probe; done; docker rm -f restart-probe
+```
+
+Ожидается: в Loki `action=oom` и `action=die` с `exit_code: 137` для `oom-probe`, четыре
+`restart`; `node_vmstat_oom_kill` +1; `HostOomKill`, `ContainerOomKilled`, `ContainerExit137`,
+`ContainerRestartLoop` — firing и видны в Alertmanager (`/api/v2/alerts`).
 
 ### Переменные
 
@@ -379,7 +423,7 @@ make agent-logs / agent-down   # agent-down останавливает толь�
 **Порядок остановки** (только single-host):
 
 ```bash
-make agent-down   # alloy + docker-socket-proxy (профиль observability)
+make agent-down   # alloy + docker-events + docker-socket-proxy (профиль observability)
 make down         # основной стек (боты, postgres, redis, ...)
 make obs-down     # стек наблюдаемости
 ```

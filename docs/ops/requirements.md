@@ -117,6 +117,7 @@ urgentry, Tempo, Loki, Prometheus, Alertmanager, Grafana, Caddy, CrowdSec.
 | db_update (разовый) / master_bot / bot_worker | 384m (`APP_MEM_LIMIT`) | — / 118 / 118 МБ |
 | alloy | 512m (`memory_limiter` 200 MiB) | 144 МБ |
 | docker-socket-proxy | 64m (`DOCKER_SOCKET_PROXY_MEM_LIMIT`) | 17 МБ |
+| docker-events | 32m (`DOCKER_EVENTS_MEM_LIMIT`) | 12 МБ |
 | loki / prometheus | 512m / 512m | 84 / 73 МБ |
 | grafana | 640m | 99 МБ |
 | alertmanager / caddy | 128m / 128m | 24 / 15 МБ |
@@ -130,10 +131,10 @@ PostgreSQL укладывается в `PG_MEM_LIMIT` и в худшем слу�
 
 | Хост | Сумма `mem_limit` | RAM (старт / рекомендуемо) |
 |---|---|---|
-| VPS 1, постоянные сервисы | 5184 MiB ≈ 5.1 ГБ | 8 / 16 ГБ |
-| VPS 1 во время `db_update` (+384m) и `minio_init` (+128m) | 5696 MiB ≈ 5.6 ГБ | 8 / 16 ГБ |
+| VPS 1, постоянные сервисы | 5216 MiB ≈ 5.1 ГБ | 8 / 16 ГБ |
+| VPS 1 во время `db_update` (+384m) и `minio_init` (+128m) | 5728 MiB ≈ 5.6 ГБ | 8 / 16 ГБ |
 | VPS 2 | 3200 MiB ≈ 3.1 ГБ | 2 ГБ + swap 2 ГБ / 4 ГБ |
-| Staging (VPS 1 + VPS 2 на одном хосте) | 8384 MiB ≈ 8.2 ГБ (с разовыми — 8.7 ГБ) | 4 ГБ + swap 2 ГБ / 8 ГБ |
+| Staging (VPS 1 + VPS 2 на одном хосте) | 8416 MiB ≈ 8.2 ГБ (с разовыми — 8.7 ГБ) | 4 ГБ + swap 2 ГБ / 8 ГБ |
 
 **Лимиты — это потолки с overcommit, а не резерв.** Сумма может превышать RAM (VPS 2 и Staging
 на старте): запас дают swap и то, что сервисы не достигают пика одновременно (в простое VPS 2 ≈
@@ -165,7 +166,7 @@ holes») — используйте `dd`. На btrfs файл должен бы�
 |---|---|---|
 | OOM без лимитов памяти | закрыто | `c9aa1af`, `dd048ae`, `f57ddc0`: `mem_limit` у всех сервисов VPS 1 и VPS 2 (включая docker-socket-proxy, minio_init, urgentry, tempo, crowdsec через `*_MEM_LIMIT`); `make ready` 200 |
 | CrowdSec у предела лимита | закрыто | `f57ddc0`: лимит 256m → 512m (`CROWDSEC_MEM_LIMIT`), после пересоздания 52.09 МБ (до — 219 МБ, 85%); bouncer работает (`make obs-bans`) |
-| OOM-kill и перезапуски контейнеров не видны в мониторинге (нет метрик контейнеров) | открыто — ждёт решения пользователя | cAdvisor/метрик контейнеров нет, алерта на `OOMKilled`/рост `RestartCount` нет; проверка вручную: `docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' <контейнер>` |
+| OOM-kill и перезапуски контейнеров не видны в мониторинге (нет метрик контейнеров) | закрыто | `9eff1ab`: `HostOomKill` по `node_vmstat_oom_kill`; `b8228d0`: sidecar `docker-events` (GET `/events` через docker-socket-proxy, без новых прав) → Loki; `72b91dd`: Loki ruler `ContainerOomKilled`/`ContainerExit137`/`ContainerRestartLoop`. Стенд 2026-11-14: `oom-probe` (`-m 16m`) → в Loki `action=oom` и `die exit_code=137`, `node_vmstat_oom_kill` 0→1 (повтор → 2), `HostOomKill` и Loki-алерты firing в Alertmanager; 4× `docker restart` → `ContainerRestartLoop` firing; см. docs/ops/observability.md |
 | Redis `maxmemory` | закрыто | `c9aa1af`: `maxmemory 268435456`, `noeviction`. `df83c35`: при OOM Redis (`ResponseError`) и обрыве соединения запись heartbeat логируется warning `heartbeat_write_failed` и не роняет процесс; пропуск виден в `/health/ready` как `heartbeat:<component>` |
 | RabbitMQ watermark | закрыто | `c9aa1af`: `ops/rabbitmq/conf.d/20-memory.conf`; watermark 0.4194 gb |
 | PostgreSQL на настройках по умолчанию / выход за `mem_limit` | закрыто | `c9aa1af`, `3ab8b17`: `SHOW` → max_connections 50, work_mem 4MB, autovacuum_work_mem 64MB, shared_buffers 512MB; пулы приложения 5+5 на процесс. Тестовый стек — свой профиль 512m (`bfd462f`). Алерты на память и соединения PG не добавлены |
