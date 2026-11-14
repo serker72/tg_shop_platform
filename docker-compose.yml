@@ -66,17 +66,21 @@ services:
       - "-c"
       - "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}"
       - "-c"
-      - "work_mem=${PG_WORK_MEM:-8MB}"
+      - "work_mem=${PG_WORK_MEM:-4MB}"
       - "-c"
       - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}"
       - "-c"
-      - "max_connections=${PG_MAX_CONNECTIONS:-100}"
+      - "max_connections=${PG_MAX_CONNECTIONS:-50}"
       - "-c"
       - "wal_compression=${PG_WAL_COMPRESSION:-lz4}"
       - "-c"
       - "checkpoint_completion_target=${PG_CHECKPOINT_COMPLETION_TARGET:-0.9}"
       - "-c"
       - "max_wal_size=${PG_MAX_WAL_SIZE:-2GB}"
+      # Each autovacuum worker (autovacuum_max_workers=3) may use this much; the default -1 would
+      # take maintenance_work_mem. Memory budget formula: .env.example (PG_*).
+      - "-c"
+      - "autovacuum_work_mem=${PG_AUTOVACUUM_WORK_MEM:-64MB}"
     # Docker default /dev/shm is 64 MB: parallel workers allocate DSM there.
     shm_size: ${PG_SHM_SIZE:-256m}
     mem_limit: ${PG_MEM_LIMIT:-2g}

@@ -100,8 +100,8 @@ def test_defaults_without_env() -> None:
     assert settings.postgres.port == 5432
     assert settings.postgres.db == "tg_shop_platform"
     assert settings.sqlalchemy.echo is False
-    assert settings.sqlalchemy.pool_size == 10
-    assert settings.sqlalchemy.max_overflow == 20
+    assert settings.sqlalchemy.pool_size == 5
+    assert settings.sqlalchemy.max_overflow == 5
     assert settings.redis.db == 0
     assert settings.redis.host == "redis"
     assert settings.rabbitmq.vhost == "/"

@@ -111,8 +111,8 @@ class SQLAlchemySettings(BaseSettings):
     model_config = _base_config("SQLALCHEMY_")
 
     echo: bool = False
-    pool_size: int = 10
-    max_overflow: int = 20
+    pool_size: int = 5
+    max_overflow: int = 5
 
 
 class RedisSettings(BaseSettings):
