@@ -5,6 +5,8 @@
 - **VPS 2** — стек наблюдаемости (`docker-compose.obs.yml`): Loki, Prometheus,
   Alertmanager, Grafana, Tempo, urgentry, Caddy. Подробности — [observability.md](observability.md).
 
+Требования к ресурсам серверов — [requirements.md](requirements.md).
+
 Принцип: **наружу открыт только Caddy 80/443 на VPS 2** (и SSH), целиком за HTTP Basic Auth
 (`CADDY_MODE=ip` — `https://<VPS_IP>/` и `/grafana/`, самоподписанный сертификат, `curl -k -u`;
 `CADDY_MODE=domain` — домены с Let's Encrypt; см. [observability.md](observability.md)).
