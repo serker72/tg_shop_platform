@@ -145,6 +145,41 @@ dsn_project_id=1
     || { echo "ERROR: urgentry project id is $project_id, Caddy :8081 maps /api/1/ to default-project" >&2; exit 1; }
 echo "urgentry bootstrap OK: project=$org_slug/$project_slug project_id=$project_id public_key=${public_key:0:4}…"
 
+# Event retention (urgentry v0.2.11: projects.event_retention_days, default 90; the scheduler
+# deletes older errors/logs/traces/profiles/outcomes). Idempotent: PUT only when it differs.
+# busybox wget in the image has no PUT -> host python3 to the published urgentry port; the PAT
+# goes through the environment, not argv. telemetryPolicies are not sent: urgentry derives them
+# from eventRetentionDays (store.CanonicalTelemetryPolicies).
+retention_days=${URGENTRY_EVENT_RETENTION_DAYS:-$(get_env URGENTRY_EVENT_RETENTION_DAYS)}
+retention_days=${retention_days:-30}
+[[ $retention_days =~ ^[1-9][0-9]*$ ]] \
+    || { echo "ERROR: URGENTRY_EVENT_RETENTION_DAYS must be a positive integer" >&2; exit 1; }
+settings_path="/api/0/projects/$org_slug/$project_slug/settings/"
+settings=$(api "$settings_path") \
+    || { echo "ERROR: urgentry API settings/ of $org_slug/$project_slug failed" >&2; exit 1; }
+current_days=$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("eventRetentionDays", ""))' <<<"$settings") \
+    || { echo "ERROR: unexpected urgentry project settings answer" >&2; exit 1; }
+if [[ $current_days == "$retention_days" ]]; then
+    echo "urgentry eventRetentionDays=$retention_days is up to date"
+else
+    bind=$(get_env OBS_INGEST_BIND_ADDRESS); port=$(get_env URGENTRY_PORT_HOST)
+    api_url=${URGENTRY_API_URL:-http://${bind:-127.0.0.1}:${port:-8000}}
+    URGENTRY_PAT=$(get_env URGENTRY_BOOTSTRAP_PAT) SETTINGS="$settings" DAYS="$retention_days" \
+        URL="$api_url$settings_path" python3 -c '
+import json, os, sys, urllib.request
+cur = json.loads(os.environ["SETTINGS"])
+body = {k: cur[k] for k in ("name", "platform", "status", "attachmentRetentionDays",
+                            "debugFileRetentionDays", "replayPolicy") if k in cur}
+body["eventRetentionDays"] = int(os.environ["DAYS"])
+req = urllib.request.Request(os.environ["URL"], data=json.dumps(body).encode(), method="PUT",
+    headers={"Authorization": "Bearer " + os.environ["URGENTRY_PAT"], "Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=10) as resp:
+    got = json.load(resp).get("eventRetentionDays")
+sys.exit(0 if got == body["eventRetentionDays"] else 1)
+' || { echo "ERROR: urgentry PUT settings/ (eventRetentionDays=$retention_days) failed" >&2; exit 1; }
+    echo "urgentry eventRetentionDays: ${current_days:-?} -> $retention_days"
+fi
+
 if [[ $(get_env PROJECT_ENVIRONMENT) == test ]]; then
     echo "PROJECT_ENVIRONMENT=test: SENTRY_DSN is not written to $env_file"
     exit 0

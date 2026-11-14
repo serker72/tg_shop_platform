@@ -41,6 +41,9 @@ case "$last" in
     /api/0/projects/urgentry-org/default/keys/)
         dsn="http://{PUBLIC_KEY_HEX}@u:8080/$pid"
         printf '[{{"public":"{PUBLIC_KEY_HEX}","dsn":{{"public":"%s"}}}}]\\n' "$dsn";;
+    /api/0/projects/urgentry-org/default/settings/)
+        printf '{{"name":"Default","status":"active","eventRetentionDays":%s}}\\n' \
+            "${{FAKE_RETENTION_DAYS:-30}}";;
     *) echo "unexpected $last" >&2; exit 1;;
 esac
 """
@@ -61,6 +64,7 @@ def _run(
     fail: bool = False,
     prepare: bool = False,
     project_id: str = "default-project",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
@@ -87,6 +91,7 @@ def _run(
             "FAKE_DOCKER_ENV_OUT": str(env_out),
             "FAKE_DOCKER_FAIL": "1" if fail else "0",
             "FAKE_PROJECT_ID": project_id,
+            **(extra_env or {}),
         },
     )
     return result, env_file, env_out
