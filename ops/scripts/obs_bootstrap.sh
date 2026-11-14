@@ -19,6 +19,10 @@
 #    For PROJECT_ENVIRONMENT=test SENTRY_DSN is not written (test stack reports nothing).
 #    The host of URGENTRY_INTERNAL_URL must be internal (check_internal_url.sh), otherwise
 #    the script fails before bootstrap and SENTRY_DSN is not touched. Idempotent.
+# 3. Event retention (best effort, AFTER SENTRY_DSN): PUT eventRetentionDays =
+#    URGENTRY_EVENT_RETENTION_DAYS (default 30) to the project settings API. Any problem (invalid
+#    value, GET/PUT error, unexpected answer, unreachable port, non-internal URGENTRY_API_URL)
+#    prints `WARNING: urgentry event retention not applied: <reason>` and the script exits 0.
 # Secrets (password, PAT) are never printed.
 # Every value written by set_env is also exported to this process: make obs-bootstrap runs
 # after `set -a; source .env`, and the shell environment wins over `docker compose --env-file`,
@@ -145,52 +149,123 @@ dsn_project_id=1
     || { echo "ERROR: urgentry project id is $project_id, Caddy :8081 maps /api/1/ to default-project" >&2; exit 1; }
 echo "urgentry bootstrap OK: project=$org_slug/$project_slug project_id=$project_id public_key=${public_key:0:4}…"
 
-# Event retention (urgentry v0.2.11: projects.event_retention_days, default 90; the scheduler
-# deletes older errors/logs/traces/profiles/outcomes). Idempotent: PUT only when it differs.
-# busybox wget in the image has no PUT -> host python3 to the published urgentry port; the PAT
-# goes through the environment, not argv. telemetryPolicies are not sent: urgentry derives them
-# from eventRetentionDays (store.CanonicalTelemetryPolicies).
-retention_days=${URGENTRY_EVENT_RETENTION_DAYS:-$(get_env URGENTRY_EVENT_RETENTION_DAYS)}
-retention_days=${retention_days:-30}
-[[ $retention_days =~ ^[1-9][0-9]*$ ]] \
-    || { echo "ERROR: URGENTRY_EVENT_RETENTION_DAYS must be a positive integer" >&2; exit 1; }
-settings_path="/api/0/projects/$org_slug/$project_slug/settings/"
-settings=$(api "$settings_path") \
-    || { echo "ERROR: urgentry API settings/ of $org_slug/$project_slug failed" >&2; exit 1; }
-current_days=$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("eventRetentionDays", ""))' <<<"$settings") \
-    || { echo "ERROR: unexpected urgentry project settings answer" >&2; exit 1; }
-if [[ $current_days == "$retention_days" ]]; then
-    echo "urgentry eventRetentionDays=$retention_days is up to date"
-else
-    bind=$(get_env OBS_INGEST_BIND_ADDRESS); port=$(get_env URGENTRY_PORT_HOST)
-    api_url=${URGENTRY_API_URL:-http://${bind:-127.0.0.1}:${port:-8000}}
-    URGENTRY_PAT=$(get_env URGENTRY_BOOTSTRAP_PAT) SETTINGS="$settings" DAYS="$retention_days" \
-        URL="$api_url$settings_path" python3 -c '
-import json, os, sys, urllib.request
-cur = json.loads(os.environ["SETTINGS"])
-body = {k: cur[k] for k in ("name", "platform", "status", "attachmentRetentionDays",
-                            "debugFileRetentionDays", "replayPolicy") if k in cur}
-body["eventRetentionDays"] = int(os.environ["DAYS"])
-req = urllib.request.Request(os.environ["URL"], data=json.dumps(body).encode(), method="PUT",
-    headers={"Authorization": "Bearer " + os.environ["URGENTRY_PAT"], "Content-Type": "application/json"})
-with urllib.request.urlopen(req, timeout=10) as resp:
-    got = json.load(resp).get("eventRetentionDays")
-sys.exit(0 if got == body["eventRetentionDays"] else 1)
-' || { echo "ERROR: urgentry PUT settings/ (eventRetentionDays=$retention_days) failed" >&2; exit 1; }
-    echo "urgentry eventRetentionDays: ${current_days:-?} -> $retention_days"
-fi
-
+# SENTRY_DSN first: the event retention below is best effort and never blocks the DSN.
 if [[ $(get_env PROJECT_ENVIRONMENT) == test ]]; then
     echo "PROJECT_ENVIRONMENT=test: SENTRY_DSN is not written to $env_file"
-    exit 0
-fi
-internal_url=$(get_env URGENTRY_INTERNAL_URL)
-[[ $internal_url =~ ^(https?)://([^/]+)/?$ ]] \
-    || { echo "ERROR: URGENTRY_INTERNAL_URL must look like http://host:port" >&2; exit 1; }
-dsn="${BASH_REMATCH[1]}://${public_key}@${BASH_REMATCH[2]}/${dsn_project_id}"
-if [[ $(get_env SENTRY_DSN) == "$dsn" ]]; then
-    echo "SENTRY_DSN is up to date"
 else
-    set_env SENTRY_DSN "$dsn"
-    echo "Recreate master_bot/bot_worker to apply SENTRY_DSN (make agent-up)"
+    internal_url=$(get_env URGENTRY_INTERNAL_URL)
+    [[ $internal_url =~ ^(https?)://([^/]+)/?$ ]] \
+        || { echo "ERROR: URGENTRY_INTERNAL_URL must look like http://host:port" >&2; exit 1; }
+    dsn="${BASH_REMATCH[1]}://${public_key}@${BASH_REMATCH[2]}/${dsn_project_id}"
+    if [[ $(get_env SENTRY_DSN) == "$dsn" ]]; then
+        echo "SENTRY_DSN is up to date"
+    else
+        set_env SENTRY_DSN "$dsn"
+        echo "Recreate master_bot/bot_worker to apply SENTRY_DSN (make agent-up)"
+    fi
 fi
+
+# Event retention (urgentry v0.2.11: projects.event_retention_days, default 90; the scheduler
+# deletes older errors/logs/traces/profiles/outcomes). Idempotent: PUT only when it differs.
+# busybox wget in the image has no PUT -> host python3 to the published urgentry port
+# (URGENTRY_API_URL, must be internal: check_internal_url.sh); the PAT goes through the
+# environment, never argv, and is not sent at all to a non-internal host.
+# telemetryPolicies (internal/api/operations.go:79 -> store.CanonicalTelemetryPolicies): an
+# empty list is rebuilt from eventRetentionDays (errors/logs/traces/profiles/outcomes = event
+# days), a non-empty list WINS per surface over eventRetentionDays. So the current policies
+# from GET are sent back (manual overrides are kept), and only the event surfaces that still
+# follow the old eventRetentionDays get the new value; otherwise the change would be a no-op.
+retention_warn() { echo "WARNING: urgentry event retention not applied: $*" >&2; }
+apply_retention() {
+    local retention_days settings_path settings current_days bind port api_url reason
+    retention_days=${URGENTRY_EVENT_RETENTION_DAYS:-$(get_env URGENTRY_EVENT_RETENTION_DAYS)}
+    retention_days=${retention_days:-30}
+    if ! [[ $retention_days =~ ^[1-9][0-9]{0,4}$ ]]; then
+        retention_warn "URGENTRY_EVENT_RETENTION_DAYS must be a positive integer without leading zeros"
+        return 0
+    fi
+    settings_path="/api/0/projects/$org_slug/$project_slug/settings/"
+    if ! settings=$(api "$settings_path" 2>/dev/null); then
+        retention_warn "GET settings/ of $org_slug/$project_slug failed"
+        return 0
+    fi
+    if ! current_days=$(python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)["eventRetentionDays"]
+except Exception:
+    sys.exit(1)
+if type(value) is not int:
+    sys.exit(1)
+print(value)
+' <<<"$settings" 2>/dev/null); then
+        retention_warn "GET settings/ answer is not JSON with an integer eventRetentionDays"
+        return 0
+    fi
+    if [[ $current_days == "$retention_days" ]]; then
+        echo "urgentry eventRetentionDays=$retention_days is up to date"
+        return 0
+    fi
+    bind=$(get_env OBS_INGEST_BIND_ADDRESS); port=$(get_env URGENTRY_PORT_HOST)
+    api_url=${URGENTRY_API_URL:-http://${bind:-127.0.0.1}:${port:-8000}}
+    if ! bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$api_url"; then
+        retention_warn "URGENTRY_API_URL host is not internal; PUT skipped, the PAT is not sent"
+        return 0
+    fi
+    if ! reason=$(URGENTRY_PAT=$(get_env URGENTRY_BOOTSTRAP_PAT) SETTINGS="$settings" \
+        DAYS="$retention_days" URL="$api_url$settings_path" python3 -c '
+import json, os, sys, urllib.error, urllib.request
+
+EVENT_SURFACES = {"errors", "logs", "traces", "profiles", "outcomes"}
+
+
+def main():
+    cur = json.loads(os.environ["SETTINGS"])
+    days = int(os.environ["DAYS"])
+    old = cur.get("eventRetentionDays")
+    body = {k: cur[k] for k in ("name", "platform", "status", "attachmentRetentionDays",
+                                "debugFileRetentionDays", "replayPolicy") if k in cur}
+    body["eventRetentionDays"] = days
+    policies = cur.get("telemetryPolicies")
+    if isinstance(policies, list) and policies:
+        sent = []
+        for item in policies:
+            item = dict(item)
+            if item.get("surface") in EVENT_SURFACES and item.get("retentionDays") == old:
+                item["retentionDays"] = days
+            sent.append(item)
+        body["telemetryPolicies"] = sent
+    req = urllib.request.Request(os.environ["URL"], data=json.dumps(body).encode(), method="PUT",
+        headers={"Authorization": "Bearer " + os.environ["URGENTRY_PAT"],
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        return f"PUT settings/ answered HTTP {exc.code}"
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return f"PUT settings/ failed: {reason}"
+    try:
+        got = json.loads(raw).get("eventRetentionDays")
+    except (ValueError, AttributeError):
+        return "PUT settings/ answer is not JSON"
+    if got != days:
+        return f"PUT settings/ answer has eventRetentionDays={got!r}, expected {days}"
+    return None
+
+
+try:
+    error = main()
+except Exception as exc:  # one line, never a traceback
+    error = f"PUT settings/ failed: {type(exc).__name__}"
+if error:
+    print(error)
+    sys.exit(1)
+' 2>&1); then
+        retention_warn "${reason:-PUT settings/ failed}"
+        return 0
+    fi
+    echo "urgentry eventRetentionDays: $current_days -> $retention_days"
+}
+apply_retention
