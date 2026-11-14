@@ -14,6 +14,7 @@ import uuid
 from typing import Any, cast
 
 import structlog
+from opentelemetry import trace
 
 __all__ = [
     "bind_trace_id",
@@ -54,7 +55,16 @@ def _resolve_level(level: str | int) -> int:
 
 
 def _put_trace_id(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """structlog processor adding ``trace_id`` when it is bound to the context."""
+    """structlog processor adding ``trace_id`` (32 hex) / ``span_id`` (16 hex).
+
+    Taken from the active OTel span; without a valid span falls back to the ``trace_id``
+    bound via :func:`bind_trace_id` (no ``span_id`` then).
+    """
+    span_ctx = trace.get_current_span().get_span_context()
+    if span_ctx.is_valid:
+        event_dict["trace_id"] = format(span_ctx.trace_id, "032x")
+        event_dict["span_id"] = format(span_ctx.span_id, "016x")
+        return event_dict
     trace_id = _trace_id_var.get()
     if trace_id:
         event_dict["trace_id"] = trace_id

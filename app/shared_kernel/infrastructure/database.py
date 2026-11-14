@@ -68,7 +68,11 @@ def build_engine(settings: Settings, *, poolclass: type[Pool] | None = None) -> 
     if poolclass is None or issubclass(poolclass, QueuePool):
         kwargs["pool_size"] = settings.sqlalchemy.pool_size
         kwargs["max_overflow"] = settings.sqlalchemy.max_overflow
-    return create_async_engine(settings.database_url, **kwargs)
+    engine = create_async_engine(settings.database_url, **kwargs)
+    from app.core.telemetry import instrument_engine
+
+    instrument_engine(engine)  # no-op unless OTel tracing is enabled
+    return engine
 
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

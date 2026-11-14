@@ -12,6 +12,7 @@ import re
 from typing import Any, cast
 
 import sentry_sdk
+from opentelemetry import trace as otel_trace
 from sentry_sdk.integrations.logging import LoggingIntegration
 from sentry_sdk.types import Event, Hint
 
@@ -87,7 +88,19 @@ def scrub(value: Any) -> Any:
 
 
 def before_send(event: Event, hint: Hint) -> Event | None:
-    """``before_send`` hook: scrub the whole event payload."""
+    """``before_send`` hook: attach the OTel trace context, then scrub the payload.
+
+    ``contexts.trace.trace_id``/``span_id`` are taken from the active OTel span so the
+    urgentry event links to the Tempo trace and the Loki lines.
+    """
+    span_ctx = otel_trace.get_current_span().get_span_context()
+    if span_ctx.is_valid:
+        contexts = cast(dict[str, Any], event.setdefault("contexts", {}))
+        contexts["trace"] = {
+            **(contexts.get("trace") or {}),
+            "trace_id": format(span_ctx.trace_id, "032x"),
+            "span_id": format(span_ctx.span_id, "016x"),
+        }
     return cast(Event, scrub(event))
 
 
@@ -105,7 +118,9 @@ def init_sentry(settings: Settings, *, component: str) -> bool:
         dsn=obs.sentry_dsn.get_secret_value(),
         release=resolve_release(settings),
         environment=obs.sentry_environment or settings.project_environment,
-        traces_sample_rate=obs.sentry_traces_sample_rate,
+        # Tracing is OpenTelemetry's job (app.core.telemetry): Sentry creates no
+        # transactions; SENTRY_TRACES_SAMPLE_RATE is ignored.
+        traces_sample_rate=None,
         send_default_pii=False,
         before_send=before_send,
         # Transactions carry span descriptions / URLs (e.g. ``/bot<token>/getMe``).

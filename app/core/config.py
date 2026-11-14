@@ -418,6 +418,55 @@ class ObservabilitySettings(BaseSettings):
             raise ValueError(msg)
         return value
 
+    # OpenTelemetry tracing (app.core.telemetry). Empty endpoint or OTEL_SDK_DISABLED=true
+    # -> tracing off (NoOp), the app works without a collector.
+    otel_exporter_otlp_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OTEL_EXPORTER_OTLP_ENDPOINT", "otel_exporter_otlp_endpoint"),
+    )
+    otel_sdk_disabled: bool = Field(
+        default=False, validation_alias=AliasChoices("OTEL_SDK_DISABLED", "otel_sdk_disabled")
+    )
+    # Empty = process name (master_bot / bot_worker).
+    otel_service_name: str | None = Field(
+        default=None, validation_alias=AliasChoices("OTEL_SERVICE_NAME", "otel_service_name")
+    )
+    otel_traces_sampler_ratio: float = Field(
+        default=1.0,
+        ge=0,
+        le=1,
+        validation_alias=AliasChoices(
+            "OTEL_TRACES_SAMPLER_RATIO", "OTEL_SAMPLE_RATIO", "otel_traces_sampler_ratio"
+        ),
+    )
+
+    @field_validator("otel_exporter_otlp_endpoint", "otel_service_name", mode="before")
+    @classmethod
+    def _empty_otel_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("otel_exporter_otlp_endpoint", mode="after")
+    @classmethod
+    def _otlp_endpoint_internal_only(cls, value: str | None) -> str | None:
+        """Alloy OTLP is reachable only inside Docker/VPN, like the Sentry DSN."""
+        if value is None:
+            return None
+        parts = urlsplit(value.strip())
+        try:
+            host = parts.hostname or ""
+            _ = parts.port
+        except ValueError:
+            host = ""
+        if parts.scheme not in ("http", "https") or not is_internal_host(host):
+            msg = (
+                f"OTEL_EXPORTER_OTLP_ENDPOINT must be an internal http(s) URL, got host {host!r} "
+                "(e.g. http://alloy:4317)"
+            )
+            raise ValueError(msg)
+        return value.strip()
+
 
 # ``Settings`` field name -> nested section class.
 _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {

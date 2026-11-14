@@ -40,6 +40,7 @@ async def run_service(name: str) -> None:
     from app.core.observability.metrics import AppMetrics, set_build_info
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
+    from app.core.telemetry import init_telemetry, shutdown_telemetry
     from app.modules.logging.ioc import LoggingProvider
     from app.shared_kernel.infrastructure.providers import (
         DatabaseProvider,
@@ -50,6 +51,8 @@ async def run_service(name: str) -> None:
     # ``Settings`` has no log-level option yet: INFO (the ``configure_logging`` default).
     configure_logging()
     sentry_enabled = init_sentry(settings, component=name)
+    # Before the container: the engine/broker capture the tracer provider when built.
+    init_telemetry(settings, service_name=name)
     container = make_async_container(
         DatabaseProvider(),
         RedisProvider(),
@@ -76,6 +79,7 @@ async def run_service(name: str) -> None:
             await run_placeholder(name)
     finally:
         await container.close()
+        shutdown_telemetry()
         if sentry_enabled:
             sentry_sdk.flush(timeout=2)
 

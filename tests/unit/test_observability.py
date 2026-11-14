@@ -11,7 +11,6 @@ import pytest
 import sentry_sdk
 from aiogram.types import Update
 from aiohttp.test_utils import TestClient, TestServer
-from faststream.rabbit import TestRabbitBroker
 
 from app.core.config import Settings
 from app.core.logging import bind_trace_id, clear_trace_id, configure_logging, get_trace_id
@@ -35,7 +34,7 @@ from app.core.observability.sentry import (
     is_secret_key,
     scrub,
 )
-from app.core.observability.tracing import TRACE_ID_HEADER, AiogramTraceIdMiddleware
+from app.core.observability.tracing import AiogramTracingMiddleware
 from app.modules.logging.metrics import DROP_REASONS, LogsDroppedCounter
 
 pytestmark = pytest.mark.req("R8")
@@ -375,28 +374,6 @@ def _restore_faststream_logger() -> Any:
 
 
 @pytest.mark.usefixtures("_restore_faststream_logger")
-async def test_faststream_trace_id_roundtrip() -> None:
-    broker = build_rabbit_broker(Settings(_env_file=None))
-    seen: list[str | None] = []
-
-    @broker.subscriber("trace-q")
-    async def handler(msg: str) -> None:
-        seen.append(get_trace_id())
-
-    async with TestRabbitBroker(broker) as br:
-        await br.publish("m", queue="trace-q", headers={TRACE_ID_HEADER: "explicit"})
-        token = bind_trace_id("bound")
-        try:
-            await br.publish("m", queue="trace-q")
-        finally:
-            clear_trace_id(token)
-        await br.publish("m", queue="trace-q")
-    assert seen[:2] == ["explicit", "bound"]
-    assert seen[2] and len(seen[2]) == 32
-    assert get_trace_id() is None
-
-
-@pytest.mark.usefixtures("_restore_faststream_logger")
 async def test_broker_logs_go_to_json_pipeline(capsys: pytest.CaptureFixture[str]) -> None:
     configure_logging(json_logs=True)
     broker = build_rabbit_broker(Settings(_env_file=None))
@@ -426,7 +403,7 @@ async def test_aiogram_trace_middleware() -> None:
         assert data["trace_id"] == get_trace_id()
         return "done"
 
-    middleware = AiogramTraceIdMiddleware()
+    middleware = AiogramTracingMiddleware()
     update = Update(update_id=1)
     assert await middleware(handler, update, {}) == "done"
     await middleware(handler, update, {})

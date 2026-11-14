@@ -1,4 +1,9 @@
-"""``trace_id`` propagation: FastStream (RabbitMQ headers) and aiogram (one id per update)."""
+"""aiogram update tracing: one OTel root span per Telegram update.
+
+There is no official OpenTelemetry instrumentation for aiogram, hence this outer middleware.
+RabbitMQ propagation is W3C ``traceparent`` via FastStream's ``RabbitTelemetryMiddleware``
+(see :mod:`app.core.observability.broker`).
+"""
 
 from __future__ import annotations
 
@@ -7,54 +12,39 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware as AiogramBaseMiddleware
-from aiogram.types import TelegramObject
-from faststream import BaseMiddleware, PublishCommand
-from faststream.message import StreamMessage
+from aiogram.types import TelegramObject, Update
+from opentelemetry.trace import SpanKind
 
-from app.core.logging import bind_trace_id, clear_trace_id, get_trace_id
+from app.core.logging import bind_trace_id, clear_trace_id
+from app.core.telemetry import get_tracer
 
-__all__ = ["TRACE_ID_HEADER", "AiogramTraceIdMiddleware", "TraceIdMiddleware"]
+__all__ = ["UPDATE_SPAN_NAME", "AiogramTraceIdMiddleware", "AiogramTracingMiddleware"]
 
-TRACE_ID_HEADER = "trace_id"
-
-
-def _generate() -> str:
-    return uuid.uuid4().hex
+UPDATE_SPAN_NAME = "aiogram.update"
 
 
-class TraceIdMiddleware(BaseMiddleware[PublishCommand, Any]):
-    """Broker middleware, installed by ``app.core.observability.broker.build_rabbit_broker``.
-
-    Publish: puts the bound trace id (or a fresh one) into the ``trace_id`` header unless
-    the caller set it explicitly. Consume: binds the header value (or a fresh id) for the
-    handler and restores the previous context afterwards.
-    """
-
-    async def publish_scope(
-        self,
-        call_next: Callable[[PublishCommand], Awaitable[Any]],
-        cmd: PublishCommand,
-    ) -> Any:
-        if not cmd.headers.get(TRACE_ID_HEADER):
-            cmd.headers = {**cmd.headers, TRACE_ID_HEADER: get_trace_id() or _generate()}
-        return await call_next(cmd)
-
-    async def consume_scope(
-        self,
-        call_next: Callable[[Any], Awaitable[Any]],
-        msg: StreamMessage[Any],
-    ) -> Any:
-        raw = msg.headers.get(TRACE_ID_HEADER)
-        trace_id = raw if isinstance(raw, str) and raw else _generate()
-        token = bind_trace_id(trace_id)
+def _update_attributes(event: TelegramObject, data: dict[str, Any]) -> dict[str, Any]:
+    """Update type/id and bot id only: no user ids, texts or other PII."""
+    attributes: dict[str, Any] = {"messaging.system": "telegram"}
+    if isinstance(event, Update):
+        attributes["telegram.update_id"] = event.update_id
         try:
-            return await call_next(msg)
-        finally:
-            clear_trace_id(token)
+            attributes["telegram.update_type"] = event.event_type
+        except Exception:  # noqa: BLE001, S110 - unknown update type
+            pass
+    bot = data.get("bot")
+    bot_id = getattr(bot, "id", None)
+    if isinstance(bot_id, int):
+        attributes["telegram.bot_id"] = bot_id
+    return attributes
 
 
-class AiogramTraceIdMiddleware(AiogramBaseMiddleware):
-    """Outer update middleware: a new ``trace_id`` per Telegram update (``data["trace_id"]``)."""
+class AiogramTracingMiddleware(AiogramBaseMiddleware):
+    """Outer update middleware: root span ``aiogram.update``; ``data["trace_id"]`` (32 hex).
+
+    Exceptions are recorded on the span (status ERROR) and re-raised. Without tracing
+    (NoOp provider) a random 32-hex id is bound for the logs instead.
+    """
 
     async def __call__(
         self,
@@ -62,10 +52,19 @@ class AiogramTraceIdMiddleware(AiogramBaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        trace_id = _generate()
-        data["trace_id"] = trace_id
-        token = bind_trace_id(trace_id)
-        try:
-            return await handler(event, data)
-        finally:
-            clear_trace_id(token)
+        tracer = get_tracer(__name__)
+        with tracer.start_as_current_span(
+            UPDATE_SPAN_NAME, kind=SpanKind.CONSUMER, attributes=_update_attributes(event, data)
+        ) as span:
+            ctx = span.get_span_context()
+            trace_id = format(ctx.trace_id, "032x") if ctx.is_valid else uuid.uuid4().hex
+            data["trace_id"] = trace_id
+            token = bind_trace_id(trace_id)
+            try:
+                return await handler(event, data)
+            finally:
+                clear_trace_id(token)
+
+
+# Backwards-compatible name.
+AiogramTraceIdMiddleware = AiogramTracingMiddleware
