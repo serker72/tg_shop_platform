@@ -22,8 +22,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import aio_pika
+import structlog
 from opentelemetry.instrumentation.utils import suppress_instrumentation
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -225,6 +227,9 @@ def rabbitmq_probe(url: str, *, timeout: float) -> Probe:
     return probe
 
 
+_heartbeat_log = structlog.get_logger(__name__)
+
+
 def heartbeat_key(component: str) -> str:
     """Redis ZSET key holding the heartbeats of every instance of ``component``."""
     return f"{HEARTBEAT_KEY_PREFIX}:{component}"
@@ -237,15 +242,32 @@ async def publish_heartbeat(
     *,
     ttl: int,
     now: float | None = None,
-) -> None:
-    """Record a beat of ``instance`` and drop instances silent for longer than ``ttl``."""
+) -> bool:
+    """Record a beat of ``instance`` and drop instances silent for longer than ``ttl``.
+
+    Returns ``False`` (warning logged) if Redis rejects the write: with ``maxmemory`` +
+    ``noeviction`` a full Redis answers ``ResponseError: OOM command not allowed``, and the
+    connection may be lost. The heartbeat writer must keep running; the missing beat shows up
+    as ``heartbeat:<component>`` in readiness.
+    """
     ts = time.time() if now is None else now
     key = heartbeat_key(component)
-    async with redis.pipeline(transaction=True) as pipe:
-        pipe.zadd(key, {instance: ts})
-        pipe.zremrangebyscore(key, "-inf", ts - ttl)
-        pipe.expire(key, ttl)
-        await pipe.execute()
+    try:
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.zadd(key, {instance: ts})
+            pipe.zremrangebyscore(key, "-inf", ts - ttl)
+            pipe.expire(key, ttl)
+            await pipe.execute()
+    except RedisError as exc:
+        _heartbeat_log.warning(
+            "heartbeat_write_failed",
+            component=component,
+            instance=instance,
+            error=type(exc).__name__,
+            detail=str(exc),
+        )
+        return False
+    return True
 
 
 async def has_live_heartbeat(
