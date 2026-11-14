@@ -22,7 +22,9 @@
 
 - Linux-сервер, Docker Engine и плагин Docker Compose v2 (`docker compose`).
 - GNU make, bash, coreutils (`realpath`, `mktemp`, `stat`, `install`).
-- `openssl` (пароли и `ENCRYPTION_KEY` в `make env`), `python3` (UUID в `make obs-up`), git.
+- `openssl` (пароли и `ENCRYPTION_KEY` в `make env`), git.
+- `python3` на хосте: UUID в `make obs-up` и настройка срока хранения urgentry в
+  `make obs-bootstrap` (PUT в API urgentry; в образе нет клиента с PUT).
 - Только для разработки: [uv](https://docs.astral.sh/uv/) — `make install`, `make check`,
   `make env-test`, `make test-integration`. Для развёртывания uv не нужен.
 
@@ -35,6 +37,8 @@
 | Production VPS 2 (наблюдаемость) | 2 / 4 | 2 ГБ + swap 2 ГБ / 4 ГБ | 30 / 80+ ГБ SSD |
 
 Значения — старт / рекомендуемо; это оценка по замеру в простое, без нагрузочного теста.
+Сумма `mem_limit` (VPS 1 ≈ 5.1–5.6 ГБ, VPS 2 ≈ 3.1 ГБ, Staging ≈ 8.2 ГБ) — потолки с overcommit:
+она может превышать RAM, запас дают swap и неодновременные пики.
 Подробнее — [docs/ops/requirements.md](docs/ops/requirements.md).
 
 ## Развёртывание

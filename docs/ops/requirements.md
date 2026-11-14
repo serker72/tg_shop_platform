@@ -105,48 +105,72 @@ urgentry, Tempo, Loki, Prometheus, Alertmanager, Grafana, Caddy, CrowdSec.
 
 ## Лимиты памяти (уточнено после задач 2026-11-14)
 
-Лимиты задаются `mem_limit` через переменные `*_MEM_LIMIT` (`.env.example`). Замер — после
-пересоздания, в простое (`docker stats --no-stream`, dev-хост).
+Лимиты задаются `mem_limit` через переменные `*_MEM_LIMIT` (`.env.example`). Факт — после
+пересоздания, в простое (`docker stats --no-stream`, dev-хост, после правок ревью).
 
 | Сервис | Лимит | Факт в простое |
 |---|---|---|
-| postgres | 2g (`PG_MEM_LIMIT`), `shm_size` 256m | 49 МБ |
+| postgres | 2g (`PG_MEM_LIMIT`), `shm_size` 256m | 45 МБ |
 | redis | 512m, `maxmemory` 256mb, `noeviction` | 6 МБ |
-| rabbitmq | 768m, watermark 400 MiB absolute | 133 МБ |
-| minio | 512m | 80 МБ |
-| db_update / master_bot / bot_worker | 384m | 119 МБ |
-| alloy | 512m (`memory_limiter` 200 MiB) | 150 МБ |
-| docker-socket-proxy | 64m | 16 МБ |
-| loki / prometheus | 512m / 512m | 78 / 85 МБ |
-| grafana | 640m | 101 МБ |
-| alertmanager / caddy | 128m / 128m | 23 / 19 МБ |
-| urgentry / tempo / crowdsec | 256m / 512m / 256m (без изменений) | 29 / 54 / 219 МБ |
+| rabbitmq | 768m, watermark 400 MiB absolute | 139 МБ |
+| minio / minio_init (разовый) | 512m / 128m (`MINIO_INIT_MEM_LIMIT`) | 89 МБ / — |
+| db_update (разовый) / master_bot / bot_worker | 384m (`APP_MEM_LIMIT`) | — / 118 / 118 МБ |
+| alloy | 512m (`memory_limiter` 200 MiB) | 144 МБ |
+| docker-socket-proxy | 64m (`DOCKER_SOCKET_PROXY_MEM_LIMIT`) | 17 МБ |
+| loki / prometheus | 512m / 512m | 84 / 73 МБ |
+| grafana | 640m | 99 МБ |
+| alertmanager / caddy | 128m / 128m | 24 / 15 МБ |
+| urgentry / tempo | 256m / 512m (`URGENTRY_MEM_LIMIT` / `TEMPO_MEM_LIMIT`) | 29 / 58 МБ |
+| crowdsec | 512m (`CROWDSEC_MEM_LIMIT`; было 256m, 219 МБ = 85%) | 52.09 МБ |
 
-Сумма лимитов VPS 1 ≈ 5.0 ГБ (из 8 ГБ: остаток — page cache для PostgreSQL и ОС).
+PostgreSQL укладывается в `PG_MEM_LIMIT` и в худшем случае: `max_connections` 50, `work_mem` 4MB,
+`autovacuum_work_mem` 64MB — по формуле из `.env.example` ≈ 1.5 ГБ из 2 ГБ.
+
+### Суммы лимитов
+
+| Хост | Сумма `mem_limit` | RAM (старт / рекомендуемо) |
+|---|---|---|
+| VPS 1, постоянные сервисы | 5184 MiB ≈ 5.1 ГБ | 8 / 16 ГБ |
+| VPS 1 во время `db_update` (+384m) и `minio_init` (+128m) | 5696 MiB ≈ 5.6 ГБ | 8 / 16 ГБ |
+| VPS 2 | 3200 MiB ≈ 3.1 ГБ | 2 ГБ + swap 2 ГБ / 4 ГБ |
+| Staging (VPS 1 + VPS 2 на одном хосте) | 8384 MiB ≈ 8.2 ГБ (с разовыми — 8.7 ГБ) | 4 ГБ + swap 2 ГБ / 8 ГБ |
+
+**Лимиты — это потолки с overcommit, а не резерв.** Сумма может превышать RAM (VPS 2 и Staging
+на старте): запас дают swap и то, что сервисы не достигают пика одновременно (в простое VPS 2 ≈
+0.5 ГБ, Staging ≈ 1.3 ГБ). Лимит защищает хост от одного «убежавшего» контейнера: OOM Killer
+срабатывает внутри его cgroup. Без `memswap_limit` Docker ставит `MemorySwap = 2 × mem_limit`,
+то есть контейнер может дополнительно уйти в swap на размер своего `mem_limit`.
 
 ## Swap
 
-Swap — страховка от OOM Killer при кратком пике, **не замена RAM**. На обоих серверах:
+Swap — страховка от OOM Killer при кратком пике, **не замена RAM**. На обоих серверах
+(повторный запуск безопасен: строка в `/etc/fstab` добавляется один раз):
 
 ```bash
-sudo fallocate -l 2G /swapfile
+sudo fallocate -l 2G /swapfile   # XFS/btrfs: sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf && sudo sysctl --system
 ```
 
-## Риски
+На XFS и btrfs файл от `fallocate` может не подойти для swap (`swapon: invalid argument`/«has
+holes») — используйте `dd`. На btrfs файл должен быть ещё и без CoW (`chattr +C` до записи).
+Контейнер без `memswap_limit` может использовать swap до размера своего `mem_limit` (см. выше).
+
+## Риски (открытые задачи)
 
 | Риск | Статус | Факт |
 |---|---|---|
-| OOM без лимитов памяти | закрыто | `c9aa1af`, `dd048ae`: `mem_limit` у всех сервисов VPS 1 и VPS 2; после пересоздания все healthy, `make ready` 200, `make test-integration` 159 passed; максимум — crowdsec 85% лимита (лимит не менялся) |
-| Redis `maxmemory` | закрыто | `c9aa1af`: `CONFIG GET` → `maxmemory 268435456`, `noeviction`. При заполнении запись отклоняется с OOM; переход на `volatile-lru` — отдельное решение |
-| RabbitMQ watermark | закрыто | `c9aa1af`: `ops/rabbitmq/conf.d/20-memory.conf`; `rabbitmq-diagnostics status` → watermark 0.4194 gb |
-| PostgreSQL на настройках по умолчанию | закрыто | `c9aa1af`: `SHOW` → shared_buffers 512MB, effective_cache_size 1536MB, work_mem 8MB, maintenance_work_mem 128MB, max_connections 100, wal_compression lz4, max_wal_size 2GB. Алерты на память и соединения PG не добавлены |
-| Срок хранения urgentry | частично | `7ddd818`: GET settings → `eventRetentionDays` 30 (errors/logs/traces/profiles/outcomes 30). Нет алерта на размер `OBS_URGENTRY_DATA_DIR` (нет метрики размера каталога); SQLite не сжимается без VACUUM |
-| Остатки GlitchTip (`obs/db`, `obs/redis`) | закрыто | `b136812`: каталоги удалены на dev-хосте; на других стендах — шаг в `docs/ops/observability.md` |
+| OOM без лимитов памяти | закрыто | `c9aa1af`, `dd048ae`, `f57ddc0`: `mem_limit` у всех сервисов VPS 1 и VPS 2 (включая docker-socket-proxy, minio_init, urgentry, tempo, crowdsec через `*_MEM_LIMIT`); `make ready` 200 |
+| CrowdSec у предела лимита | закрыто | `f57ddc0`: лимит 256m → 512m (`CROWDSEC_MEM_LIMIT`), после пересоздания 52.09 МБ (до — 219 МБ, 85%); bouncer работает (`make obs-bans`) |
+| OOM-kill и перезапуски контейнеров не видны в мониторинге (нет метрик контейнеров) | открыто — ждёт решения пользователя | cAdvisor/метрик контейнеров нет, алерта на `OOMKilled`/рост `RestartCount` нет; проверка вручную: `docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}}' <контейнер>` |
+| Redis `maxmemory` | закрыто | `c9aa1af`: `maxmemory 268435456`, `noeviction`. `df83c35`: при OOM Redis (`ResponseError`) и обрыве соединения запись heartbeat логируется warning `heartbeat_write_failed` и не роняет процесс; пропуск виден в `/health/ready` как `heartbeat:<component>` |
+| RabbitMQ watermark | закрыто | `c9aa1af`: `ops/rabbitmq/conf.d/20-memory.conf`; watermark 0.4194 gb |
+| PostgreSQL на настройках по умолчанию / выход за `mem_limit` | закрыто | `c9aa1af`, `3ab8b17`: `SHOW` → max_connections 50, work_mem 4MB, autovacuum_work_mem 64MB, shared_buffers 512MB; пулы приложения 5+5 на процесс. Тестовый стек — свой профиль 512m (`bfd462f`). Алерты на память и соединения PG не добавлены |
+| Срок хранения urgentry | частично | `7ddd818`, `e89c8a4`: `eventRetentionDays` 30; настройка после записи `SENTRY_DSN`, ошибки — WARNING без остановки; `telemetryPolicies` сохраняются. Нет алерта на размер `OBS_URGENTRY_DATA_DIR`; SQLite не сжимается без VACUUM |
+| Остатки GlitchTip (`obs/db`, `obs/redis`) | закрыто | `b136812`: удалены на dev-хосте; шаг в `docs/ops/observability.md` |
 | Swap | частично | инструкция выше; на хостах не создан (нужен sudo на целевых VPS) |
 
 ## Как переизмерить
