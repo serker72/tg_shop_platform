@@ -263,3 +263,28 @@ def test_init_real_env_example(tmp_path: Path) -> None:
     Fernet(values["ENCRYPTION_KEY"].encode())
     assert HEX48.match(values["POSTGRES_MONITORING_PASSWORD"])
     assert text.count("\n") == (ROOT / ".env.example").read_text(encoding="utf-8").count("\n")
+
+
+_TEST_PG_PROFILE = {
+    "PG_MEM_LIMIT": "512m",
+    "PG_SHARED_BUFFERS": "128MB",
+    "PG_EFFECTIVE_CACHE_SIZE": "384MB",
+    "PG_MAINTENANCE_WORK_MEM": "64MB",
+    "PG_MAX_CONNECTIONS": "50",
+    "PG_WORK_MEM": "2MB",
+    "PG_AUTOVACUUM_WORK_MEM": "32MB",
+}
+
+
+def test_test_stack_gets_small_postgres_profile(tmp_path: Path) -> None:
+    # prod values in the source are overridden, missing ones are added
+    source = _write_source(tmp_path, postgres_db="shop")
+    with source.open("a", encoding="utf-8") as fh:
+        fh.write("PG_MEM_LIMIT=4g\nPG_SHARED_BUFFERS=1GB\nPG_MAX_CONNECTIONS=200\n")
+    target = tmp_path / "dst.env"
+
+    result = _run(source, target)
+
+    assert result.returncode == 0, result.stderr
+    values = _values(target)
+    assert {k: values[k] for k in _TEST_PG_PROFILE} == _TEST_PG_PROFILE

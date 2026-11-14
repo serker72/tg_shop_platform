@@ -28,7 +28,10 @@
 #   MASTER_BOT_TOKEN -> mock; ENCRYPTION_KEYS_OLD -> empty;
 #   ENCRYPTION_KEY is kept from an existing target file if valid, otherwise a new one is generated;
 #   URGENTRY_BOOTSTRAP_PASSWORD / URGENTRY_BOOTSTRAP_PAT of the test obs stack are own values
-#   (kept from an existing target file, otherwise generated); SENTRY_DSN, SENTRY_RELEASE -> empty.
+#   (kept from an existing target file, otherwise generated); SENTRY_DSN, SENTRY_RELEASE -> empty;
+#   PostgreSQL gets a small test profile regardless of the source (never the prod one):
+#   PG_MEM_LIMIT=512m, PG_SHARED_BUFFERS=128MB, PG_EFFECTIVE_CACHE_SIZE=384MB,
+#   PG_MAINTENANCE_WORK_MEM=64MB, PG_MAX_CONNECTIONS=50, PG_WORK_MEM=2MB, PG_AUTOVACUUM_WORK_MEM=32MB.
 # Lines are normalized: CR, leading whitespace and "export " are stripped.
 set -euo pipefail
 
@@ -190,6 +193,10 @@ BEGIN {
     pd["TEMPO_OTLP_GRPC_PORT_HOST"] = 4317; pd["TEMPO_OTLP_HTTP_PORT_HOST"] = 4318; pd["TEMPO_PORT_HOST"] = 3200
     pd["CADDY_HTTP_PORT_HOST"] = 80; pd["CADDY_HTTPS_PORT_HOST"] = 443
     pd["ALLOY_PORT_HOST"] = 12345
+    # small PostgreSQL profile of the test stack (overrides the prod values of the source)
+    tv["PG_MEM_LIMIT"] = "512m"; tv["PG_SHARED_BUFFERS"] = "128MB"; tv["PG_EFFECTIVE_CACHE_SIZE"] = "384MB"
+    tv["PG_MAINTENANCE_WORK_MEM"] = "64MB"; tv["PG_MAX_CONNECTIONS"] = "50"
+    tv["PG_WORK_MEM"] = "2MB"; tv["PG_AUTOVACUUM_WORK_MEM"] = "32MB"
 }
 # Pass 1: collect and validate PROJECT_DATA_DIR / PROJECT_NAME.
 FNR == NR {
@@ -223,6 +230,7 @@ k == "POSTGRES_DB"          { print k "=\"" pgdb "_test\""; next }
 k == "REDIS_DB"             { print k "=15"; next }  # isolated test cache, never the dev one
 k in dd                     { print k "=\"" tdir "/" dd[k] "\""; next }
 k in pd                     { print k "=" port(k, v); next }
+k in tv                     { print k "=" tv[k]; next }
 k == "MASTER_BOT_TOKEN"     { print k "=123456789:TEST-mock-master-bot-token"; next }
 k == "ENCRYPTION_KEY"       { print k "=" key; next }
 k == "ENCRYPTION_KEYS_OLD"  { print k "="; next }
@@ -238,6 +246,7 @@ END {
     print ""; print "# --- added by ops/scripts/env_test.sh ---"
     for (k in dd) if (!(k in seen)) print k "=\"" tdir "/" dd[k] "\""
     for (k in pd) if (!(k in seen)) print k "=" port(k, "")
+    for (k in tv) if (!(k in seen)) print k "=" tv[k]
     if (err) exit 2
     if (!("ENCRYPTION_KEY" in seen)) print "ENCRYPTION_KEY=" key
     if (!("URGENTRY_BOOTSTRAP_PASSWORD" in seen)) print "URGENTRY_BOOTSTRAP_PASSWORD=" gtpw
