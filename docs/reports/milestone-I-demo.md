@@ -80,7 +80,7 @@
 - Показать правило `PgPartmanBgwDown` в `ops/observability/prometheus/rules/platform.yml`.
 - Живые правила — в Grafana (Prometheus и Alertmanager наружу не опубликованы, только через
   Caddy → Grafana): **Alerting → Alert rules** → раздел правил источника данных *Prometheus*
-  (data source-managed, 13 правил; раздел Grafana-managed пуст — это нормально).
+  (data source-managed, 16 правил; раздел Grafana-managed пуст — это нормально).
   **Explore** → источник *Prometheus* → запрос `ALERTS` (активные/ожидающие алерты) или
   `pg_partman_bgw_up` / `up`. Резервный вариант для инженера:
   `ssh -L 9090:127.0.0.1:9090 <хост>` и `http://127.0.0.1:9090/alerts`.
