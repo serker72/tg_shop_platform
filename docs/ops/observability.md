@@ -355,6 +355,23 @@ make agent-up        # основной стек + alloy, --wait (боты healt
 make agent-logs / agent-down   # agent-down останавливает только alloy
 ```
 
+**Порядок остановки** (только single-host):
+
+```bash
+make agent-down   # alloy + docker-socket-proxy (профиль observability)
+make down         # основной стек (боты, postgres, redis, ...)
+make obs-down     # стек наблюдаемости
+```
+
+Порядок важен: боты и alloy подключены к сети obs-проекта `${PROJECT_NAME}_obs_default`
+как к внешней (`external: true`). Владелец сети — obs-проект, но `obs-down` не может удалить
+сеть, пока к ней подключены чужие контейнеры. Если выполнить `obs-down` первым, сеть
+останется; после `make down` она будет пустой и без владельца (ни один compose-проект её
+не удалит). Удалить вручную: `docker network rm ${PROJECT_NAME}_obs_default`.
+`make down` не останавливает alloy и docker-socket-proxy (профиль `observability`) — для
+этого `make agent-down`. В схеме с двумя хостами (`ALLOY_SINGLE_HOST=0`) внешней сети
+obs-проекта на VPS 1 нет, проблема не возникает.
+
 ### Перенос на реальные VPS 1 / VPS 2
 
 - VPS 2 (`.env`): `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>` — Loki/Prometheus слушают

@@ -121,6 +121,7 @@
    `caddy:8081` (внутренний ingest → urgentry), трейсы — на `alloy:4317` → `tempo:4317`
    (`OBS_TEMPO_OTLP_ENDPOINT=tempo:4317`). Отключить трейсинг: `OTEL_SDK_DISABLED=true`.
    Проверка цепочки: `make otel-smoke`.
+   Остановка — строго `make agent-down` → `make down` → `make obs-down`, см. [порядок остановки](docs/ops/observability.md#запуск-на-одном-хосте-devtest).
 
 6. **Локальная разработка**: в `.env` поставьте `PROJECT_ENVIRONMENT=loc` и
    `PROJECT_DATA_DIR` в домашнем каталоге (например `/home/<user>/tg_shop_platform_data`;
