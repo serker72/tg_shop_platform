@@ -357,7 +357,8 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
   `/etc/loki/rules/fake`, tenant `fake` при `auth_enabled: false`, доставка
   `ruler.alertmanager_url`): `ContainerOomKilled` (critical, `action="oom"` за 5 мин),
   `ContainerExit137` (warning, `die` с `exit_code=137` и `cause!="docker_kill"` за 5 мин),
-  `ContainerRestartLoop` (warning, > 3 `restart` за 15 мин). Группировка
+  `ContainerRestartLoop` (warning, > 3 `die` с `cause!="docker_kill"` за 15 мин: перезапуск по
+  политике `restart:` даёт `die` → `start`, событие `restart` Docker пишет только на `docker restart`). Группировка
   `compose_service, container_name`: у контейнеров вне compose `compose_service` пуст, имя
   различает их.
 
@@ -397,12 +398,14 @@ Loki `{service="docker-events"}` (или
 docker run --rm --name oom-probe -m 16m --memory-swap 16m alpine:3.20 sh -c 'tail /dev/zero'  # rc 137
 docker run -d --name restart-probe alpine:3.20 sleep 600
 for i in 1 2 3 4; do docker restart -t 1 restart-probe; done; docker rm -f restart-probe
+docker run -d --name rp-demo --restart=always alpine:3.20 sh -c 'sleep 2; exit 1'; sleep 90; docker rm -f rp-demo
 ```
 
 Ожидается: в Loki `action=oom` и `action=die` с `exit_code: 137`, `cause: oom` для `oom-probe`;
 четыре `restart` и `die` 137 с `cause: docker_kill`, `signal: 9` для `restart-probe`;
 `node_vmstat_oom_kill` +1; `HostOomKill`, `ContainerOomKilled`, `ContainerExit137` (только для
-`oom-probe`), `ContainerRestartLoop` — firing и видны в Alertmanager (`/api/v2/alerts`).
+`oom-probe`), `ContainerRestartLoop` (для `rp-demo`: `die exit_code=1` по политике `--restart=always`;
+`restart-probe` его не вызывает — `die` 137 с `cause: docker_kill`) — firing и видны в Alertmanager (`/api/v2/alerts`).
 
 ### Переменные
 

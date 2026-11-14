@@ -21,7 +21,8 @@
    - **заменить значения** существующих строк (не добавлять вторые — при дублях действует
      последняя): `OBS_LOKI_PUSH_URL=http://loki:3100/loki/api/v1/push`,
      `OBS_PROMETHEUS_REMOTE_WRITE_URL=http://prometheus:9090/api/v1/write`.
-5. Строго в этом порядке:
+5. Строго в этом порядке (полный вид: `make init-dirs` → `make obs-up` → `make up` → `make agent-up` → `make ready`; `init-dirs` и `ready` уже входят в
+   `obs-up`/`agent-up`, `make up` не обязателен; без obs-стека `make up` поднимет ботов без obs-сети с WARN):
    - `make obs-up` — стек мониторинга (Grafana, Loki, Prometheus, Alertmanager, Tempo, urgentry,
      Caddy); в конце bootstrap urgentry **записывает `SENTRY_DSN` в `.env`**;
    - `make agent-up` — основной стек + агент Alloy (уже с новым `SENTRY_DSN`), в конце
@@ -82,7 +83,8 @@
 - Показать правило `PgPartmanBgwDown` в `ops/observability/prometheus/rules/platform.yml`.
 - Живые правила — в Grafana (Prometheus и Alertmanager наружу не опубликованы, только через
   Caddy → Grafana): **Alerting → Alert rules** → раздел правил источника данных *Prometheus*
-  (data source-managed, 16 правил; раздел Grafana-managed пуст — это нормально).
+  (data source-managed: Prometheus — 17 правил (`platform.yml` 14 + `observability.yml` 3),
+  Loki — 3 правила (группа `docker-events`); раздел Grafana-managed пуст — это нормально).
   **Explore** → источник *Prometheus* → запрос `ALERTS` (активные/ожидающие алерты) или
   `pg_partman_bgw_up` / `up`. Резервный вариант для инженера:
   `ssh -L 9090:127.0.0.1:9090 <хост>` и `http://127.0.0.1:9090/alerts`.
@@ -96,6 +98,9 @@
   Ожидать: для `oom-demo` в Loki `die` с `exit_code: 137`, `cause: oom`; через 1–2 мин firing
   `ContainerOomKilled`, `ContainerExit137` (Loki) и `HostOomKill` (Prometheus). Для `stop-demo` —
   `die` 137 с `cause: docker_kill` (штатный `docker restart` добил SIGKILL) и **без** алерта.
+- `ContainerRestartLoop` (> 3 `die` не от `docker stop`/`kill` за 15 мин; перезапуск по политике
+  даёт `die` → `start`, а не `restart`): `docker run -d --name rp-demo --restart=always alpine sh -c 'sleep 2; exit 1'`,
+  через 2–3 мин алерт в Alertmanager, затем `docker rm -f rp-demo`.
   Где смотреть в Grafana: дашборд **Platform overview** → строка «OOM и перезапуски контейнеров»;
   **Alerting → Alert rules** → Data source-managed (Loki, группа `docker-events`; Prometheus,
   группа `node`); **Alerting → Alert groups** с выбранным Alertmanager; **Explore** → Loki

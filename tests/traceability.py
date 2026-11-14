@@ -86,7 +86,11 @@ _ITEMS: tuple[Requirement, ...] = (
         "Проверено на одном хосте; алерт PgPartmanBgwDown — тест promtool. Контракт heartbeat "
         "воркеров готов и проверен; публикация heartbeat воркерами и алерт "
         "WorkerHeartbeatMissing — веха II; backup по расписанию — Этап IV; VPS 2 и "
-        "Telegram-алерты — DEF-VPS2.",
+        "Telegram-алерты — DEF-VPS2. OOM-мониторинг: HostOomKill — тест promtool, sidecar "
+        "docker-events — unit-тесты; Loki-правила ContainerOomKilled/ContainerExit137/"
+        "ContainerRestartLoop — ручная проверка на демо (CLI проверки правил в образе Loki нет). "
+        "Ресурсы хоста (лимиты памяти, профиль PostgreSQL, срок хранения urgentry) — конфигурация, "
+        "проверяется вручную по docs/ops/requirements.md.",
     ),
     Requirement(
         "S1",

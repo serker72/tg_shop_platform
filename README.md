@@ -136,6 +136,9 @@
    `caddy:8081` (внутренний ingest → urgentry), трейсы — на `alloy:4317` → `tempo:4317`
    (`OBS_TEMPO_OTLP_ENDPOINT=tempo:4317`). Отключить трейсинг: `OTEL_SDK_DISABLED=true`.
    Проверка цепочки: `make otel-smoke`.
+   Порядок при `ALLOY_SINGLE_HOST=1`: `make init-dirs` → `make obs-up` → `make up` → `make agent-up` → `make ready` (`init-dirs` и `ready` уже входят в
+   `obs-up`/`agent-up`, `make up` не обязателен): `obs-up` создаёт сеть `<PROJECT_NAME>_obs_default`
+   и пишет `SENTRY_DSN`; `make up` без obs-стека поднимает ботов без obs-сети (WARN), подключает их `make agent-up`.
    Остановка — строго `make agent-down` → `make down` → `make obs-down`, см. [порядок остановки](docs/ops/observability.md#запуск-на-одном-хосте-devtest).
 
 6. **Локальная разработка**: в `.env` поставьте `PROJECT_ENVIRONMENT=loc` и
