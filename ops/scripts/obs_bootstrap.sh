@@ -11,7 +11,11 @@
 # 2. Waits for /healthz of the running urgentry, reads the default project and its key via the
 #    API (GET /api/0/projects/, /api/0/projects/<org>/<project>/keys/, Bearer PAT; requests run
 #    inside the container, the PAT never appears in host argv) and writes
-#    SENTRY_DSN=<scheme>://<public_key>@<host of URGENTRY_INTERNAL_URL>/<project_id>.
+#    SENTRY_DSN=<scheme>://<public_key>@<host of URGENTRY_INTERNAL_URL>/1.
+#    sentry_sdk accepts only a numeric project id, urgentry uses the string id `default-project`:
+#    URGENTRY_INTERNAL_URL is the internal ingest listener of Caddy (http://caddy:8081), which
+#    rewrites /api/1/... to /api/default-project/... (Caddyfile.*). An old value
+#    http://urgentry:8080 (first T1 version) is migrated to it; an old DSN is rewritten.
 #    For PROJECT_ENVIRONMENT=test SENTRY_DSN is not written (test stack reports nothing).
 #    The host of URGENTRY_INTERNAL_URL must be internal (check_internal_url.sh), otherwise
 #    the script fails before bootstrap and SENTRY_DSN is not touched. Idempotent.
@@ -75,7 +79,9 @@ ensure_secret() {  # empty -> random hex; existing value must be hex (URL/env sa
 }
 
 ensure_default URGENTRY_BOOTSTRAP_EMAIL admin@urgentry.local
-ensure_default URGENTRY_INTERNAL_URL http://urgentry:8080
+ensure_default URGENTRY_INTERNAL_URL http://caddy:8081
+[[ $(get_env URGENTRY_INTERNAL_URL) != http://urgentry:8080 ]] \
+    || set_env URGENTRY_INTERNAL_URL http://caddy:8081  # direct urgentry: no numeric project id
 # SENTRY_DSN is built from this host: only private IPs / Docker service names (fail early).
 bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$(get_env URGENTRY_INTERNAL_URL)" \
     || { echo "ERROR: fix URGENTRY_INTERNAL_URL in $env_file; SENTRY_DSN is not written" >&2; exit 1; }
@@ -127,6 +133,10 @@ print(key, pid)
 read -r public_key project_id <<<"$parsed"
 [[ $public_key =~ ^[0-9a-f]{32}$ && $project_id =~ ^[A-Za-z0-9-]+$ ]] \
     || { echo "ERROR: unexpected public key / project id from urgentry API" >&2; exit 1; }
+# Caddy maps the DSN project id 1 to exactly this urgentry project (Caddyfile.*, listener :8081).
+dsn_project_id=1
+[[ $project_id == default-project ]] \
+    || { echo "ERROR: urgentry project id is $project_id, Caddy :8081 maps /api/1/ to default-project" >&2; exit 1; }
 echo "urgentry bootstrap OK: project=$org_slug/$project_slug project_id=$project_id public_key=${public_key:0:4}…"
 
 if [[ $(get_env PROJECT_ENVIRONMENT) == test ]]; then
@@ -136,7 +146,7 @@ fi
 internal_url=$(get_env URGENTRY_INTERNAL_URL)
 [[ $internal_url =~ ^(https?)://([^/]+)/?$ ]] \
     || { echo "ERROR: URGENTRY_INTERNAL_URL must look like http://host:port" >&2; exit 1; }
-dsn="${BASH_REMATCH[1]}://${public_key}@${BASH_REMATCH[2]}/${project_id}"
+dsn="${BASH_REMATCH[1]}://${public_key}@${BASH_REMATCH[2]}/${dsn_project_id}"
 if [[ $(get_env SENTRY_DSN) == "$dsn" ]]; then
     echo "SENTRY_DSN is up to date"
 else

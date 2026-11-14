@@ -32,13 +32,15 @@ _FAKE_DOCKER = f"""#!/bin/sh
 case " $* " in *" exec "*) ;; *) exit 0;; esac
 env >"$FAKE_DOCKER_ENV_OUT"
 for last in "$@"; do :; done
+pid=${{FAKE_PROJECT_ID:-default-project}}
 case "$last" in
     */healthz) echo '{{"status":"ok"}}';;
     /api/0/projects/)
         [ "${{FAKE_DOCKER_FAIL:-0}}" = 1 ] && {{ echo "401 Unauthorized" >&2; exit 1; }}
-        echo '[{{"id":"default-project","slug":"default","organization":"urgentry-org"}}]';;
+        printf '[{{"id":"%s","slug":"default","organization":"urgentry-org"}}]\\n' "$pid";;
     /api/0/projects/urgentry-org/default/keys/)
-        echo '[{{"public":"{PUBLIC_KEY_HEX}","isActive":true,"dsn":{{"public":"https://{PUBLIC_KEY_HEX}@127.0.0.1:443/7"}}}}]';;
+        dsn="http://{PUBLIC_KEY_HEX}@u:8080/$pid"
+        printf '[{{"public":"{PUBLIC_KEY_HEX}","dsn":{{"public":"%s"}}}}]\\n' "$dsn";;
     *) echo "unexpected $last" >&2; exit 1;;
 esac
 """
@@ -53,7 +55,12 @@ def _values(text: str) -> dict[str, str]:
 
 
 def _run(
-    tmp_path: Path, env_text: str, *, fail: bool = False, prepare: bool = False
+    tmp_path: Path,
+    env_text: str,
+    *,
+    fail: bool = False,
+    prepare: bool = False,
+    project_id: str = "default-project",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
@@ -79,6 +86,7 @@ def _run(
             "URGENTRY_INTERNAL_URL": "",
             "FAKE_DOCKER_ENV_OUT": str(env_out),
             "FAKE_DOCKER_FAIL": "1" if fail else "0",
+            "FAKE_PROJECT_ID": project_id,
         },
     )
     return result, env_file, env_out
@@ -102,7 +110,8 @@ def test_generated_values_reach_docker_despite_empty_shell_env(tmp_path: Path) -
         assert written[key], key
         assert seen[key] == written[key], key
     assert len(written["URGENTRY_BOOTSTRAP_PAT"]) == 48
-    assert written["SENTRY_DSN"] == f"http://{PUBLIC_KEY_HEX}@urgentry:8080/7"
+    assert written["SENTRY_DSN"] == f"http://{PUBLIC_KEY_HEX}@caddy:8081/1"
+    assert written["URGENTRY_INTERNAL_URL"] == "http://caddy:8081"
     assert "urgentry bootstrap OK" in result.stdout
     output = result.stdout + result.stderr
     assert written["URGENTRY_BOOTSTRAP_PASSWORD"] not in output
@@ -153,4 +162,27 @@ def test_non_hex_secret_is_rejected(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "URGENTRY_BOOTSTRAP_PASSWORD" in result.stderr
+    assert "SENTRY_DSN" not in _values(env_file.read_text(encoding="utf-8"))
+
+
+def test_old_direct_url_and_dsn_are_migrated(tmp_path: Path) -> None:
+    old = (
+        _EMPTY_ENV
+        + "URGENTRY_INTERNAL_URL=http://urgentry:8080\n"
+        + f"SENTRY_DSN=http://{PUBLIC_KEY_HEX}@urgentry:8080/default-project\n"
+    )
+    result, env_file, _ = _run(tmp_path, old)
+
+    assert result.returncode == 0, result.stderr
+    written = _values(env_file.read_text(encoding="utf-8"))
+    assert written["URGENTRY_INTERNAL_URL"] == "http://caddy:8081"
+    assert written["SENTRY_DSN"] == f"http://{PUBLIC_KEY_HEX}@caddy:8081/1"
+    assert "Updated SENTRY_DSN" in result.stdout
+
+
+def test_unexpected_project_id_is_rejected(tmp_path: Path) -> None:
+    result, env_file, _ = _run(tmp_path, _EMPTY_ENV, project_id="0a1b2c3d")
+
+    assert result.returncode == 1
+    assert "Caddy :8081 maps /api/1/ to default-project" in result.stderr
     assert "SENTRY_DSN" not in _values(env_file.read_text(encoding="utf-8"))

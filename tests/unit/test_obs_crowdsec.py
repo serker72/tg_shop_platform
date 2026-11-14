@@ -153,3 +153,17 @@ def test_obs_bans_unban_make_shell_not_expanded(tmp_path: Path, dry_run: bool) -
         check=False,
     )
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("mode", ["ip", "domain"])
+def test_internal_ingest_listener_is_private_and_unlogged(mode: str) -> None:
+    text = (CADDY / f"Caddyfile.{mode}").read_text(encoding="utf-8")
+    block = re.search(r"^:8081 \{\n(.*?)^\}", text, re.MULTILINE | re.DOTALL)
+    assert block, "internal ingest listener :8081 is missing"
+    body = block.group(1)
+    assert "uri path_regexp ^/api/1/ /api/default-project/" in body
+    assert "reverse_proxy urgentry:8080" in body
+    assert "respond 404" in body
+    assert "access_log" not in body  # internal traffic never reaches CrowdSec
+    compose = (ROOT / "docker-compose.obs.yml").read_text(encoding="utf-8")
+    assert ":8081" not in "".join(re.findall(r'^\s+- "[^"]*"$', compose, re.MULTILINE))

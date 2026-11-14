@@ -18,6 +18,7 @@ SCRIPT = ROOT / "ops" / "scripts" / "check_internal_url.sh"
 
 ALLOWED = [
     "http://k@glitchtip-web:8000/1",
+    "http://k@caddy:8081/1",
     "http://k@10.10.0.2:8000/1",
     "http://k@172.20.0.5:8000/1",
     "http://k@192.168.1.10/1",
@@ -78,6 +79,7 @@ def test_empty_dsn_disables_sentry(dsn: str | None) -> None:
     ("host", "expected"),
     [
         ("GLITCHTIP-WEB", True),
+        ("caddy", True),
         ("obs-postgres", True),
         ("fd00::1", True),
         ("2001:db8::1", False),
