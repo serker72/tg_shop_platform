@@ -358,7 +358,7 @@ class ObservabilitySettings(BaseSettings):
     timeout ``OBSERVABILITY_HEALTH_TIMEOUT_SECONDS``, heartbeat TTL
     ``OBSERVABILITY_HEARTBEAT_TTL_SECONDS``. Sentry uses the conventional names
     ``SENTRY_DSN`` (empty = disabled), ``SENTRY_ENVIRONMENT`` (empty = ``PROJECT_ENVIRONMENT``)
-    , ``SENTRY_TRACES_SAMPLE_RATE`` and ``SENTRY_RELEASE`` (empty = ``tg-shop-platform@<version>``,
+    and ``SENTRY_RELEASE`` (empty = ``tg-shop-platform@<version>``,
     see :mod:`app.core.version`). The prefix never clashes with ``OBS_*_DATA_DIR``
     (host directories of the observability stack, not read by the application).
     """
@@ -380,12 +380,6 @@ class ObservabilitySettings(BaseSettings):
     sentry_environment: str | None = Field(
         default=None,
         validation_alias=AliasChoices("SENTRY_ENVIRONMENT", "sentry_environment"),
-    )
-    sentry_traces_sample_rate: float = Field(
-        default=0.0,
-        ge=0,
-        le=1,
-        validation_alias=AliasChoices("SENTRY_TRACES_SAMPLE_RATE", "sentry_traces_sample_rate"),
     )
     sentry_release: str | None = Field(
         default=None,
@@ -436,7 +430,11 @@ class ObservabilitySettings(BaseSettings):
         ge=0,
         le=1,
         validation_alias=AliasChoices(
-            "OTEL_TRACES_SAMPLER_RATIO", "OTEL_SAMPLE_RATIO", "otel_traces_sampler_ratio"
+            # Standard OTel name first; the older project names stay as aliases.
+            "OTEL_TRACES_SAMPLER_ARG",
+            "OTEL_TRACES_SAMPLER_RATIO",
+            "OTEL_SAMPLE_RATIO",
+            "otel_traces_sampler_ratio",
         ),
     )
 

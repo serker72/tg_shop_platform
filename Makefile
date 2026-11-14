@@ -45,6 +45,13 @@ endef
 
 # Exports APP_VERSION/APP_COMMIT/APP_BUILD_TIME (image build args) into the recipe shell.
 # A missing milestone tag fails the recipe with a hint (see docs/ops/versioning.md).
+# Alloy starts with an empty OBS_TEMPO_OTLP_ENDPOINT (logs/metrics keep flowing), but its
+# otelcol.exporter.otlp.tempo fails ("received empty target") and app traces are dropped.
+define agent_tempo_guard
+$(call load_env,$(ENV_FILE)); \
+test -n "$${OBS_TEMPO_OTLP_ENDPOINT:-}" || { echo "ERROR: OBS_TEMPO_OTLP_ENDPOINT is empty in $(ENV_FILE): set tempo:4317 (one host) or <VPN IP of VPS 2>:4317" >&2; exit 1; }
+endef
+
 define version_env
 vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
@@ -346,6 +353,7 @@ obs-logs: ## Follow observability logs (SERVICE=grafana to filter)
 ALLOY_CHECK_IMAGE ?= grafana/alloy:v1.11.3@sha256:8c7256f412feb9f5f48f9f6f9394dc97ca887f63dea9304f347970ecc1787669
 ALLOY_CONFIG := ops/observability/alloy/config.alloy
 agent-config: ## Validate main compose (profile observability) + Alloy config (fmt + validate)
+	@$(agent_tempo_guard)
 	@$(agent_compose) config --quiet && echo "docker-compose.yml + profile observability OK ($(ENV_FILE))"
 	@docker run --rm -v "$(CURDIR)/$(dir $(ALLOY_CONFIG)):/c:ro" --entrypoint /bin/alloy $(ALLOY_CHECK_IMAGE) \
 		fmt /c/$(notdir $(ALLOY_CONFIG)) | diff -u $(ALLOY_CONFIG) - \
@@ -354,6 +362,7 @@ agent-config: ## Validate main compose (profile observability) + Alloy config (f
 		validate /c/$(notdir $(ALLOY_CONFIG)) && echo "$(ALLOY_CONFIG): alloy fmt + validate OK"
 
 agent-up: init-dirs ## Start the main stack + Alloy (profile observability), wait for healthy
+	@$(agent_tempo_guard)
 	@$(version_env); \
 	$(agent_compose) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory ready ENV_FILE=$(ENV_FILE)

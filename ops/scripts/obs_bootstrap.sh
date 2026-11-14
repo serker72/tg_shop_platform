@@ -85,6 +85,12 @@ ensure_default URGENTRY_INTERNAL_URL http://caddy:8081
 # SENTRY_DSN is built from this host: only private IPs / Docker service names (fail early).
 bash "$(dirname -- "${BASH_SOURCE[0]}")/check_internal_url.sh" "$(get_env URGENTRY_INTERNAL_URL)" \
     || { echo "ERROR: fix URGENTRY_INTERNAL_URL in $env_file; SENTRY_DSN is not written" >&2; exit 1; }
+# Only the Caddy ingest listener maps DSN project id 1 to `default-project` (direct urgentry: 404).
+if ! [[ $(get_env URGENTRY_INTERNAL_URL) =~ ^https?://[^/:]+:8081/?$ ]]; then
+    echo "WARNING: URGENTRY_INTERNAL_URL should be the Caddy ingest listener http://<host>:8081" \
+        "(http://caddy:8081 on one host, http://<VPN IP of VPS 2>:8081 for two hosts);" \
+        "sentry_sdk events to other URLs get 404" >&2
+fi
 ensure_secret URGENTRY_BOOTSTRAP_PASSWORD
 ensure_secret URGENTRY_BOOTSTRAP_PAT
 (( prepare_only )) && exit 0

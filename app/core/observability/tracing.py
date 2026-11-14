@@ -13,14 +13,59 @@ from typing import Any
 
 from aiogram import BaseMiddleware as AiogramBaseMiddleware
 from aiogram.types import TelegramObject, Update
+from faststream import BaseMiddleware, PublishCommand
+from faststream.message import StreamMessage
+from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from app.core.logging import bind_trace_id, clear_trace_id
+from app.core.logging import bind_trace_id, clear_trace_id, get_trace_id
 from app.core.telemetry import get_tracer
 
-__all__ = ["UPDATE_SPAN_NAME", "AiogramTraceIdMiddleware", "AiogramTracingMiddleware"]
+__all__ = [
+    "TRACE_ID_HEADER",
+    "UPDATE_SPAN_NAME",
+    "AiogramTracingMiddleware",
+    "TraceIdFallbackMiddleware",
+]
 
 UPDATE_SPAN_NAME = "aiogram.update"
+TRACE_ID_HEADER = "trace_id"
+
+
+def _no_active_span() -> bool:
+    return not trace.get_current_span().get_span_context().is_valid
+
+
+class TraceIdFallbackMiddleware(BaseMiddleware[PublishCommand, Any]):
+    """Log correlation over RabbitMQ when OTel tracing is off (NoOp provider).
+
+    Installed after ``RabbitTelemetryMiddleware``. With a valid span (tracing on) it does
+    nothing: ``traceparent`` carries the context. Otherwise publish adds the bound trace id
+    (or a fresh uuid hex) as the ``trace_id`` header and consume binds it for the handler.
+    """
+
+    async def publish_scope(
+        self,
+        call_next: Callable[[PublishCommand], Awaitable[Any]],
+        cmd: PublishCommand,
+    ) -> Any:
+        if _no_active_span() and not cmd.headers.get(TRACE_ID_HEADER):
+            cmd.headers = {**cmd.headers, TRACE_ID_HEADER: get_trace_id() or uuid.uuid4().hex}
+        return await call_next(cmd)
+
+    async def consume_scope(
+        self,
+        call_next: Callable[[Any], Awaitable[Any]],
+        msg: StreamMessage[Any],
+    ) -> Any:
+        raw = msg.headers.get(TRACE_ID_HEADER)
+        if not (isinstance(raw, str) and raw) or not _no_active_span():
+            return await call_next(msg)
+        token = bind_trace_id(raw)
+        try:
+            return await call_next(msg)
+        finally:
+            clear_trace_id(token)
 
 
 def _update_attributes(event: TelegramObject, data: dict[str, Any]) -> dict[str, Any]:
@@ -64,7 +109,3 @@ class AiogramTracingMiddleware(AiogramBaseMiddleware):
                 return await handler(event, data)
             finally:
                 clear_trace_id(token)
-
-
-# Backwards-compatible name.
-AiogramTraceIdMiddleware = AiogramTracingMiddleware

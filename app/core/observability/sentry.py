@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import sentry_sdk
 from opentelemetry import trace as otel_trace
-from sentry_sdk.integrations.logging import LoggingIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration, ignore_logger
 from sentry_sdk.types import Event, Hint
 
 from app.core.config import Settings
@@ -22,6 +22,14 @@ from app.core.version import PROJECT_SLUG, get_version
 __all__ = ["FILTERED", "before_send", "init_sentry", "is_secret_key", "resolve_release", "scrub"]
 
 FILTERED = "[Filtered]"
+
+# OTel export failures (collector down) are logged at ERROR: keep them in stdout/Loki, but not
+# as urgentry events/breadcrumbs (one event per failed batch otherwise).
+OTEL_EXPORT_LOGGERS: tuple[str, ...] = (
+    "opentelemetry.exporter.otlp.proto.grpc.exporter",
+    "opentelemetry.sdk.trace.export",
+    "opentelemetry.sdk._shared_internal",
+)
 
 # Matched against whole *segments* of a key (split on ``_``, ``-``, ``.``, whitespace and
 # camelCase boundaries), so ``author``/``compass``/``tokens_count`` stay visible while
@@ -96,8 +104,9 @@ def before_send(event: Event, hint: Hint) -> Event | None:
     span_ctx = otel_trace.get_current_span().get_span_context()
     if span_ctx.is_valid:
         contexts = cast(dict[str, Any], event.setdefault("contexts", {}))
+        # Only the OTel ids: parent_span_id/op of Sentry's propagation context would point
+        # to spans that do not exist in Tempo.
         contexts["trace"] = {
-            **(contexts.get("trace") or {}),
             "trace_id": format(span_ctx.trace_id, "032x"),
             "span_id": format(span_ctx.span_id, "016x"),
         }
@@ -114,13 +123,17 @@ def init_sentry(settings: Settings, *, component: str) -> bool:
     obs = settings.observability
     if obs.sentry_dsn is None:
         return False
+    for name in OTEL_EXPORT_LOGGERS:
+        ignore_logger(name)
     sentry_sdk.init(
         dsn=obs.sentry_dsn.get_secret_value(),
         release=resolve_release(settings),
         environment=obs.sentry_environment or settings.project_environment,
         # Tracing is OpenTelemetry's job (app.core.telemetry): Sentry creates no
-        # transactions; SENTRY_TRACES_SAMPLE_RATE is ignored.
+        # transactions and adds no sentry-trace/baggage headers to outgoing HTTP requests
+        # (Telegram API included; W3C traceparent is OTel's job).
         traces_sample_rate=None,
+        trace_propagation_targets=[],
         send_default_pii=False,
         before_send=before_send,
         # Transactions carry span descriptions / URLs (e.g. ``/bot<token>/getMe``).

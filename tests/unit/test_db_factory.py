@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from dishka import make_async_container
+from sqlalchemy.ext import asyncio as sa_asyncio
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool, QueuePool
 
 from app.core.config import Settings
-from app.shared_kernel.infrastructure import database, providers
+from app.shared_kernel.infrastructure import providers
 from app.shared_kernel.infrastructure.database import build_engine, build_session_factory
 from app.shared_kernel.infrastructure.providers import DatabaseProvider
 
@@ -43,7 +44,8 @@ def test_null_pool_engine_omits_pool_sizing(
         captured.update(kwargs)
         return real_create(url, **kwargs)
 
-    monkeypatch.setattr(database, "create_async_engine", spy)
+    # build_engine calls the module attribute at runtime (OTel wraps it when tracing is on).
+    monkeypatch.setattr(sa_asyncio, "create_async_engine", spy)
 
     engine = build_engine(settings, poolclass=NullPool)
 

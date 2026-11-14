@@ -312,11 +312,13 @@ services:
       - type: bind
         source: ${OBS_CADDY_LOGS_DIR:?OBS_CADDY_LOGS_DIR не задан — см. .env.example, затем make init-dirs}
         target: /var/log/caddy
-    # :8081 = internal Sentry ingest (Caddyfile.*), reachable only inside the obs network: not published.
+    # :8081 = internal Sentry ingest (Caddyfile.*): obs network + OBS_INGEST_BIND_ADDRESS only
+    # (127.0.0.1 on one host, VPN IP of VPS 2 for two hosts), like Loki/Prometheus/Tempo.
     ports:
       # The only service exposed beyond loopback (CADDY_BIND_ADDRESS, default 0.0.0.0).
       - "${CADDY_BIND_ADDRESS:-0.0.0.0}:${CADDY_HTTP_PORT_HOST:-80}:80"
       - "${CADDY_BIND_ADDRESS:-0.0.0.0}:${CADDY_HTTPS_PORT_HOST:-443}:443"
+      - "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${URGENTRY_INGEST_PORT_HOST:-8081}:8081"
     depends_on:
       grafana:
         condition: service_healthy

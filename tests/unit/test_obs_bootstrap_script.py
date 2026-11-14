@@ -186,3 +186,22 @@ def test_unexpected_project_id_is_rejected(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "Caddy :8081 maps /api/1/ to default-project" in result.stderr
     assert "SENTRY_DSN" not in _values(env_file.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("url", "warned"),
+    [
+        ("http://caddy:8081", False),
+        ("http://10.10.0.2:8081", False),
+        ("http://10.10.0.2:8000", True),
+    ],
+)
+def test_internal_url_must_be_caddy_ingest(tmp_path: Path, url: str, warned: bool) -> None:
+    result, env_file, _ = _run(tmp_path, _EMPTY_ENV + f"URGENTRY_INTERNAL_URL={url}\n")
+
+    assert result.returncode == 0, result.stderr
+    assert ("WARNING: URGENTRY_INTERNAL_URL" in result.stderr) is warned
+    host = url.removeprefix("http://")
+    assert _values(env_file.read_text(encoding="utf-8"))["SENTRY_DSN"] == (
+        f"http://{PUBLIC_KEY_HEX}@{host}/1"
+    )

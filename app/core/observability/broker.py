@@ -14,6 +14,7 @@ from faststream.rabbit import RabbitBroker
 from faststream.rabbit.opentelemetry import RabbitTelemetryMiddleware
 
 from app.core.config import Settings
+from app.core.observability.tracing import TraceIdFallbackMiddleware
 from app.core.telemetry import get_tracer_provider
 
 __all__ = ["BROKER_LOGGER_NAME", "broker_logger", "build_rabbit_broker"]
@@ -32,11 +33,16 @@ def build_rabbit_broker(settings: Settings) -> RabbitBroker:
     """Broker on ``settings.rabbitmq_url`` with OTel spans and the JSON logger.
 
     ``RabbitTelemetryMiddleware`` (``faststream[otel]``) creates publish/process spans and
-    propagates the context in the W3C ``traceparent`` header. Build the broker after
+    propagates the context in the W3C ``traceparent`` header; ``TraceIdFallbackMiddleware``
+    keeps the ``trace_id`` header for log correlation when tracing is off. Build the broker after
     ``init_telemetry``: the provider is captured here.
     """
     return RabbitBroker(
         settings.rabbitmq_url,
         logger=broker_logger(),
-        middlewares=[RabbitTelemetryMiddleware(tracer_provider=get_tracer_provider())],
+        middlewares=[
+            RabbitTelemetryMiddleware(tracer_provider=get_tracer_provider()),
+            # Only when tracing is off: trace_id header for log correlation.
+            TraceIdFallbackMiddleware,
+        ],
     )

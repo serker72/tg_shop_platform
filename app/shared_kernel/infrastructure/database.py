@@ -11,11 +11,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import MetaData
+from sqlalchemy.ext import asyncio as sa_asyncio
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import Pool, QueuePool
@@ -68,11 +68,9 @@ def build_engine(settings: Settings, *, poolclass: type[Pool] | None = None) -> 
     if poolclass is None or issubclass(poolclass, QueuePool):
         kwargs["pool_size"] = settings.sqlalchemy.pool_size
         kwargs["max_overflow"] = settings.sqlalchemy.max_overflow
-    engine = create_async_engine(settings.database_url, **kwargs)
-    from app.core.telemetry import instrument_engine
-
-    instrument_engine(engine)  # no-op unless OTel tracing is enabled
-    return engine
+    # Looked up through the module on purpose: with OTel tracing on, the SQLAlchemy
+    # instrumentation wraps ``sqlalchemy.ext.asyncio.create_async_engine`` (app.core.telemetry).
+    return sa_asyncio.create_async_engine(settings.database_url, **kwargs)
 
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

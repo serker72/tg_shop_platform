@@ -10,7 +10,6 @@
 # The Authorization header is stripped before proxying, so Basic credentials never reach upstreams.
 # Access log (JSON) goes to /var/log/caddy/access.log, read by CrowdSec; runtime logs stay on stdout.
 # :8081 (end of file) is the internal Sentry ingest for the app, see the comment there.
-
 {
 	# CrowdSec LAPI inside the obs network (port 8080 is not published on the host).
 	crowdsec {
@@ -75,7 +74,7 @@ https:// {
 # Internal Sentry ingest for the app (SENTRY_DSN = http://<key>@caddy:8081/1). sentry_sdk accepts
 # only a numeric project id in the DSN, urgentry uses the string id `default-project`: /api/1/...
 # is rewritten to /api/default-project/... (query string kept). Plain HTTP inside the obs compose
-# network only: port 8081 is NOT published in docker-compose.obs.yml. No Basic Auth (the SDK
+# network + OBS_INGEST_BIND_ADDRESS only (docker-compose.obs.yml), never public. No Basic Auth (the SDK
 # authenticates with X-Sentry-Auth / sentry_key), no access log (CrowdSec only sees public traffic).
 :8081 {
 	@ingest path /api/1/*

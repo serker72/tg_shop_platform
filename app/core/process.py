@@ -79,7 +79,8 @@ async def run_service(name: str) -> None:
             await run_placeholder(name)
     finally:
         await container.close()
-        shutdown_telemetry()
+        # Flush/shutdown blocks (exporter deadline): keep the event loop free.
+        await asyncio.to_thread(shutdown_telemetry)
         if sentry_enabled:
             sentry_sdk.flush(timeout=2)
 

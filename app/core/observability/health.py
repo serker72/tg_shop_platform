@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import aio_pika
+from opentelemetry.instrumentation.utils import suppress_instrumentation
 from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -180,8 +181,10 @@ class HealthReportCache:
 
 def postgres_probe(engine: AsyncEngine) -> Probe:
     async def probe() -> None:
-        async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
+        # No OTel spans for probes: /health/ready would create a root trace per request.
+        with suppress_instrumentation():
+            async with engine.connect() as connection:
+                await connection.execute(text("SELECT 1"))
 
     return probe
 

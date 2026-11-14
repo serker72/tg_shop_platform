@@ -166,4 +166,8 @@ def test_internal_ingest_listener_is_private_and_unlogged(mode: str) -> None:
     assert "respond 404" in body
     assert "access_log" not in body  # internal traffic never reaches CrowdSec
     compose = (ROOT / "docker-compose.obs.yml").read_text(encoding="utf-8")
-    assert ":8081" not in "".join(re.findall(r'^\s+- "[^"]*"$', compose, re.MULTILINE))
+    # Published only on OBS_INGEST_BIND_ADDRESS (loopback on one host), never on 0.0.0.0.
+    ports = re.findall(r'^\s+- "([^"]*:8081)"$', compose, re.MULTILINE)
+    assert ports == [
+        "${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${URGENTRY_INGEST_PORT_HOST:-8081}:8081"
+    ]
