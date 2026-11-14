@@ -12,7 +12,8 @@ common:
   storage:
     filesystem:
       chunks_directory: /loki/chunks
-      rules_directory: /loki/rules
+      # rule files from git (docker-compose.obs.yml bind, tenant fake = auth_enabled: false)
+      rules_directory: /etc/loki/rules
   replication_factor: 1
   ring:
     kvstore:

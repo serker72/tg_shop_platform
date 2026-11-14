@@ -35,6 +35,10 @@ services:
         target: /etc/loki/config.yml
         read_only: true
       - type: bind
+        source: ./ops/observability/loki/rules
+        target: /etc/loki/rules/fake
+        read_only: true
+      - type: bind
         source: ${OBS_LOKI_DATA_DIR:?OBS_LOKI_DATA_DIR не задан — см. .env.example, затем make init-dirs}
         target: /loki
     ports:
