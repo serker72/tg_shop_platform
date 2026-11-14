@@ -188,6 +188,17 @@ urgentry; в событии Sentry есть `contexts.trace` (trace_id из OTel
   (`matcherType: label`), tracesToLogsV2 (трейс → логи), дашборд `tracing-red` (RED по
   span-metrics). Панель Service map (`queryType: serviceMap`) Grafana строит на фронтенде
   запросами к Prometheus: через `/api/ds/query` она отдаёт 500 — проверять в браузере.
+- **«No data» на `tracing-red` без трафика — норма.** Span-метрики появляются только из спанов:
+  metrics-generator удаляет серию, если она не обновлялась дольше
+  `metrics_generator.registry.stale_duration` (дефолт Tempo 3.1.1 — `15m`, у нас не
+  переопределён). Боты до вехи II — заглушки, health-пробы не трассируются, поэтому в простое
+  панели пусты. Для демо: `make otel-smoke` (2–3 раза; `DEEP_ERROR=1` — ещё и цепочка
+  исключений) → интервал *Last 15–30 minutes*. Смоук даёт ERROR-спаны
+  (`otel.smoke.failing_operation` / `process_order` с `record_exception` +
+  `Status(ERROR)`, корневой `otel.smoke` — UNSET) и ошибочный read-only `SELECT` из
+  несуществующей таблицы → ERROR на клиентском спане БД → ребро `master_bot → postgresql` в
+  `traces_service_graph_request_failed_total` (Tempo считает ребро failed, если ERROR у client-
+  или server-спана пары).
 - Ограничения: сквозной трейс Telegram-апдейт → bot_worker пока не проверен (боты — веха II);
   A-NIT-8 отложен в веху II.
 - Демо и смоук: `make otel-smoke` (см. `docs/reports/milestone-I-demo.md`).

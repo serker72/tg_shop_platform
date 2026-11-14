@@ -63,7 +63,9 @@
   Вывод дублируется в stdout PID 1 контейнера (`tee /proc/1/fd/1`), поэтому строки смоука
   попадают в `docker logs` → Alloy → Loki (обычный `docker exec` пишет только в терминал).
 - Grafana → дашборд **Tracing RED** (uid `tracing-red`): запросы/ошибки/латентность
-  `master_bot` по span-метрикам Tempo (обновление ~1 мин).
+  `master_bot` по span-метрикам Tempo (обновление ~1 мин). Данные есть только при трафике:
+  серии удаляются через `stale_duration` = 15 мин без спанов, боты до вехи II — заглушки.
+  Перед показом запустить `make otel-smoke` 2–3 раза и выбрать *Last 15–30 minutes*.
 - Explore → источник *Tempo* → вставить `TRACE_ID`: дерево `otel.smoke` → `connect`/`select` →
   `otel-smoke-q publish` → `process`. Кнопка «Logs for this span» → логи Loki с тем же `trace_id`
   (или Explore → Loki: `{service=~".+"} | trace_id="<TRACE_ID>"`).
