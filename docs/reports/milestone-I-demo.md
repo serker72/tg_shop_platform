@@ -12,7 +12,7 @@
 3. В `.env`:
    - `PROJECT_DATA_DIR` — каталог данных; по умолчанию `/opt/tg_shop_platform_data`, нужен
      `sudo mkdir` + `chown` на пользователя (README, п. 2) или другой каталог с правами записи;
-   - `PROJECT_ENVIRONMENT=stage` (или `loc`); при `test` bootstrap GlitchTip **не пишет**
+   - `PROJECT_ENVIRONMENT=stage` (или `loc`); при `test` bootstrap urgentry **не пишет**
      `SENTRY_DSN` и шаг 4 не сработает;
    - `CADDY_MODE=ip` и `VPS_IP=<IP хоста>` — `make env` оставляет `VPS_IP` пустым, заполнить
      (или режим доменов — см. README).
@@ -22,13 +22,13 @@
      последняя): `OBS_LOKI_PUSH_URL=http://loki:3100/loki/api/v1/push`,
      `OBS_PROMETHEUS_REMOTE_WRITE_URL=http://prometheus:9090/api/v1/write`.
 5. Строго в этом порядке:
-   - `make obs-up` — стек мониторинга (Grafana, Loki, Prometheus, Alertmanager, GlitchTip,
-     Caddy); в конце bootstrap GlitchTip **записывает `SENTRY_DSN` в `.env`**;
+   - `make obs-up` — стек мониторинга (Grafana, Loki, Prometheus, Alertmanager, Tempo, urgentry,
+     Caddy); в конце bootstrap urgentry **записывает `SENTRY_DSN` в `.env`**;
    - `make agent-up` — основной стек + агент Alloy (уже с новым `SENTRY_DSN`), в конце
      `make ready`. Обратный порядок оставит приложение без DSN и агента без сети мониторинга.
 6. `make test-report` — свежий отчёт об автотестах (`build/reports/milestone-I-tests.md`;
    принятая версия — [milestone-I-tests.md](milestone-I-tests.md)); убедиться, что все ✅.
-7. Заранее открыть вкладки: Grafana, GlitchTip, отчёт; проверить вход по Basic Auth.
+7. Заранее открыть вкладки: Grafana, urgentry, отчёт; проверить вход по Basic Auth.
 
 ## Ход демонстрации
 
@@ -56,21 +56,17 @@
   **PostgreSQL / Redis / RabbitMQ** (uid `tgsp-datastores`, партиции pg_partman), журналы
   (uid `tgsp-logs`: логи приложения из Loki, фильтр по сервису).
 
-### 4. Журнал ошибок GlitchTip (2 мин)
-- Отправить тестовую ошибку из контейнера приложения (DSN — внутренний, из `.env`):
-
-  ```bash
-  docker compose exec master_bot python -c "
-  import sentry_sdk
-  from app.core.config import get_settings
-  from app.core.observability.sentry import init_sentry
-  assert init_sentry(get_settings(), component='demo'), 'SENTRY_DSN is empty'
-  sentry_sdk.capture_exception(RuntimeError('Веха I: тестовая ошибка'))
-  sentry_sdk.flush()
-  "
-  ```
-- Показать событие в GlitchTip (проект платформы): время, сервис, версия; секреты в событии
-  замаскированы.
+### 4. Трассировка и журнал ошибок urgentry (3 мин)
+- `make otel-smoke` — в контейнере `master_bot` создаётся span, выполняется SQL, сообщение
+  публикуется и принимается через RabbitMQ, отправляется тестовая ошибка в urgentry; в конце
+  печатаются `TRACE_ID <32 hex>` и `SENTRY_EVENT_ID` (секреты не выводятся).
+- Grafana → дашборд **Tracing RED** (uid `tracing-red`): запросы/ошибки/латентность
+  `master_bot` по span-метрикам Tempo (обновление ~1 мин).
+- Explore → источник *Tempo* → вставить `TRACE_ID`: дерево `otel.smoke` → `connect`/`select` →
+  `otel-smoke-q publish` → `process`. Кнопка «Logs for this span» → логи Loki с тем же `trace_id`
+  (или Explore → Loki: `{service=~".+"} | trace_id="<TRACE_ID>"`).
+- urgentry (`https://<VPS_IP>/`) → issue `RuntimeError: otel smoke forced error`; в событии
+  контекст `trace` с тем же `trace_id`; секреты замаскированы.
 
 ### 5. Оповещения о сбоях (2 мин)
 - `make test-alerts` — promtool проверяет правила алертов и их unit-тесты (все SUCCESS).

@@ -72,7 +72,7 @@ git push origin v<версия>
   Проверка: `docker compose exec master_bot python -c "import urllib.request as u;
   print(u.urlopen('http://127.0.0.1:8080/version').read().decode())"`.
 - Prometheus: `app_build_info{version, commit, component} 1` (по одной серии на процесс).
-- Sentry/GlitchTip: `release = tg-shop-platform@<version>`; `SENTRY_RELEASE` в `.env`
+- Sentry SDK → urgentry: `release = tg-shop-platform@<version>`; `SENTRY_RELEASE` в `.env`
   переопределяет значение (пусто — вычисленная версия).
 
 ## Порядок определения версии в приложении (`app/core/version.py`)

@@ -29,7 +29,8 @@ tg_shop_platform/
 |   |   ├── docker-compose.obs.yml
 |   |   ├── prometheus/            # Конфиги Prometheus
 |   |   ├── grafana/               # Дашборды
-|   |   └── glitchtip/             # .env для Glitchtip
+|   |   ├── tempo/                 # Tempo (трейсы)
+|   |   └── urgentry/              # Dockerfile urgentry (заменил GlitchTip)
 |   └── scripts/                   # Bash-скрипты (deploy.sh, backup.sh, wait-for-it.sh)
 └── app/
     ├── core/                      # Глобальные настройки
@@ -559,17 +560,17 @@ UPDATE partman.part_config pc
     *   В основном `docker-compose.yml` настроить легковесный коллектор **Grafana Alloy**, который собирает JSON-логи Docker-контейнеров и метрики (Node, PG, Rabbit, App).
     *   Настроить отправку собранной телеметрии с Alloy (VPS 1) на защищенные эндпоинты Loki и Prometheus (VPS 2).
     *   В приложении (FastAPI/aiogram/FastStream) внедрить `structlog` с поддержкой `Correlation ID` (генерация `trace_id` и передача через RabbitMQ headers).
-    *   Подключить `sentry_sdk`, указав DSN удаленного GlitchTip (VPS 2).
+    *   Подключить `sentry_sdk`, указав внутренний DSN urgentry (VPS 2); трассировка — OpenTelemetry SDK → Alloy (OTLP) → Tempo, W3C `traceparent` через RabbitMQ. Решения и ограничения — `docs/ops/observability.md` («Трассировка»).
 
 3.  **Конфигурация VPS 2 (Сервер Мониторинга — `docker-compose.obs.yml`):**
     *   Развернуть **Grafana Loki** для приема логов от Alloy.
     *   Развернуть **Prometheus** для агрегации метрик и настройки правил алертинга.
     *   Развернуть **Grafana** для визуализации (подключить источники Loki и Prometheus).
-    *   Развернуть **GlitchTip** (включая его зависимости: Redis, PostgreSQL в рамках `docker-compose.obs.yml`) для сбора ошибок.
+    *   Развернуть **urgentry** (Sentry-совместимый, один контейнер, SQLite; заменил GlitchTip) для сбора ошибок и **Tempo** (metrics-generator → Prometheus) для трейсов. Ограничения: числовой project id DSN → один проект; Service map проверяется только в UI; A-NIT-8 — веха II; сквозной трейс через ботов — после появления ботов (веха II).
 
 4.  **Безопасность сетевого взаимодействия:**
     *   Учесть, что связь между VPS 1 и VPS 2 будет идти через защищенный VPN-туннель (WireGuard/Tailscale) по внутренним IP-адресам (например, `10.x.x.x`).
-    *   Эндпоинты `/metrics` и интерфейсы Alloy/Loki не должны публиковаться на публичных интерфейсах (ограничить `ports: ["127.0.0.1:9090:9090"]` или биндить на IP VPN). В публичный интернет (на порты 80/443) выдаются только Web-интерфейсы Grafana и GlitchTip через reverse proxy.
+    *   Эндпоинты `/metrics` и интерфейсы Alloy/Loki не должны публиковаться на публичных интерфейсах (ограничить `ports: ["127.0.0.1:9090:9090"]` или биндить на IP VPN). В публичный интернет (на порты 80/443) выдаются только Web-интерфейсы Grafana и urgentry через reverse proxy (urgentry — на корне, под-путь не поддерживается).
 
 #### Этап 3. Master Bot и Панель управления (aiogram-dialog)
 

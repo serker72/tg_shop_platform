@@ -150,9 +150,12 @@ _ITEMS: tuple[Requirement, ...] = (
     Requirement(
         "MAN-UI",
         "Дашборды и журнал ошибок",
-        "Доступны дашборды Grafana и журнал ошибок GlitchTip.",
+        "Доступны дашборды Grafana, трассировка запросов (Tempo) и журнал ошибок urgentry.",
         "Ручная проверка UI на демо (шаги 3–4): дашборды platform_overview/datastores/logs, "
-        "тестовая ошибка в GlitchTip.",
+        "трейс make otel-smoke в Tempo/RED, логи по trace_id и событие urgentry с тем же trace_id. "
+        "Конфигурация покрыта автотестами: tests/unit/test_telemetry.py, test_observability.py, "
+        "test_obs_bootstrap_script.py, test_obs_crowdsec.py, test_otel_smoke_script.py, "
+        "promtool-правило TempoDown.",
         "manual",
     ),
     Requirement(

@@ -1,4 +1,4 @@
-"""SENTRY_DSN / GLITCHTIP_INTERNAL_URL must point to an internal GlitchTip address."""
+"""SENTRY_DSN / URGENTRY_INTERNAL_URL must point to an internal urgentry address."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ops" / "scripts" / "check_internal_url.sh"
 
 ALLOWED = [
-    "http://k@glitchtip-web:8000/1",
+    "http://k@caddy:8081/1",
     "http://k@caddy:8081/1",
     "http://k@10.10.0.2:8000/1",
     "http://k@172.20.0.5:8000/1",
@@ -28,12 +28,12 @@ ALLOWED = [
     "http://k@localhost:8000/1",
 ]
 FORBIDDEN = [
-    "https://k@glitchtip.example.com/1",
+    "https://k@urgentry.example.com/1",
     "http://k@8.8.8.8/1",
     "http://k@1.2.3.4.nip.io/1",
     "http://k@172.32.0.1/1",
     "http://k@100.128.0.1/1",
-    "ftp://k@glitchtip-web/1",
+    "ftp://k@caddy/1",
     "http://k@/1",
     # numeric inet_aton forms: glibc getaddrinfo resolves them (134744072 -> 8.8.8.8)
     "http://k@134744072/1",
@@ -41,8 +41,8 @@ FORBIDDEN = [
     "http://k@0x8/1",
     "http://k@017700000001/1",
     "http://k@0x/1",
-    "http://k@glitchtip-web:99999/1",
-    "http://k@glitchtip-web:abc/1",
+    "http://k@caddy:99999/1",
+    "http://k@caddy:abc/1",
 ]
 
 
@@ -78,7 +78,7 @@ def test_empty_dsn_disables_sentry(dsn: str | None) -> None:
 @pytest.mark.parametrize(
     ("host", "expected"),
     [
-        ("GLITCHTIP-WEB", True),
+        ("CADDY", True),
         ("caddy", True),
         ("obs-postgres", True),
         ("fd00::1", True),

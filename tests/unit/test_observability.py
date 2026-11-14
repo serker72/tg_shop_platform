@@ -287,7 +287,7 @@ def test_scrub_secrets() -> None:
     event: Any = {
         "extra": {"password": "p", "bot_token": "t", "Authorization": "Bearer x", "n": 1},
         "message": "connect amqp://user:pw@rabbit:5672/ token 123456789:" + "A" * 35,
-        "breadcrumbs": {"values": [{"data": {"SENTRY_DSN": "https://k@glitchtip/1"}}]},
+        "breadcrumbs": {"values": [{"data": {"SENTRY_DSN": "https://k@urgentry/1"}}]},
     }
     cleaned: Any = before_send(event, {})
     assert cleaned["extra"] == {
@@ -320,9 +320,7 @@ def test_before_send_transaction_scrubs_spans(monkeypatch: pytest.MonkeyPatch) -
     captured: dict[str, Any] = {}
     monkeypatch.setattr(sentry_sdk, "init", lambda **kw: captured.update(kw))
     monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a: None)
-    settings = Settings(
-        _env_file=None, observability={"sentry_dsn": "http://k@glitchtip-web:8000/1"}
-    )
+    settings = Settings(_env_file=None, observability={"sentry_dsn": "http://k@caddy:8081/1"})
     assert init_sentry(settings, component="test") is True
     hook = captured["before_send_transaction"]
     transaction: Any = {

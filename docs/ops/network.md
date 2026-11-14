@@ -3,7 +3,7 @@
 - **VPS 1** — основной стек (`docker-compose.yml`): PostgreSQL, Redis, RabbitMQ, MinIO,
   `master_bot`, `bot_worker`, `db_update`.
 - **VPS 2** — стек наблюдаемости (`docker-compose.obs.yml`): Loki, Prometheus,
-  Alertmanager, Grafana, GlitchTip, Caddy. Подробности — [observability.md](observability.md).
+  Alertmanager, Grafana, Tempo, urgentry, Caddy. Подробности — [observability.md](observability.md).
 
 Принцип: **наружу открыт только Caddy 80/443 на VPS 2** (и SSH), целиком за HTTP Basic Auth
 (`CADDY_MODE=ip` — `https://<VPS_IP>/` и `/grafana/`, самоподписанный сертификат, `curl -k -u`;
@@ -67,23 +67,37 @@ Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale u
 | Сервис | Хост по умолчанию | Доступ |
 |---|---|---|
 | Grafana | `127.0.0.1:${GRAFANA_PORT_HOST:-3000}` | через Caddy (HTTPS) |
-| GlitchTip web | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${GLITCHTIP_PORT_HOST:-8000}` | через Caddy (HTTPS); приём событий Sentry SDK с VPS 1 — через VPN |
+| urgentry UI (8080 в контейнере) | `127.0.0.1:${URGENTRY_PORT_HOST:-8000}` | через Caddy (HTTPS, корень `/`) |
+| urgentry ingest (Caddy :8081) | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${URGENTRY_INGEST_PORT_HOST:-8081}` | Sentry SDK с VPS 1 — только VPN; без Basic Auth |
+| Tempo OTLP gRPC / HTTP | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:4317` / `:4318` | Alloy VPS 1 — только VPN |
+| Tempo API | `127.0.0.1:${TEMPO_PORT_HOST:-3200}` | только Grafana/локально |
 | Loki | `127.0.0.1:${LOKI_PORT_HOST:-3100}` | VPS 1 (Alloy/push логов) — только через VPN |
 | Prometheus | `127.0.0.1:${PROMETHEUS_PORT_HOST:-9090}` | remote write / UI — только VPN или SSH-туннель |
 | Alertmanager | `127.0.0.1:${ALERTMANAGER_PORT_HOST:-9093}` | только локально (исходящие в Telegram) |
-| obs-postgres, obs-redis | не публикуются | внутренняя сеть compose |
 | **Caddy** | `${CADDY_BIND_ADDRESS:-0.0.0.0}:80`, `:443` | **публично**, Basic Auth на всё |
 | WireGuard | `0.0.0.0:51820/udp` | только с IP VPS 1 |
 
 Не публикуются в интернет ни при каких условиях: `/metrics` и `/health/*` приложения,
 Alloy, Loki push API, Prometheus (включая remote write endpoint), Alertmanager,
-PostgreSQL/Redis/RabbitMQ/MinIO. Caddy проксирует только Grafana и GlitchTip (за Basic Auth,
-без исключений для API; API GlitchTip / `sentry-cli` — через SSH на `127.0.0.1:8000`).
+PostgreSQL/Redis/RabbitMQ/MinIO. Caddy публично проксирует только Grafana и urgentry (за Basic Auth,
+без исключений для API); ingest-listener `:8081` — только на `OBS_INGEST_BIND_ADDRESS`.
+Alloy OTLP 4317/4318 на VPS 1 не публикуется (`expose`).
 
 Важно: Docker публикует порты через собственные цепочки iptables (`DOCKER`), в обход
 правил ufw. Поэтому защита строится в первую очередь на адресе публикации
 (`127.0.0.1`/VPN-IP), а firewall — второй рубеж; для публикаций на `0.0.0.0` ufw не
 поможет без правил в цепочке `DOCKER-USER`.
+
+### Два хоста (VPN): трассировка и ошибки
+
+- VPS 2 (`.env`): `OBS_INGEST_BIND_ADDRESS=<VPN IP VPS 2>` — на нём публикуются Loki,
+  Prometheus, Tempo 4317 (и 4318) и Caddy ingest 8081; `URGENTRY_INTERNAL_URL=http://<VPN IP VPS 2>:8081`
+  → obs-bootstrap пишет `SENTRY_DSN=http://<key>@<VPN IP VPS 2>:8081/1`.
+- VPS 1 (`.env`): `OBS_TEMPO_OTLP_ENDPOINT=<VPN IP VPS 2>:4317` (пусто — `make agent-config`/
+  `agent-up` завершаются ошибкой), `SENTRY_DSN` скопировать с VPS 2,
+  `OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy:4317` (приложение → локальный Alloy).
+- Firewall VPS 2: на `wg0` разрешить с VPN IP VPS 1 порты 3100, 9090, 4317, 8081 (см. ниже);
+  публично — только 80/443 и WireGuard.
 
 ## Firewall
 
@@ -98,7 +112,8 @@ sudo ufw allow 443/tcp
 sudo ufw allow from <публичный IP VPS 1> to any port 51820 proto udp
 sudo ufw allow in on wg0 from 10.10.0.1 to 10.10.0.2 port 3100 proto tcp   # Loki
 sudo ufw allow in on wg0 from 10.10.0.1 to 10.10.0.2 port 9090 proto tcp   # Prometheus remote write
-sudo ufw allow in on wg0 from 10.10.0.1 to 10.10.0.2 port 8000 proto tcp   # GlitchTip (Sentry SDK)
+sudo ufw allow in on wg0 from 10.10.0.1 to 10.10.0.2 port 8081 proto tcp   # urgentry ingest (Caddy :8081, Sentry SDK)
+sudo ufw allow in on wg0 from 10.10.0.1 to 10.10.0.2 port 4317 proto tcp   # Tempo OTLP gRPC (Alloy)
 sudo ufw enable
 ```
 

@@ -1,14 +1,14 @@
 # Стек наблюдаемости (docker-compose.obs.yml)
 
-Loki, Prometheus, Alertmanager (→ Telegram), Grafana, GlitchTip (web + worker + migrate,
-собственные PostgreSQL и Valkey), Caddy (reverse proxy + автоматический TLS).
+Loki, Prometheus, Alertmanager (→ Telegram), Grafana, Tempo (трейсы), urgentry (журнал ошибок,
+Sentry-совместимый; заменил GlitchTip), Caddy (reverse proxy + автоматический TLS), CrowdSec.
 Целевой хост — VPS 2; сейчас стек запускается на той же машине, что и основной
 `docker-compose.yml`.
 
 ## Запуск
 
 ```bash
-# переменные OBS_*, GRAFANA_*, GLITCHTIP_*, ALERT_* — см. .env.example (секция OBSERVABILITY STACK)
+# переменные OBS_*, GRAFANA_*, URGENTRY_*, TEMPO_*, ALERT_* — см. .env.example (секция OBSERVABILITY STACK)
 make obs-config            # docker compose config
 make obs-up                # make init-dirs + up -d --wait (все сервисы healthy)
 make obs-ps / obs-logs [SERVICE=grafana] / obs-down
@@ -29,23 +29,23 @@ test `tg_shop_platform_test_obs`; dev и test работают одноврем�
 метрики через порты хоста (на VPS 2 — через VPN). Prometheus видит хост как
 `host.docker.internal` (host-gateway) для скрейпа метрик приложения.
 Caddy публикуется на `${CADDY_BIND_ADDRESS:-0.0.0.0}:80/443` и закрывает **всё** HTTP Basic Auth
-(`OBS_AUTH_USER` / `OBS_AUTH_HASH`, без исключений; заголовок `Authorization` в Grafana/GlitchTip
+(`OBS_AUTH_USER` / `OBS_AUTH_HASH`, без исключений; заголовок `Authorization` в Grafana/urgentry
 не передаётся).
 
 ## Доступ через Caddy (`CADDY_MODE`)
 
 | Режим | Адреса | TLS |
 |---|---|---|
-| `ip` (в `.env.example`) | `https://<VPS_IP>/` — GlitchTip, `https://<VPS_IP>/grafana/` — Grafana | `tls internal` (самоподписанный: предупреждение браузера, `curl -k`) |
-| `domain` | `https://<GRAFANA_DOMAIN>/`, `https://<GLITCHTIP_DOMAIN>/` (можно `grafana.<ip>.nip.io`) | Let's Encrypt, `*.localhost` — внутренний CA |
+| `ip` (в `.env.example`) | `https://<VPS_IP>/` — urgentry (под-путь не поддерживается), `https://<VPS_IP>/grafana/` — Grafana | `tls internal` (самоподписанный: предупреждение браузера, `curl -k`) |
+| `domain` | `https://<GRAFANA_DOMAIN>/`, `https://<URGENTRY_DOMAIN>/` (можно `grafana.<ip>.nip.io`) | Let's Encrypt, `*.localhost` — внутренний CA |
 
 http → https редиректит сам Caddy, **но на стандартный порт 443**: при нестандартном
 `CADDY_HTTPS_PORT_HOST` (test-стек: 20443) редирект с `http://host:<CADDY_HTTP_PORT_HOST>/` ведёт на
 `https://host/` и не работает — открывайте сразу `https://host:<CADDY_HTTPS_PORT_HOST>/`. На
-прод-портах 80/443 ограничения нет; ROOT_URL Grafana и `GLITCHTIP_DOMAIN` содержат порт и не
+прод-портах 80/443 ограничения нет; ROOT_URL Grafana и `URGENTRY_DOMAIN` содержат порт и не
 затронуты. Конфиги: `ops/observability/caddy/Caddyfile.ip` / `.domain`
 (монтируется `Caddyfile.${CADDY_MODE}`). `GF_SERVER_ROOT_URL`, `GF_SERVER_SERVE_FROM_SUB_PATH` и
-`GLITCHTIP_DOMAIN` вычисляются из `CADDY_MODE` скриптом `ops/scripts/obs_mode.sh` во всех целях
+`URGENTRY_DOMAIN` вычисляются из `CADDY_MODE` скриптом `ops/scripts/obs_mode.sh` во всех целях
 `make obs-*`; `make obs-up`/`obs-config` дополнительно проверяют `VPS_IP` (ip) или домены (domain)
 и наличие `OBS_AUTH_*`. `CADDY_MODE` обязателен для всех obs-целей, кроме `obs-down`/`obs-ps`/
 `obs-logs` (старый `.env` без него не переводится молча в режим `ip`). При прямом
@@ -59,15 +59,15 @@ Prometheus скрейпит Grafana по пути, зависящему от р�
 ### Обновление существующего .env
 
 `.env`, созданный до Basic Auth: добавьте `CADDY_MODE` (`domain` — если доступ уже был по
-`GRAFANA_DOMAIN`/`GLITCHTIP_DOMAIN`; `ip` + `VPS_IP`), `OBS_AUTH_USER=admin`, `OBS_AUTH_HASH=`,
-затем `make obs-auth` и `make obs-up`. `SENTRY_DSN` с публичным хостом (`glitchtip.localhost`,
+`GRAFANA_DOMAIN`/`URGENTRY_DOMAIN`; `ip` + `VPS_IP`), `OBS_AUTH_USER=admin`, `OBS_AUTH_HASH=`,
+затем `make obs-auth` и `make obs-up`. `SENTRY_DSN` с публичным хостом (`urgentry.localhost`,
 домен) теперь отвергается при старте приложения — очистите его и выполните `make obs-bootstrap`.
 
 Учётные данные: `make env` создаёт `OBS_AUTH_USER=admin` и случайный пароль (показывается один
 раз; без docker — предупреждение), `make obs-auth` задаёт новый пароль (интерактивно; пустой ответ —
 сгенерировать; `PASSWORD_STDIN=1` — из stdin) и пересоздаёт запущенный caddy. В `.env` хранится только
 `OBS_AUTH_HASH` = base64 bcrypt-хеша (`$` в `.env` недопустим; `basic_auth` Caddy 2.10 принимает
-base64-хеш напрямую). Вход: Basic Auth → затем логин Grafana/GlitchTip.
+base64-хеш напрямую). Вход: Basic Auth → затем логин Grafana/urgentry.
 
 ## Порты (dev / test)
 
@@ -77,16 +77,18 @@ base64-хеш напрямую). Вход: Basic Auth → затем логин 
 | Loki         | `LOKI_PORT_HOST`         | 3100 | 23100 |
 | Prometheus   | `PROMETHEUS_PORT_HOST`   | 9090 | 29090 |
 | Alertmanager | `ALERTMANAGER_PORT_HOST` | 9093 | 29093 |
-| GlitchTip    | `GLITCHTIP_PORT_HOST`    | 8000 | 28000 |
+| urgentry UI  | `URGENTRY_PORT_HOST`     | 8000 | 28000 |
+| urgentry ingest (Caddy :8081) | `URGENTRY_INGEST_PORT_HOST` | 8081 | 28081 |
+| Tempo OTLP gRPC / HTTP | `TEMPO_OTLP_GRPC_PORT_HOST` / `TEMPO_OTLP_HTTP_PORT_HOST` | 4317 / 4318 | 24317 / 24318 |
+| Tempo API    | `TEMPO_PORT_HOST`        | 3200 | 23200 |
 | Caddy HTTP   | `CADDY_HTTP_PORT_HOST`   | 80   | 20080 |
-| Caddy HTTPS  | `CADDY_HTTPS_PORT_HOST`  | 443  | 20443 |
-
-## Каталоги данных (только bind)
-
-`OBS_POSTGRES_DATA_DIR`, `OBS_REDIS_DATA_DIR`, `OBS_GRAFANA_DATA_DIR`,
+`OBS_URGENTRY_DATA_DIR`, `OBS_TEMPO_DATA_DIR`, `OBS_GRAFANA_DATA_DIR`,
 `OBS_PROMETHEUS_DATA_DIR`, `OBS_LOKI_DATA_DIR`, `OBS_ALERTMANAGER_DATA_DIR`,
 `OBS_CADDY_DATA_DIR` — создаются `make init-dirs`.
 Grafana/Prometheus/Loki/Alertmanager запущены с `user: APP_UID:APP_GID`, поэтому их
+каталоги принадлежат пользователю хоста. Каталог urgentry принадлежит uid 10001 (пользователь
+образа), Caddy стартует от root и сам выставляет владельца.
+`PROJECT_DATA_DIR` должен быть доступен на запись `APP_UID` (см. `.env.example`).
 каталоги принадлежат пользователю хоста (chown не нужен). PostgreSQL/Valkey/Caddy стартуют
 от root и сами выставляют владельца своих каталогов (как postgres/redis в основном стеке).
 `PROJECT_DATA_DIR` должен быть доступен на запись `APP_UID` (см. `.env.example`).
@@ -94,7 +96,7 @@ Grafana/Prometheus/Loki/Alertmanager запущены с `user: APP_UID:APP_GID`
 ## Retention
 
 Prometheus `--storage.tsdb.retention.time=30d` (`PROMETHEUS_RETENTION`),
-Loki `retention_period: 720h` (compactor), GlitchTip `GLITCHTIP_MAX_EVENT_LIFE_DAYS=30`,
+Loki `retention_period: 720h` (compactor), Tempo `block_retention: 720h`,
 Alertmanager silences/notifications `720h`.
 
 ## Доступ локально
@@ -104,54 +106,83 @@ Alertmanager silences/notifications `720h`.
 - Grafana: `https://127.0.0.1/grafana/` через Caddy (Basic Auth, затем `GRAFANA_ADMIN_USER` /
   `GRAFANA_ADMIN_PASSWORD`) или напрямую http://127.0.0.1:3000/grafana/ (в режиме `domain` —
   http://127.0.0.1:3000/). Источники Prometheus, Loki, Alertmanager подключены через provisioning.
-- GlitchTip UI: `https://127.0.0.1/` через Caddy (Basic Auth, затем `GLITCHTIP_ADMIN_EMAIL` /
-  `GLITCHTIP_ADMIN_PASSWORD` из `.env`, см. «GlitchTip bootstrap»); регистрация выключена.
-  Порт `127.0.0.1:${GLITCHTIP_PORT_HOST}` — для приёма событий, `/_health/` и API на сервере
-  (ссылки UI строятся от `GLITCHTIP_DOMAIN` = публичный адрес Caddy).
-- Проверка: `curl -k -u admin:<пароль Basic Auth> https://127.0.0.1/grafana/api/health`,
-  `curl http://127.0.0.1:8000/_health/`; без `-u` Caddy отвечает 401.
-- API GlitchTip / `sentry-cli` — только на сервере через SSH, мимо Caddy (Authorization не
-  проксируется): `docker run --rm --network host -e SENTRY_URL=http://127.0.0.1:8000
-  -e SENTRY_AUTH_TOKEN=... getsentry/sentry-cli releases list --org tgshopplatform`.
+- urgentry UI: `https://127.0.0.1/` через Caddy (Basic Auth, затем `URGENTRY_BOOTSTRAP_EMAIL` /
+  `URGENTRY_BOOTSTRAP_PASSWORD` из `.env`). urgentry под-путь не поддерживает, поэтому в режиме
+  `ip` занимает корень `/`, Grafana — `/grafana/`.
+- Проверка: `curl -k -u admin:<пароль Basic Auth> https://127.0.0.1/grafana/api/health`;
+  без `-u` Caddy отвечает 401. urgentry: `/healthz` (healthcheck контейнера).
+- API urgentry — на сервере по PAT (`Authorization: Bearer $URGENTRY_BOOTSTRAP_PAT`), мимо Caddy.
 
-## GlitchTip bootstrap
 
-Администратор, организация, команда, проект и ключ проекта создаются автоматически из `.env`
-разовым сервисом `glitchtip-bootstrap` (профиль `bootstrap` в `docker-compose.obs.yml`,
-скрипт `ops/observability/glitchtip/bootstrap.py`, запуск
-`./manage.py shell -c "exec(open('/bootstrap/bootstrap.py').read())"` после `glitchtip-migrate`).
+## urgentry (журнал ошибок) и bootstrap
+
+urgentry v0.2.11 (Sentry-совместимый, лицензия FSL-1.1) заменил GlitchTip: один контейнер,
+SQLite в `OBS_URGENTRY_DATA_DIR` (`/data`, владелец uid 10001), порт 8080, проверка `/healthz`.
+Образ собирается из исходников: `ops/observability/urgentry/Dockerfile` (build-arg
+`GOPROXY`/`GOSUMDB` — `URGENTRY_BUILD_GOPROXY`/`URGENTRY_BUILD_GOSUMDB`, базовые образы tag+digest).
 
 | Переменная | Значение |
 |---|---|
-| `GLITCHTIP_ADMIN_EMAIL` | e-mail суперпользователя (e-mail отмечается подтверждённым в allauth) |
-| `GLITCHTIP_ADMIN_PASSWORD` | пусто → генерируется (`openssl rand -hex 24`) и записывается в `.env` |
-| `GLITCHTIP_ORG_SLUG` / `GLITCHTIP_ORG_NAME` | организация (`tgshopplatform` / `TgShopPlatform`) |
-| `GLITCHTIP_TEAM_SLUG` | команда (`platform`) |
-| `GLITCHTIP_PROJECT_NAME` / `GLITCHTIP_PROJECT_PLATFORM` | проект (`tg-shop-platform` / `python`) |
-| `GLITCHTIP_PROJECT_PUBLIC_KEY` | public key DSN (UUID4); пусто → генерируется |
-| `GLITCHTIP_INTERNAL_URL` | адрес GlitchTip из контейнеров приложения (`http://glitchtip-web:8000`) |
-| `SENTRY_DSN` | вычисляется: `<схема>://<public_key hex>@<хост GLITCHTIP_INTERNAL_URL>/<project_id>` |
+| `URGENTRY_BOOTSTRAP_EMAIL` | e-mail администратора |
+| `URGENTRY_BOOTSTRAP_PASSWORD` | пусто → генерируется (hex) и записывается в `.env` |
+| `URGENTRY_BOOTSTRAP_PAT` | personal access token (hex), пусто → генерируется; по нему obs-bootstrap читает ключ DSN через API |
+| `URGENTRY_INTERNAL_URL` | адрес ingest из контейнеров приложения: `http://caddy:8081` (один хост) / `http://<VPN IP VPS 2>:8081` |
+| `SENTRY_DSN` | вычисляется: `http://<key>@<хост URGENTRY_INTERNAL_URL>/1` |
 
-- `make obs-bootstrap` (вызывается из `make obs-up`): дописывает недостающие/пустые переменные
-  GlitchTip и `SENTRY_DSN` в `ENV_FILE` (остальные строки, порядок и комментарии не меняются;
-  перед изменением — копия `ENV_FILE.bak`), запускает bootstrap, пишет `SENTRY_DSN`.
-  Идемпотентно: повторный запуск ничего не дублирует, пароль существующего пользователя не
-  меняет. Для `PROJECT_ENVIRONMENT=test` (`.env.test`) `SENTRY_DSN` не пишется — тестовое
-  приложение ошибки не отправляет; `make env-test` генерирует свои пароль и UUID.
-- DSN: `grep ^SENTRY_DSN= .env`. Применить: пересоздать ботов — `make agent-up` с
-  `ALLOY_SINGLE_HOST=1` (overlay `ops/observability/alloy/compose.single-host.yml` подключает
-  `master_bot`/`bot_worker` к сети `${PROJECT_NAME}_obs_default`, где резолвится `glitchtip-web`).
-  DSN из UI GlitchTip содержит публичный адрес и из контейнеров не подходит.
-- Публичный DSN запрещён: хост `SENTRY_DSN` (валидатор `ObservabilitySettings`, ошибка при
-  запуске) и `GLITCHTIP_INTERNAL_URL` (`ops/scripts/check_internal_url.sh` в obs-bootstrap)
-  — только IP из 10/8, 172.16/12, 192.168/16, 127/8, 100.64/10, `::1`, `fc00::/7` или имя
-  без точки (`glitchtip-web`, `localhost`).
-- Вход: UI (см. «Доступ локально») или API allauth
-  `POST /_allauth/browser/v1/auth/login` `{"email": ..., "password": ...}`.
-- Сброс (разово, **удаляет все данные GlitchTip**: пользователей, проекты, события):
-  `make obs-glitchtip-reset CONFIRM=1` — останавливает только glitchtip-сервисы, пересоздаёт БД
-  `OBS_POSTGRES_DB` в obs-postgres (`DROP DATABASE ... WITH (FORCE)` + `CREATE DATABASE`),
-  прогоняет `glitchtip-migrate` и bootstrap. Без `CONFIRM=1` — отказ.
+- `make obs-bootstrap` (вызывается из `make obs-up`) дописывает пустые `URGENTRY_BOOTSTRAP_*` и
+  `SENTRY_DSN` в `ENV_FILE` (копия `ENV_FILE.bak`), идемпотентно. Для `PROJECT_ENVIRONMENT=test`
+  `SENTRY_DSN` не пишется.
+- **DSN и числовой project id.** `sentry_sdk` требует числовой id проекта, urgentry работает со
+  slug. Внутренний listener Caddy `:8081` переписывает `/api/1/*` → `/api/default-project/*`
+  и проксирует в `urgentry:8080`; без Basic Auth и без access-log, публикуется только на
+  `${OBS_INGEST_BIND_ADDRESS}:${URGENTRY_INGEST_PORT_HOST:-8081}`. Ограничение: id `1`
+  жёстко привязан к одному проекту `default-project`.
+- Публичный DSN запрещён: хост `SENTRY_DSN` (валидатор `ObservabilitySettings`) и
+  `URGENTRY_INTERNAL_URL` (`ops/scripts/check_internal_url.sh`) — только приватный IP или имя
+  Docker-сервиса без точки (`caddy`, `localhost`).
+- Применить DSN: `make agent-up` (с `ALLOY_SINGLE_HOST=1` overlay
+  `ops/observability/alloy/compose.single-host.yml` подключает ботов к сети obs-стека, где
+  резолвится `caddy`).
+- urgentry имеет недокументированный OTLP-эндпоинт (только JSON) — **не используется**: трейсы
+  идут в Tempo (см. ниже).
+
+## Трассировка: OpenTelemetry → Alloy → Tempo
+
+Решение: ошибки — `sentry_sdk` → urgentry; трейсы — OTel SDK → Alloy → Tempo, без дублирования в
+urgentry; в событии Sentry есть `contexts.trace` (trace_id из OTel).
+
+- **Приложение** (`app/core/telemetry.py`): OTLP gRPC на `OTEL_EXPORTER_OTLP_ENDPOINT`
+  (`http://alloy:4317`), `BatchSpanProcessor` (неблокирующий), `ScrubbingSpanExporter`
+  маскирует секреты в атрибутах спанов (правила `app/core/observability/sentry.py`).
+  SQLAlchemy инструментирован глобально; FastStream — `RabbitTelemetryMiddleware` (W3C
+  `traceparent` в заголовках RabbitMQ; при выключенном OTel trace_id переносит
+  `TraceIdFallbackMiddleware`); корневой span на апдейт Telegram — `AiogramTracingMiddleware`
+  (своей OTel-инструментации у aiogram нет). Health-пробы — под `suppress_instrumentation`,
+  aiohttp health не трассируется. structlog пишет `trace_id`/`span_id`. Sentry:
+  `traces_sample_rate=None`, `trace_propagation_targets=[]`.
+- **Переменные:** `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SDK_DISABLED`, `OTEL_SERVICE_NAME`
+  (пусто — имя компонента), `OTEL_TRACES_SAMPLER_ARG` (доля 0..1; старые имена
+  `OTEL_TRACES_SAMPLER_RATIO`/`OTEL_SAMPLE_RATIO` — алиасы). **Отключить трейсинг:**
+  `OTEL_SDK_DISABLED=true` или пустой `OTEL_EXPORTER_OTLP_ENDPOINT` (логи сохраняют `trace_id`).
+- **Alloy** (`ops/observability/alloy/config.alloy`): `otelcol.receiver.otlp` (4317/4318, только
+  `expose`, наружу не публикуется) → `memory_limiter` → `batch` →
+  `otelcol.exporter.otlp "tempo"` (`OBS_TEMPO_OTLP_ENDPOINT`: `tempo:4317` на одном хосте,
+  `<VPN IP VPS 2>:4317` на двух). Пустой endpoint — экспортёр не стартует; `make agent-config`/
+  `make agent-up` проверяют его заранее (`agent_tempo_guard`, rc≠0 с понятной ошибкой).
+- **Tempo** `grafana/tempo:3.1.1@sha256:64e2fbd5…` (`TEMPO_IMAGE`), данные в
+  `OBS_TEMPO_DATA_DIR`, retention `backend_worker.compaction.block_retention: 720h`, проверка
+  конфига `-config.verify=true` в `make obs-validate`. Metrics-generator (span-metrics,
+  service-graphs) → remote_write в Prometheus: `traces_spanmetrics_calls_total`,
+  `traces_spanmetrics_latency_bucket`, `traces_service_graph_request_total`,
+  `traces_service_graph_request_failed_total` (лейблы `service`, `span_name`, `span_kind`,
+  `status_code`). Алерт `TempoDown`.
+- **Grafana:** источник Tempo (uid `tempo`), Loki derivedFields по structured metadata `trace_id`
+  (`matcherType: label`), tracesToLogsV2 (трейс → логи), дашборд `tracing-red` (RED по
+  span-metrics). Панель Service map (`queryType: serviceMap`) Grafana строит на фронтенде
+  запросами к Prometheus: через `/api/ds/query` она отдаёт 500 — проверять в браузере.
+- Ограничения: сквозной трейс Telegram-апдейт → bot_worker пока не проверен (боты — веха II);
+  A-NIT-8 отложен в веху II.
+- Демо и смоук: `make otel-smoke` (см. `docs/reports/milestone-I-demo.md`).
 
 ## Алерты
 

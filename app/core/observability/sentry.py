@@ -1,4 +1,4 @@
-"""Sentry SDK (GlitchTip-compatible) initialisation with secret scrubbing.
+"""Sentry SDK (urgentry, Sentry-compatible) initialisation with secret scrubbing.
 
 Logging integration: structlog renders through the stdlib root logger, so Sentry's default
 ``LoggingIntegration`` sees every record exactly once; records ``>= ERROR`` become events,

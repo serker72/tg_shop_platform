@@ -255,7 +255,7 @@ def test_build_info_metric() -> None:
 def _settings(**obs: Any) -> Settings:
     observability = ObservabilitySettings(
         _env_file=None,  # type: ignore[call-arg]
-        sentry_dsn=SecretStr("http://public@glitchtip-web:8000/1"),
+        sentry_dsn=SecretStr("http://public@caddy:8081/1"),
         **obs,
     )
     return cast(Settings, SimpleNamespace(observability=observability, project_environment="dev"))

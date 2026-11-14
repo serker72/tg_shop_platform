@@ -15,7 +15,7 @@
 - **DI**: Dishka. **Конфигурация**: pydantic-settings. **Логи**: structlog.
 - **Шифрование секретов**: Fernet (`cryptography`).
 - **Наблюдаемость**: агент Grafana Alloy → Loki (логи) и Prometheus (метрики) → Grafana,
-  Alertmanager → Telegram; ошибки уходят в GlitchTip (Sentry SDK).
+  Alertmanager → Telegram; ошибки уходят в urgentry (Sentry SDK), трейсы — OpenTelemetry → Alloy → Tempo.
   Подробнее — [docs/ops/observability.md](docs/ops/observability.md).
 
 ## Требования
@@ -60,10 +60,10 @@
    `OBS_AUTH_HASH`; без docker хеш останется пустым — выполните `make obs-auth`; новый пароль —
    тоже `make obs-auth`). После этого заполните вручную: `MASTER_BOT_TOKEN` (обязательно), а также
    `ALERT_TELEGRAM_BOT_TOKEN` / `ALERT_TELEGRAM_CHAT_ID`, режим доступа к мониторингу
-   (`CADDY_MODE=ip` + `VPS_IP` — `https://<VPS_IP>/` GlitchTip и `https://<VPS_IP>/grafana/`,
+   (`CADDY_MODE=ip` + `VPS_IP` — `https://<VPS_IP>/` urgentry и `https://<VPS_IP>/grafana/`,
    самоподписанный сертификат, браузер покажет предупреждение; или `CADDY_MODE=domain` +
-   `GRAFANA_DOMAIN` / `GLITCHTIP_DOMAIN` с Let's Encrypt, подойдёт `grafana.<ip>.nip.io`) и URL
-   для Alloy (см. ниже). Вход: Basic Auth → затем логин Grafana/GlitchTip. Для локальной
+   `GRAFANA_DOMAIN` / `URGENTRY_DOMAIN` с Let's Encrypt, подойдёт `grafana.<ip>.nip.io`) и URL
+   для Alloy (см. ниже). Вход: Basic Auth → затем логин Grafana/urgentry. Для локальной
    разработки поставьте `PROJECT_ENVIRONMENT=loc` и `VPS_IP=127.0.0.1`.
 
    > ⚠️ Пароль Basic Auth печатается **один раз** (блок `SAVE THIS PASSWORD`). Если `.env` создан
@@ -80,13 +80,13 @@
    **Обновление существующего .env** (созданного до появления Basic Auth в Caddy): допишите
    переменные из `.env.example`, иначе `make obs-up` / `make obs-config` / `make obs-auth`
    откажутся работать (молчаливого перехода на режим `ip` нет):
-   - `CADDY_MODE=domain` — если мониторинг уже открывался по `GRAFANA_DOMAIN` / `GLITCHTIP_DOMAIN`
+   - `CADDY_MODE=domain` — если мониторинг уже открывался по `GRAFANA_DOMAIN` / `URGENTRY_DOMAIN`
      (оставьте их), или `CADDY_MODE=ip` + `VPS_IP=<публичный IP VPS 2>`;
    - `OBS_AUTH_USER=admin` и пустой `OBS_AUTH_HASH=`, затем `make obs-auth` (пароль показывается
      один раз) и `make obs-up`;
-   - `SENTRY_DSN` с публичным хостом (например `glitchtip.localhost` или домен из UI GlitchTip)
+   - `SENTRY_DSN` с публичным хостом (например `urgentry.localhost` или публичный домен)
      теперь отвергается при запуске приложения: очистите его и выполните `make obs-bootstrap`
-     (DSN строится из `GLITCHTIP_INTERNAL_URL`, только приватный IP или имя Docker-сервиса).
+     (DSN строится из `URGENTRY_INTERNAL_URL`, только приватный IP или имя Docker-сервиса).
    - `CROWDSEC_BOUNCER_KEY=<вывод openssl rand -hex 32>`, `OBS_CADDY_LOGS_DIR`, `OBS_CROWDSEC_DATA_DIR`
      (см. `.env.example`) — **до** любых obs-команд (иначе падают даже `make obs-down`/`obs-ps`),
      затем `make init-dirs && make obs-up`. `make env FORCE=1` здесь не используйте — он
@@ -101,13 +101,13 @@
 4. **Stage/prod на двух серверах** (VPS 1 — приложение, VPS 2 — наблюдаемость; сеть между
    ними — VPN, см. [docs/ops/network.md](docs/ops/network.md)):
    - VPS 2: **до** `make obs-up` укажите в `.env` `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>`
-     (на этом адресе публикуются Loki, Prometheus и GlitchTip),
-     `GLITCHTIP_INTERNAL_URL=http://<VPN-IP VPS 2>:8000` (только приватный адрес: публичный
+     (на этом адресе публикуются Loki, Prometheus, Tempo 4317 и ingest urgentry 8081),
+     `URGENTRY_INTERNAL_URL=http://<VPN-IP VPS 2>:8081` (только приватный адрес: публичный
      DSN запрещён и приложение с ним не стартует), `CADDY_MODE` и `VPS_IP`/домены. Затем `make obs-up`:
-     поднимется стек наблюдаемости, в GlitchTip будет создан проект, а в `.env` запишется
-     `SENTRY_DSN` с хостом из `GLITCHTIP_INTERNAL_URL`.
+     поднимется стек наблюдаемости, в urgentry будет создан администратор, а в `.env` запишется
+     `SENTRY_DSN` с хостом из `URGENTRY_INTERNAL_URL`.
    - VPS 1: `ALLOY_SINGLE_HOST=0` (значение по умолчанию). В `OBS_LOKI_PUSH_URL` и
-     `OBS_PROMETHEUS_REMOTE_WRITE_URL` укажите VPN-IP VPS 2 и выполните `make agent-up`:
+     `OBS_PROMETHEUS_REMOTE_WRITE_URL` и `OBS_TEMPO_OTLP_ENDPOINT=<VPN-IP VPS 2>:4317` укажите VPN-IP VPS 2 и выполните `make agent-up`:
      поднимется основной стек и Alloy, после чего команда дождётся готовности ботов.
      Если нужна отправка ошибок, скопируйте `SENTRY_DSN` из `.env` VPS 2 в `.env` VPS 1
      (можно и позже) и повторите `make agent-up`.
@@ -118,9 +118,9 @@
    `http://loki:3100/loki/api/v1/push` и `http://prometheus:9090/api/v1/write` (закомментированы
    в `.env.example`). Затем сначала `make obs-up`, потом `make agent-up`: Alloy подключается
    к сети obs-стека, поэтому она должна уже существовать. Приложение шлёт ошибки на
-   `glitchtip-web:8000` через Docker-сеть. API GlitchTip / `sentry-cli` — только на сервере
-   через SSH: `docker run --rm --network host -e SENTRY_URL=http://127.0.0.1:8000
-   -e SENTRY_AUTH_TOKEN=... getsentry/sentry-cli ...` (на двух серверах — по VPN).
+   `caddy:8081` (внутренний ingest → urgentry), трейсы — на `alloy:4317` → `tempo:4317`
+   (`OBS_TEMPO_OTLP_ENDPOINT=tempo:4317`). Отключить трейсинг: `OTEL_SDK_DISABLED=true`.
+   Проверка цепочки: `make otel-smoke`.
 
 6. **Локальная разработка**: в `.env` поставьте `PROJECT_ENVIRONMENT=loc` и
    `PROJECT_DATA_DIR` в домашнем каталоге (например `/home/<user>/tg_shop_platform_data`;

@@ -302,7 +302,7 @@ class LogsSettings(BaseSettings):
     file_max_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
 
 
-# Networks where GlitchTip may live (SENTRY_DSN host); the same list is in
+# Networks where urgentry may live (SENTRY_DSN host); the same list is in
 # ops/scripts/check_internal_url.sh. Explicit on purpose: ``ip_address.is_private`` also
 # covers other special ranges (169.254/16, 2001:db8::/32, ...) and changes between Pythons.
 _INTERNAL_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = tuple(
@@ -352,7 +352,7 @@ def _is_service_name(host: str) -> bool:
 
 
 class ObservabilitySettings(BaseSettings):
-    """Health/metrics HTTP server and Sentry (GlitchTip) error reporting.
+    """Health/metrics HTTP server and Sentry (urgentry) error reporting.
 
     HTTP server: ``OBSERVABILITY_HTTP_HOST`` / ``OBSERVABILITY_HTTP_PORT``, per-check
     timeout ``OBSERVABILITY_HEALTH_TIMEOUT_SECONDS``, heartbeat TTL
@@ -394,7 +394,7 @@ class ObservabilitySettings(BaseSettings):
     @field_validator("sentry_dsn", mode="after")
     @classmethod
     def _sentry_dsn_internal_only(cls, value: SecretStr | None) -> SecretStr | None:
-        """GlitchTip is reachable only inside Docker/VPN: a public DSN host fails startup."""
+        """urgentry is reachable only inside Docker/VPN: a public DSN host fails startup."""
         if value is None:
             return None
         parts = urlsplit(value.get_secret_value().strip())
@@ -405,9 +405,9 @@ class ObservabilitySettings(BaseSettings):
             host = ""
         if parts.scheme not in ("http", "https") or not is_internal_host(host):
             msg = (
-                f"SENTRY_DSN must point to an internal GlitchTip address, got host {host!r}: "
+                f"SENTRY_DSN must point to an internal urgentry address, got host {host!r}: "
                 "use a private IP (10/8, 172.16/12, 192.168/16, 127/8, 100.64/10, ::1, fc00::/7) "
-                "or a Docker service name without dots (http://<key>@glitchtip-web:8000/<id>)"
+                "or a Docker service name without dots (http://<key>@caddy:8081/<id>)"
             )
             raise ValueError(msg)
         return value
