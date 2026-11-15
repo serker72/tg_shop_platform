@@ -229,7 +229,9 @@ async def test_click_log_failure_does_not_break_update() -> None:
 def test_menu_sections_by_permissions() -> None:
     assert all(visible_sections(SUPER).values())
     viewer = visible_sections(VIEWER)
-    assert viewer["staff"] and viewer["logs"] and not viewer["roles"] and not viewer["settings"]
+    # users.view is about shop customers: it opens logs, not the staff section.
+    assert not viewer["staff"] and viewer["logs"]
+    assert not viewer["roles"] and not viewer["settings"]
     moderator = visible_sections(PermissionSnapshot(user_id=uuid4(), tenants=frozenset({uuid4()})))
     assert moderator["shops"] and moderator["bots"] and not moderator["staff"]
 

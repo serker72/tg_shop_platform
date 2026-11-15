@@ -198,6 +198,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: Telegram ids (users, chats) are stored in PostgreSQL ``bigint``.
+_BIGINT_MAX: Final = 2**63
+
+
 class _NoChange(Exception):  # noqa: N818 - internal control-flow signal
     """The requested state already holds: commit the read, skip audit and invalidation."""
 
@@ -228,8 +232,10 @@ def validate_role_slug(slug: str) -> str:
 def validate_telegram_user_id(telegram_user_id: int) -> int:
     if isinstance(telegram_user_id, bool) or not isinstance(telegram_user_id, int):
         raise ValidationError("telegram_user_id must be int", code=INVALID_TELEGRAM_USER_ID)
-    if telegram_user_id <= 0:
-        raise ValidationError("telegram_user_id must be positive", code=INVALID_TELEGRAM_USER_ID)
+    if not 0 < telegram_user_id < _BIGINT_MAX:
+        raise ValidationError(
+            "telegram_user_id must be a positive bigint", code=INVALID_TELEGRAM_USER_ID
+        )
     return telegram_user_id
 
 
@@ -299,7 +305,12 @@ def validate_tenant_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
         if kind == "bool":
             ok = isinstance(value, bool)
         elif kind == "chat":
-            ok = value is None or (isinstance(value, int) and not isinstance(value, bool))
+            ok = value is None or (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value != 0
+                and -_BIGINT_MAX < value < _BIGINT_MAX
+            )
         else:
             ok = value is None or (isinstance(value, str) and bool(value))
         if not ok:

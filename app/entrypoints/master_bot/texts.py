@@ -19,6 +19,10 @@ class Texts:
         return _("Панель управления платформой")
 
     @staticmethod
+    def no_access() -> str:
+        return _("Нет доступа.")
+
+    @staticmethod
     def section_soon() -> str:
         return _("Раздел в разработке")
 

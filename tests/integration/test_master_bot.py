@@ -166,7 +166,7 @@ def _manager(request: AsyncContainer, actor: int) -> Any:
     )
 
 
-@pytest.mark.req("R-II.4", "S-II.3")
+@pytest.mark.req("R-II.4")
 async def test_dialog_creates_tenant_real_db(
     container: AsyncContainer, clean_db: AsyncEngine, redis_client: Any
 ) -> None:

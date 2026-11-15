@@ -2,10 +2,13 @@
 
 Services and read queries are fakes resolved through a stub Dishka container put into the
 middleware data under ``CONTAINER_NAME`` (what ``setup_dishka`` does in production).
+Forged callbacks (hidden buttons, foreign item ids) are sent by rewriting the
+``callback_data`` of a rendered button: aiogram-dialog checks ``when`` only at render time.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 from aiogram import Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardButton, Message
 from aiogram_dialog import setup_dialogs
 from aiogram_dialog.test_tools import BotClient, MockMessageManager
 from aiogram_dialog.test_tools.keyboard import InlineButtonTextLocator
@@ -25,105 +29,94 @@ from app.modules.iam.admin_service import (
     AccessAdminService,
     TenantAdminService,
     UserAdminService,
+    validate_telegram_user_id,
+    validate_tenant_settings,
 )
-from app.modules.iam.permissions import USERS_VIEW
-from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME, error_text
+from app.modules.iam.permissions import MODERATORS_MANAGE, USERS_VIEW
+from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME, error_text, short
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
-from app.modules.iam.presentation.tg_master.tenants import parse_chat_id, parse_slug
+from app.modules.iam.presentation.tg_master.tenants import parse_chat_id, parse_name, parse_slug
 from app.modules.iam.snapshot import PermissionSnapshot
-from app.shared_kernel.domain.exceptions import DomainError
+from app.shared_kernel.domain.exceptions import DomainError, ValidationError
 
-pytestmark = pytest.mark.req("R-II.4", "S-II.3")
+R4 = pytest.mark.req("R-II.4")
+SCENARIO = pytest.mark.req("R-II.4", "S-II.3")
 
 ACTOR = 501
 SUPER = PermissionSnapshot(user_id=uuid4(), is_superuser=True)
 VIEWER = PermissionSnapshot(user_id=uuid4(), role_permissions={USERS_VIEW: frozenset({"r"})})
 
 
-def _tenant(name: str, slug: str) -> SimpleNamespace:
-    return SimpleNamespace(id=uuid4(), name=name, slug=slug, is_active=True, is_deleted=False)
+def _tenant(name: str, slug: str, *, deleted: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(id=uuid4(), name=name, slug=slug, is_active=True, is_deleted=deleted)
 
 
-def _settings() -> SimpleNamespace:
-    values = {k: (False if kind == "bool" else None) for k, kind in TENANT_SETTINGS_FIELDS.items()}
-    return SimpleNamespace(**values)
-
-
-def _user(telegram_user_id: int) -> SimpleNamespace:
+def _user(telegram_user_id: int, *, deleted: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         telegram_user_id=telegram_user_id,
         telegram_user_name=None,
         is_active=True,
-        is_deleted=False,
+        is_deleted=deleted,
         is_superuser=False,
     )
 
 
-class FakeTenants:
-    def __init__(self, store: dict[UUID, SimpleNamespace], visible: list[SimpleNamespace]) -> None:
-        self.store, self.visible = store, visible
-        self.cache_invalidated = True
+class Recorder:
+    """Fake admin service: records calls, optional per-method handler or error."""
+
+    def __init__(self, **handlers: Callable[..., Any]) -> None:
+        self.handlers = handlers
+        self.errors: dict[str, DomainError] = {}
         self.calls: list[tuple[Any, ...]] = []
-        self.error: DomainError | None = None
-
-    async def list_tenants(self, actor: int) -> list[SimpleNamespace]:
-        self.calls.append(("list", actor))
-        return self.visible
-
-    async def create(self, actor: int, *, name: str, slug: str) -> SimpleNamespace:
-        self.calls.append(("create", actor, name, slug))
-        if self.error is not None:
-            raise self.error
-        tenant = _tenant(name, slug)
-        self.store[tenant.id] = tenant
-        return tenant
-
-    async def deactivate(self, actor: int, tenant_id: UUID) -> SimpleNamespace:
-        self.calls.append(("deactivate", actor, tenant_id))
-        self.cache_invalidated = False
-        self.store[tenant_id].is_active = False
-        return self.store[tenant_id]
-
-
-class FakeUsers:
-    def __init__(self, users: dict[int, SimpleNamespace]) -> None:
-        self.users = users
         self.cache_invalidated = True
-        self.calls: list[tuple[Any, ...]] = []
+        self._noop = False
 
-    async def add_by_telegram_id(self, actor: int, telegram_user_id: int) -> SimpleNamespace:
-        self.calls.append(("add", actor, telegram_user_id))
-        self.users[telegram_user_id] = _user(telegram_user_id)
-        return self.users[telegram_user_id]
+    def __getattr__(self, name: str) -> Callable[..., Awaitable[Any]]:
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append((name, *args, *kwargs.values()))
+            if name in self.errors:
+                raise self.errors[name]
+            handler = self.handlers.get(name)
+            return handler(*args, **kwargs) if handler else None
+
+        return call
 
 
 class FakeQueries:
-    def __init__(self, tenants: dict[UUID, SimpleNamespace], users: dict[int, Any]) -> None:
-        self.tenants, self.users_by_id = tenants, users
+    def __init__(self, env: Env) -> None:
+        self.env = env
+        self.calls: list[str] = []
 
     async def tenant(self, tenant_id: UUID) -> Any:
-        tenant = self.tenants.get(tenant_id)
-        return None if tenant is None else (tenant, _settings())
+        self.calls.append("tenant")
+        tenant = self.env.store.get(tenant_id)
+        return None if tenant is None else (tenant, self.env.settings[tenant_id])
 
     async def deleted_tenants(self) -> list[Any]:
-        return []
+        self.calls.append("deleted_tenants")
+        return [t for t in self.env.store.values() if t.is_deleted]
 
     async def live_languages(self) -> list[Any]:
-        return []
+        return [SimpleNamespace(code="en", name="English")]
 
     async def users(self) -> list[Any]:
-        return list(self.users_by_id.values())
+        self.calls.append("users")
+        return list(self.env.users.values())
 
     async def user(self, telegram_user_id: int) -> Any:
-        return self.users_by_id.get(telegram_user_id)
+        self.calls.append("user")
+        return self.env.users.get(telegram_user_id)
 
-    async def user_roles(self, user_id: UUID) -> list[Any]:
+    async def user_roles(self, user_id: UUID) -> list[str]:
         return ["Модератор"]
 
     async def user_tenants(self, user_id: UUID) -> list[Any]:
-        return []
+        return list(self.env.moderated.get(user_id, []))
 
 
 class FakeContainer:
@@ -134,18 +127,48 @@ class FakeContainer:
         return self.deps[kind]
 
 
+class Forged:
+    """Locator returning a button with arbitrary ``callback_data``."""
+
+    def __init__(self, data: str) -> None:
+        self.data = data
+
+    def find_button(self, message: Message) -> InlineKeyboardButton:
+        return InlineKeyboardButton(text="forged", callback_data=self.data)
+
+
 class Env:
-    def __init__(self, snapshot: PermissionSnapshot, visible: list[SimpleNamespace] | None = None):
-        self.store: dict[UUID, SimpleNamespace] = {t.id: t for t in visible or []}
-        self.users: dict[int, SimpleNamespace] = {}
-        self.tenants = FakeTenants(self.store, visible or [])
-        self.user_service = FakeUsers(self.users)
+    def __init__(
+        self,
+        snapshot: PermissionSnapshot,
+        tenants: list[SimpleNamespace] | None = None,
+        *,
+        visible: list[SimpleNamespace] | None = None,
+        users: list[SimpleNamespace] | None = None,
+    ) -> None:
+        self.snapshot = snapshot
+        self.store: dict[UUID, SimpleNamespace] = {t.id: t for t in tenants or []}
+        self.settings: dict[UUID, SimpleNamespace] = {t.id: self._settings() for t in tenants or []}
+        self.users: dict[int, SimpleNamespace] = {u.telegram_user_id: u for u in users or []}
+        self.moderated: dict[UUID, list[SimpleNamespace]] = {}
+        live = [t for t in self.store.values() if not t.is_deleted]
+        self.tenants = Recorder(
+            list_tenants=lambda actor: visible if visible is not None else live,
+            create=self._create,
+            update=self._rename,
+            restore=lambda actor, tenant_id: self._set(tenant_id, is_deleted=False),
+            deactivate=lambda actor, tenant_id: self._set(tenant_id, is_active=False),
+            update_settings=self._update_settings,
+        )
+        self.user_service = Recorder(add_by_telegram_id=self._add_user)
+        self.access = Recorder()
+        self.queries = FakeQueries(self)
         container = FakeContainer(
             {
                 TenantAdminService: self.tenants,
                 UserAdminService: self.user_service,
-                AccessAdminService: SimpleNamespace(cache_invalidated=True),
-                IamAdminQueries: FakeQueries(self.store, self.users),
+                AccessAdminService: self.access,
+                IamAdminQueries: self.queries,
             }
         )
 
@@ -154,7 +177,7 @@ class Env:
             event: Any,
             data: dict[str, Any],
         ) -> Any:
-            data[SNAPSHOT_KEY] = snapshot
+            data[SNAPSHOT_KEY] = self.snapshot
             data[CONTAINER_NAME] = container
             return await handler(event, data)
 
@@ -165,6 +188,40 @@ class Env:
         setup_dialogs(dispatcher, message_manager=self.messages)
         self.client = BotClient(dispatcher, user_id=ACTOR, chat_id=ACTOR)
 
+    # --- fake behaviour ----------------------------------------------------------------
+
+    @staticmethod
+    def _settings() -> SimpleNamespace:
+        return SimpleNamespace(
+            **{k: (False if kind == "bool" else None) for k, kind in TENANT_SETTINGS_FIELDS.items()}
+        )
+
+    def _create(self, actor: int, *, name: str, slug: str) -> SimpleNamespace:
+        tenant = _tenant(name, slug)
+        self.store[tenant.id] = tenant
+        self.settings[tenant.id] = self._settings()
+        return tenant
+
+    def _rename(self, actor: int, tenant_id: UUID, *, name: str) -> SimpleNamespace:
+        return self._set(tenant_id, name=name)
+
+    def _set(self, tenant_id: UUID, **values: Any) -> SimpleNamespace:
+        tenant = self.store[tenant_id]
+        for key, value in values.items():
+            setattr(tenant, key, value)
+        return tenant
+
+    def _update_settings(self, actor: int, tenant_id: UUID, changes: dict[str, Any]) -> Any:
+        for key, value in changes.items():
+            setattr(self.settings[tenant_id], key, value)
+        return self.settings[tenant_id]
+
+    def _add_user(self, actor: int, telegram_user_id: int) -> SimpleNamespace:
+        self.users[telegram_user_id] = _user(telegram_user_id)
+        return self.users[telegram_user_id]
+
+    # --- driving ------------------------------------------------------------------------
+
     def text(self) -> str:
         return str(self.messages.last_message().text)
 
@@ -172,42 +229,81 @@ class Env:
         markup = self.messages.last_message().reply_markup
         return [b.text for row in markup.inline_keyboard for b in row] if markup else []
 
+    def _data(self, needle: str) -> str:
+        markup = self.messages.last_message().reply_markup
+        assert markup is not None
+        for row in markup.inline_keyboard:
+            for button in row:
+                if button.callback_data and needle in button.callback_data:
+                    return button.callback_data
+        raise AssertionError(f"no button with {needle!r}")
+
     async def start(self) -> None:
         await self.client.send("/start")
 
-    async def press(self, text: str) -> None:
+    async def press(self, text: str, *, regex: bool = False) -> None:
         last = self.messages.last_message()
         self.messages.reset_history()  # type: ignore[no-untyped-call]
-        await self.client.click(last, InlineButtonTextLocator(text))
+        pattern = text if regex else re.escape(text)
+        await self.client.click(last, InlineButtonTextLocator(pattern))
+
+    async def forge(self, needle: str, replace: str, by: str) -> None:
+        """Click a button whose ``callback_data`` (found by ``needle``) is rewritten."""
+        last = self.messages.last_message()
+        data = self._data(needle).replace(replace, by)
+        await self.client.click(last, Forged(data))
 
     async def send(self, text: str) -> None:
         self.messages.reset_history()  # type: ignore[no-untyped-call]
         await self.client.send(text)
 
 
+# --- section entry ----------------------------------------------------------------------
+
+
+@R4
 async def test_no_permission_no_section_button() -> None:
     env = Env(VIEWER)
     await env.start()
-    assert "Магазины" not in env.buttons()
-    assert "Сотрудники" in env.buttons()
+    assert "Магазины" not in env.buttons() and "Сотрудники" not in env.buttons()
+    assert "Логи" in env.buttons()
 
 
+@R4
+async def test_forged_section_callback_is_rejected() -> None:
+    env = Env(VIEWER, users=[_user(42)])
+    await env.start()
+    await env.forge("logs", "logs", "staff")
+    await env.forge("logs", "logs", "shops")
+    assert "users" not in env.queries.calls
+    assert env.tenants.calls == []
+
+
+# --- shops ------------------------------------------------------------------------------
+
+
+@SCENARIO
 async def test_create_tenant_calls_service_and_shows_card() -> None:
     env = Env(SUPER)
     await env.start()
     await env.press("Магазины")
+    assert "Нет доступных магазинов" in env.text()
     await env.press("Создать магазин")
+    await env.send("   ")
+    assert "от 1 до 128 символов" in env.text()
     await env.send("Shop One")
     await env.send("Bad Slug!")  # rejected by TextInput, no service call
     assert "Некорректное значение" in env.text()
     await env.send("shop-one")
     assert ("create", ACTOR, "Shop One", "shop-one") in env.tenants.calls
+    assert "Готово." in env.text()
     assert "Магазин: Shop One" in env.text() and "shop-one" in env.text()
 
 
+@R4
 async def test_service_error_is_localized() -> None:
     env = Env(SUPER)
-    env.tenants.error = DomainError("taken", code="tenant_slug_taken")
+    env.tenants.errors["create"] = DomainError("taken", code="tenant_slug_taken")
     await env.start()
     await env.press("Магазины")
     await env.press("Создать магазин")
@@ -216,12 +312,14 @@ async def test_service_error_is_localized() -> None:
     assert error_text("tenant_slug_taken") in env.text()
 
 
-async def test_cache_not_invalidated_shows_warning_after_confirm() -> None:
+@SCENARIO
+async def test_deactivate_with_confirmation_and_stale_cache_warning() -> None:
     shop = _tenant("Shop A", "shop-a")
     env = Env(SUPER, [shop])
+    env.tenants.cache_invalidated = False
     await env.start()
     await env.press("Магазины")
-    await env.press("Shop A \\(shop-a\\)")
+    await env.press("Shop A (shop-a)")
     await env.press("Деактивировать")
     assert "Деактивировать магазин?" in env.text()  # confirmation window
     await env.press("Да")
@@ -229,32 +327,178 @@ async def test_cache_not_invalidated_shows_warning_after_confirm() -> None:
     assert "кэш прав обновится с задержкой" in env.text()
 
 
-async def test_tenant_list_is_scoped_by_service() -> None:
-    visible = [_tenant(f"Shop {i}", f"shop-{i}") for i in range(12)]
-    env = Env(PermissionSnapshot(user_id=uuid4(), tenants=frozenset({uuid4()})), visible)
+@SCENARIO
+async def test_rename_and_settings_flag_language_chats() -> None:
+    shop = _tenant("Shop A", "shop-a")
+    env = Env(SUPER, [shop])
     await env.start()
     await env.press("Магазины")
-    assert ("list", ACTOR) in env.tenants.calls
+    await env.press("Shop A (shop-a)")
+    await env.press("Переименовать")
+    await env.send("Shop B")
+    assert ("update", ACTOR, shop.id, "Shop B") in env.tenants.calls
+    assert "Магазин: Shop B" in env.text()
+    await env.press("Настройки магазина")
+    await env.press(".*Магазин открыт", regex=True)
+    assert ("update_settings", ACTOR, shop.id, {"is_store_open": True}) in env.tenants.calls
+    await env.press("Язык по умолчанию: глобальный")
+    assert "✅ Глобальный по умолчанию" in env.buttons()  # current language marked
+    await env.press(".*English \\(en\\)", regex=True)
+    await env.press("Язык по умолчанию: en")
+    await env.press(".*Глобальный по умолчанию", regex=True)
+    assert env.settings[shop.id].default_language_code is None
+    await env.press("Чат поддержки: —")
+    assert "-1001234567890" in env.text()
+    await env.send("99999999999999999999")  # bigint overflow -> input error, no call
+    assert "Некорректное значение" in env.text()
+    await env.send("-1001234567890")
+    assert env.settings[shop.id].support_chat_id == -1001234567890
+    await env.press("Чат поддержки: -1001234567890")
+    await env.send("-")
+    assert env.settings[shop.id].support_chat_id is None
+
+
+@SCENARIO
+async def test_restore_from_deleted() -> None:
+    gone = _tenant("Shop D", "shop-d", deleted=True)
+    env = Env(SUPER, [gone])
+    await env.start()
+    await env.press("Магазины")
+    await env.press("Удалённые магазины")
+    await env.press("Shop D (shop-d)")
+    await env.press("Восстановить")
+    assert ("restore", ACTOR, gone.id) in env.tenants.calls
+    assert "Статус: активен" in env.text()
+
+
+@R4
+async def test_tenant_list_is_scoped_by_service() -> None:
+    visible = [_tenant(f"Shop {i}", f"shop-{i}") for i in range(12)]
+    env = Env(
+        PermissionSnapshot(user_id=uuid4(), tenants=frozenset(t.id for t in visible)), visible
+    )
+    await env.start()
+    await env.press("Магазины")
+    assert ("list_tenants", ACTOR) in env.tenants.calls
     buttons = env.buttons()
     assert "Shop 0 (shop-0)" in buttons and "Shop 11 (shop-11)" not in buttons  # page of 10
     assert "Создать магазин" not in buttons  # no settings.manage
 
 
+@R4
+async def test_forged_foreign_tenant_and_hidden_deleted_are_rejected() -> None:
+    own = _tenant("Own", "own")
+    foreign = _tenant("Foreign", "foreign")
+    gone = _tenant("Gone", "gone", deleted=True)
+    snapshot = PermissionSnapshot(user_id=uuid4(), tenants=frozenset({own.id}))
+    env = Env(snapshot, [own, foreign, gone], visible=[own])
+    await env.start()
+    await env.press("Магазины")
+    await env.forge("t_sel", str(own.id), str(foreign.id))
+    assert "Магазин не найден" in env.text() and "Foreign" not in env.text()
+    await env.forge("t_sel", f"t_sel:{own.id}", "t_deleted")
+    assert "Нет доступа" in env.text() and "Gone" not in env.text()
+    assert "deleted_tenants" not in env.queries.calls
+
+
+# --- staff ------------------------------------------------------------------------------
+
+
+@SCENARIO
 async def test_add_staff_by_telegram_id() -> None:
     env = Env(SUPER)
     await env.start()
     await env.press("Сотрудники")
     await env.press("Добавить сотрудника")
     await env.send("abc")
+    await env.send("99999999999999999999")  # bigint overflow
     assert env.user_service.calls == []
     await env.send("777000111")
-    assert env.user_service.calls == [("add", ACTOR, 777000111)]
+    assert env.user_service.calls == [("add_by_telegram_id", ACTOR, 777000111)]
     assert "777000111" in env.text() and "• Модератор" in env.text()
+
+
+@SCENARIO
+async def test_add_deleted_staff_opens_card_with_restore() -> None:
+    env = Env(SUPER, users=[_user(888, deleted=True)])
+    env.user_service.errors["add_by_telegram_id"] = DomainError("x", code="user_deleted")
+    await env.start()
+    await env.press("Сотрудники")
+    assert "— (888) 🗑" in env.buttons()
+    await env.press("Добавить сотрудника")
+    await env.send("888")
+    assert error_text("user_deleted") in env.text()
+    assert "Восстановить" in env.buttons()
+    await env.press("Восстановить")
+    assert ("restore", ACTOR, 888) in env.user_service.calls
+
+
+@SCENARIO
+async def test_own_profile_has_no_status_buttons() -> None:
+    env = Env(SUPER, users=[_user(ACTOR)])
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press(f"— ({ACTOR})")
+    buttons = env.buttons()
+    for hidden in ("Деактивировать", "Удалить", "Магазины сотрудника"):
+        assert hidden not in buttons
+
+
+@SCENARIO
+async def test_assign_and_unassign_moderator() -> None:
+    shop = _tenant("Shop A", "shop-a")
+    staff = _user(321)
+    env = Env(SUPER, [shop], users=[staff])
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press("— (321)")
+    await env.press("Магазины сотрудника")
+    env.access.handlers["assign_moderator"] = lambda *a: env.moderated.update({staff.id: [shop]})
+    await env.press("▫️ Shop A (shop-a)")
+    assert ("assign_moderator", ACTOR, 321, shop.id) in env.access.calls
+    assert "Готово." in env.text()
+    await env.press("✅ Shop A (shop-a)")
+    assert ("unassign_moderator", ACTOR, 321, shop.id) in env.access.calls
+
+
+@R4
+async def test_staff_card_shops_limited_to_viewer_scope() -> None:
+    own, foreign = _tenant("Own", "own"), _tenant("Foreign", "foreign")
+    staff = _user(321)
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        role_permissions={MODERATORS_MANAGE: frozenset({"senior"})},
+        tenants=frozenset({own.id}),
+    )
+    env = Env(snapshot, [own, foreign], visible=[own], users=[staff])
+    env.moderated[staff.id] = [own, foreign]
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press("— (321)")
+    assert "Own (own)" in env.text() and "Foreign" not in env.text()
+
+
+@R4
+async def test_forged_staff_card_without_right_is_rejected() -> None:
+    """A staff dialog left open after the right was revoked: no user data is read."""
+    staff = _user(321)
+    env = Env(SUPER, users=[staff])
+    await env.start()
+    await env.press("Сотрудники")
+    env.snapshot = VIEWER  # the right is revoked while the dialog is open
+    env.queries.calls.clear()
+    await env.forge("u_sel", "u_sel:321", "u_sel:321")
+    assert "user" not in env.queries.calls and "users" not in env.queries.calls
+    assert "(321)" not in env.text()
+
+
+# --- pure parsers / validators -------------------------------------------------------
 
 
 def test_unknown_error_code_is_generic() -> None:
     assert error_text("something_new") == "Не удалось выполнить действие."
-    assert error_text("invalid_name") == "Некорректные данные."
+    assert error_text("invalid_whatever") == "Некорректные данные."
+    assert error_text("invalid_name") != error_text("invalid_tenant_slug")
 
 
 def test_input_parsers() -> None:
@@ -262,7 +506,27 @@ def test_input_parsers() -> None:
     for bad in ("Shop", "a--b", "-a", "a" * 65):
         with pytest.raises(ValueError):
             parse_slug(bad)
+    assert parse_name("  Shop  ") == "Shop"
+    for bad_name in ("   ", "x" * 129):
+        with pytest.raises(ValueError):
+            parse_name(bad_name)
     assert parse_chat_id("-") is None and parse_chat_id("-100123") == -100123
+    for bad_chat in ("0", "9" * 20, "1_000", "abc", str(2**63)):
+        with pytest.raises(ValueError):
+            parse_chat_id(bad_chat)
     assert parse_telegram_id("42") == 42
-    with pytest.raises(ValueError):
-        parse_telegram_id("0")
+    for bad_id in ("0", "-5", str(2**63), "1_0"):
+        with pytest.raises(ValueError):
+            parse_telegram_id(bad_id)
+    assert short("x" * 70).endswith("…") and len(short("x" * 70)) == 60
+
+
+def test_service_validators_bigint_range() -> None:
+    with pytest.raises(ValidationError):
+        validate_telegram_user_id(2**63)
+    for value in (0, 2**63, -(2**63)):
+        with pytest.raises(ValidationError):
+            validate_tenant_settings({"support_chat_id": value})
+    assert validate_tenant_settings({"news_chat_id": -1001234567890}) == {
+        "news_chat_id": -1001234567890
+    }

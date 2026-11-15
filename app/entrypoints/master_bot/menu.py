@@ -23,7 +23,6 @@ from app.modules.iam.permissions import (
     ROLES_MANAGE,
     SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
-    USERS_MANAGE,
     USERS_VIEW,
 )
 from app.modules.iam.presentation.tg_master import (
@@ -39,7 +38,8 @@ __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_gette
 #: Section -> permissions any of which shows its button (shops/bots: also own shops).
 SECTION_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     "shops": (TENANTS_VIEW_ALL,),
-    "staff": (USERS_VIEW, USERS_MANAGE, MODERATORS_MANAGE),
+    # Staff users are read with the IAM management rights (``users.*`` are shop customers).
+    "staff": (MODERATORS_MANAGE, ROLES_MANAGE),
     "roles": (ROLES_MANAGE,),
     "settings": (SETTINGS_MANAGE,),
     "logs": (USERS_VIEW,),
@@ -90,7 +90,15 @@ async def _section_soon(callback: CallbackQuery, button: Button, manager: Dialog
 
 
 async def _open_section(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    await manager.start(_SECTION_DIALOGS[str(button.widget_id)])
+    """Re-check the section rights: ``when`` hides a button but a forged callback still
+    reaches this handler."""
+    from app.entrypoints.master_bot.middlewares import SNAPSHOT_KEY
+
+    section = str(button.widget_id)
+    if not visible_sections(manager.middleware_data[SNAPSHOT_KEY]).get(section, False):
+        await callback.answer(Texts.no_access())
+        return
+    await manager.start(_SECTION_DIALOGS[section])
 
 
 def _button(section: str) -> Button:

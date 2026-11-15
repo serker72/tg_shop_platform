@@ -1,31 +1,55 @@
-"""Shared helpers of the IAM dialogs: DI lookup, actor, notices, ``DomainError`` mapping."""
+"""Shared helpers of the IAM dialogs: DI lookup, actor, read scope, notices, error mapping.
+
+``when`` of aiogram-dialog widgets works only at render time: a forged ``callback_data``
+still reaches hidden buttons and any ``Select`` item id. So every getter/handler re-checks
+read access on the server (:func:`load_tenant`, :func:`can_view_staff`); mutations are
+checked by the admin services themselves.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, Final
+from uuid import UUID
 
 import structlog
 from aiogram_dialog import DialogManager
 from dishka.integrations.aiogram import CONTAINER_NAME
 
 from app.core.i18n import gettext as _
+from app.modules.iam.models import Tenant, TenantSettings
+from app.modules.iam.permissions import MODERATORS_MANAGE, ROLES_MANAGE, SETTINGS_MANAGE
+from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
 
 __all__ = [
+    "BIGINT_MAX",
     "CONTAINER_NAME",
+    "LABEL_LIMIT",
+    "Outcome",
     "actor_id",
-    "cache_warning",
+    "can_view_staff",
     "compose",
+    "denied_text",
     "error_text",
+    "in_scope",
+    "load_tenant",
     "mutate",
     "resolve",
     "set_notice",
+    "short",
     "snapshot_of",
 ]
 
 NOTICE_KEY: Final = "notice"
+#: Telegram ids are stored in PostgreSQL ``bigint``.
+BIGINT_MAX: Final = 2**63
+#: Max length of a button caption (longer names are cut with "…").
+LABEL_LIMIT: Final = 60
+#: Global permissions that open the "Staff" section (list and cards of staff users).
+STAFF_VIEW_PERMISSIONS: Final = (MODERATORS_MANAGE, ROLES_MANAGE)
 
 _log = structlog.get_logger(__name__)
 
@@ -48,6 +72,44 @@ async def resolve[T](manager: DialogManager, kind: type[T]) -> T:
     return result
 
 
+# --- read access -------------------------------------------------------------------------
+
+
+def can_view_staff(snapshot: PermissionSnapshot) -> bool:
+    return any(snapshot.decide(slug).allowed for slug in STAFF_VIEW_PERMISSIONS)
+
+
+def in_scope(snapshot: PermissionSnapshot, tenant_id: UUID) -> bool:
+    """Shop visible to the actor: superuser, ``tenants.view_all`` or ``tenant_moderators``."""
+    return snapshot.is_superuser or snapshot.has_tenant_access(tenant_id)
+
+
+def parse_uuid(value: Any) -> UUID | None:
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+async def load_tenant(
+    manager: DialogManager, tenant_id: Any
+) -> tuple[Tenant, TenantSettings | None] | None:
+    """Tenant + settings if the actor may read it (deleted ones: ``settings.manage`` only)."""
+    parsed = parse_uuid(tenant_id)
+    if parsed is None:
+        return None
+    found = await (await resolve(manager, IamAdminQueries)).tenant(parsed)
+    if found is None:
+        return None
+    snapshot = snapshot_of(manager)
+    if found[0].is_deleted:
+        return found if snapshot.decide(SETTINGS_MANAGE).allowed else None
+    return found if in_scope(snapshot, parsed) else None
+
+
+# --- texts ---------------------------------------------------------------------------------
+
+
 def _error_messages() -> dict[str, str]:
     return {
         "permission_denied": _("Недостаточно прав для этого действия."),
@@ -60,10 +122,16 @@ def _error_messages() -> dict[str, str]:
         ),
         "expires_at_not_in_future": _("Срок действия должен быть в будущем."),
         "invalid_expires_at": _("Некорректный срок действия."),
+        "invalid_name": _("Название не должно быть пустым."),
+        "invalid_tenant_slug": _(
+            "Некорректный slug: латиница в нижнем регистре, цифры и дефисы, до 64 символов."
+        ),
+        "invalid_telegram_user_id": _("Некорректный Telegram ID."),
+        "invalid_settings": _("Некорректное значение настройки."),
         "tenant_slug_taken": _("Этот slug уже занят (в том числе удалённым магазином)."),
         "role_slug_taken": _("Этот slug роли уже занят."),
         "user_exists": _("Такой сотрудник уже есть."),
-        "user_deleted": _("Сотрудник удалён — восстановите его из списка."),
+        "user_deleted": _("Сотрудник удалён — его можно восстановить."),
         "user_not_found": _("Сотрудник не найден."),
         "tenant_not_found": _("Магазин не найден."),
         "role_not_found": _("Роль не найдена."),
@@ -90,8 +158,16 @@ def error_text(code: str | None) -> str:
     return _("Не удалось выполнить действие.")
 
 
+def denied_text() -> str:
+    return _("Нет доступа.")
+
+
 def cache_warning() -> str:
     return _("Изменение сохранено, но кэш прав обновится с задержкой.")
+
+
+def short(text: str, limit: int = LABEL_LIMIT) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def set_notice(manager: DialogManager, text: str) -> None:
@@ -105,19 +181,34 @@ def compose(manager: DialogManager, *lines: str) -> str:
     return f"{notice}\n\n{body}" if notice else body
 
 
+# --- mutations -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Outcome[T]:
+    ok: bool
+    value: T | None = None
+    code: str | None = None
+
+
 async def mutate[S, T](
     manager: DialogManager, kind: type[S], call: Callable[[S], Awaitable[T]]
-) -> tuple[bool, T | None]:
-    """Run one service mutation; errors and a stale cache become a notice of the window."""
+) -> Outcome[T]:
+    """Run one service mutation; the result (done / no change / error / stale cache)
+    becomes a notice of the next rendered window."""
     service = await resolve(manager, kind)
     try:
         result = await call(service)
     except DomainError as error:
         _log.info("master_bot_action_rejected", code=error.code)
         set_notice(manager, error_text(error.code))
-        return False, None
-    set_notice(manager, "" if getattr(service, "cache_invalidated", True) else cache_warning())
-    return True, result
+        return Outcome(ok=False, code=error.code)
+    # ``_noop`` is the admin services' "requested state already held" flag.
+    notice = _("Без изменений.") if getattr(service, "_noop", False) else _("Готово.")
+    if not getattr(service, "cache_invalidated", True):
+        notice = f"{notice}\n{cache_warning()}"
+    set_notice(manager, notice)
+    return Outcome(ok=True, value=result)
 
 
 def mark(flag: bool) -> str:
