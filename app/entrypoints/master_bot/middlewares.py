@@ -1,7 +1,8 @@
-"""Outer update middlewares of the Master Bot (order: tracing -> i18n -> Auth -> Maintenance
--> ClickLog, see :func:`app.entrypoints.master_bot.app.build_dispatcher`).
+"""Outer update middlewares of the Master Bot (order: tracing -> i18n -> Auth -> ClickLog
+-> Maintenance, see :func:`app.entrypoints.master_bot.app.build_dispatcher`).
 
-Middlewares only read state and enqueue click-log events: no DB writes (services own them).
+Middlewares never write the DB themselves: click-log goes to the ``ActivityLogger`` buffer,
+the username pick-up (Q3) goes through ``UserAdminService`` in its own request scope.
 """
 
 from __future__ import annotations
@@ -11,33 +12,48 @@ from typing import Any, Final, Protocol
 
 import structlog
 from aiogram import BaseMiddleware, Bot
-from aiogram.types import TelegramObject, Update, User
+from aiogram.types import Chat, TelegramObject, Update, User
 
 from app.entrypoints.master_bot.texts import Texts
 from app.modules.iam.permissions import SETTINGS_MANAGE
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.events import ActivityEvent
+from app.modules.logging.models import utc_now
 from app.modules.logging.ports import ActivityLogger
 
 __all__ = [
+    "MAINTENANCE_BLOCKED_KEY",
+    "MAINTENANCE_RESULT",
     "SNAPSHOT_KEY",
     "SOURCE",
+    "TEXT_MARKER",
     "AuthMiddleware",
     "ClickLogMiddleware",
     "MaintenanceMiddleware",
     "SnapshotLoader",
+    "UsernameSync",
     "has_panel_access",
 ]
 
 #: ``data`` key of the :class:`PermissionSnapshot` of the update author.
 SNAPSHOT_KEY: Final = "permission_snapshot"
+#: ``data`` flag set by :class:`MaintenanceMiddleware` when it answered with the stub.
+MAINTENANCE_BLOCKED_KEY: Final = "maintenance_blocked"
+#: ``user_activity.result`` of an update blocked by maintenance.
+MAINTENANCE_RESULT: Final = "maintenance"
 #: ``user_activity.source`` of the Master Bot events.
 SOURCE: Final = "master_bot"
+#: Logged instead of a free text message (tokens, PII never reach the click-log).
+TEXT_MARKER: Final = "<text>"
+_COMMAND_MAX_LEN: Final = 64
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
 SnapshotLoader = Callable[[int], Awaitable[PermissionSnapshot]]
+#: ``(telegram_user_id, username)`` -> stores the username (own transaction).
+UsernameSync = Callable[[int, str | None], Awaitable[None]]
 
 _log = structlog.get_logger(__name__)
+_UNKNOWN: Final = object()
 
 
 class MaintenanceFlag(Protocol):
@@ -56,21 +72,43 @@ def has_panel_access(snapshot: PermissionSnapshot) -> bool:
 
 
 class AuthMiddleware(BaseMiddleware):
-    """Unknown / inactive / deleted users or users without rights are ignored silently (Q2)."""
+    """Only private chats; unknown / inactive / deleted / no rights -> silence (Q2).
 
-    def __init__(self, loader: SnapshotLoader) -> None:
+    After a successful check the Telegram username is synced (Q3) when it differs from the
+    last value seen by this process (best effort: an error is logged, the update goes on).
+    """
+
+    def __init__(self, loader: SnapshotLoader, username_sync: UsernameSync | None = None) -> None:
         self._loader = loader
+        self._username_sync = username_sync
+        self._usernames: dict[int, str | None] = {}
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         user: User | None = data.get("event_from_user")
-        if user is None or user.is_bot:
+        chat: Chat | None = data.get("event_chat")
+        if user is None or user.is_bot or chat is None or chat.type != "private":
             return None
         snapshot = await self._loader(user.id)
         if not has_panel_access(snapshot):
             _log.info("master_bot_access_ignored", telegram_user_id=user.id)
             return None
         data[SNAPSHOT_KEY] = snapshot
+        await self._sync_username(user)
         return await handler(event, data)
+
+    async def _sync_username(self, user: User) -> None:
+        if self._username_sync is None or self._usernames.get(user.id, _UNKNOWN) == user.username:
+            return
+        try:
+            await self._username_sync(user.id, user.username)
+        except Exception as error:  # best effort: never blocks the panel
+            _log.warning(
+                "master_bot_username_sync_failed",
+                telegram_user_id=user.id,
+                error=type(error).__name__,
+            )
+            return
+        self._usernames[user.id] = user.username
 
 
 class MaintenanceMiddleware(BaseMiddleware):
@@ -85,6 +123,7 @@ class MaintenanceMiddleware(BaseMiddleware):
             return await handler(event, data)
         if snapshot.decide(SETTINGS_MANAGE).allowed:  # superuser included
             return await handler(event, data)
+        data[MAINTENANCE_BLOCKED_KEY] = True
         await _send_stub(event, data.get("bot"), Texts.maintenance())
         return None
 
@@ -99,7 +138,12 @@ async def _send_stub(event: TelegramObject, bot: Bot | None, text: str) -> None:
 
 
 class ClickLogMiddleware(BaseMiddleware):
-    """Enqueue an ``ActivityEvent`` (``telegram_bot_id`` = Master Bot ``getMe().id``)."""
+    """Enqueue an ``ActivityEvent`` (``telegram_bot_id`` = Master Bot ``getMe().id``).
+
+    Runs after Auth (unauthorised updates are never logged) and wraps Maintenance: an update
+    answered with the stub is logged with ``result="maintenance"``. Free text is replaced by
+    :data:`TEXT_MARKER`; only the command word of ``/commands`` is kept.
+    """
 
     def __init__(self, activity: ActivityLogger, telegram_bot_id: int) -> None:
         self._activity = activity
@@ -107,31 +151,43 @@ class ClickLogMiddleware(BaseMiddleware):
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         user: User | None = data.get("event_from_user")
-        if isinstance(event, Update) and user is not None:
-            action_type, callback_data, button = _describe(event)
-            try:
-                self._activity.log(
-                    ActivityEvent(
-                        telegram_bot_id=self._telegram_bot_id,
-                        action_type=action_type,
-                        tenant_id=None,
-                        telegram_user_id=user.id,
-                        username=user.username,
-                        user_type="staff",
-                        source=SOURCE,
-                        callback_data=callback_data,
-                        button=button,
-                    )
+        if not isinstance(event, Update) or user is None:
+            return await handler(event, data)
+        created_at = utc_now()
+        try:
+            return await handler(event, data)
+        finally:
+            self._log(event, user, data, created_at)
+
+    def _log(self, update: Update, user: User, data: dict[str, Any], created_at: Any) -> None:
+        action_type, callback_data, button = describe_update(update)
+        try:
+            self._activity.log(
+                ActivityEvent(
+                    telegram_bot_id=self._telegram_bot_id,
+                    action_type=action_type,
+                    tenant_id=None,
+                    telegram_user_id=user.id,
+                    username=user.username,
+                    user_type="staff",
+                    source=SOURCE,
+                    callback_data=callback_data,
+                    button=button,
+                    result=MAINTENANCE_RESULT if data.get(MAINTENANCE_BLOCKED_KEY) else None,
+                    created_at=created_at,
                 )
-            except Exception as error:  # click-log must never break the update
-                _log.warning("master_bot_click_log_failed", error=type(error).__name__)
-        return await handler(event, data)
+            )
+        except Exception as error:  # click-log must never break the update
+            _log.warning("master_bot_click_log_failed", error=type(error).__name__)
 
 
-def _describe(update: Update) -> tuple[str, str | None, str | None]:
+def describe_update(update: Update) -> tuple[str, str | None, str | None]:
+    """``(action_type, callback_data, button)`` without free text of the user."""
     if update.callback_query is not None:
         return "callback", update.callback_query.data, None
     if update.message is not None:
-        text = update.message.text or ""
-        return ("command" if text.startswith("/") else "message"), None, text[:64] or None
+        text = update.message.text or update.message.caption or ""
+        if text.startswith("/"):
+            return "command", None, text.split(maxsplit=1)[0][:_COMMAND_MAX_LEN]
+        return "message", None, TEXT_MARKER if text else None
     return update.event_type, None, None

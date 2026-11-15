@@ -36,7 +36,9 @@ __all__ = [
     "HEARTBEAT_KEY_PREFIX",
     "CheckResult",
     "CheckStatus",
+    "ComponentNotReadyError",
     "HealthCheck",
+    "ReadinessGate",
     "HealthChecker",
     "HealthReport",
     "HealthReportCache",
@@ -278,20 +280,62 @@ async def has_live_heartbeat(
     return int(await redis.zcount(heartbeat_key(component), ts - ttl, "+inf")) > 0
 
 
+class ComponentNotReadyError(Exception):
+    """An in-process component (e.g. Telegram connection) is not ready yet."""
+
+
+class ReadinessGate:
+    """In-process readiness flag of a component; starts *not ready*.
+
+    Registered with :meth:`HeartbeatRegistry.register_readiness` before the health checker
+    is built; it becomes a critical check named after the component (``/health/ready``
+    answers not-ready until :meth:`set_ready`, ``/health/live`` is not affected).
+    """
+
+    __slots__ = ("_ready",)
+
+    def __init__(self) -> None:
+        self._ready = False
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def set_ready(self) -> None:
+        self._ready = True
+
+    def set_not_ready(self) -> None:
+        self._ready = False
+
+    async def probe(self) -> None:
+        if not self._ready:
+            raise ComponentNotReadyError
+
+
 @dataclass(slots=True)
 class HeartbeatRegistry:
-    """Declared worker components: name -> ``required`` (affects readiness)."""
+    """Declared components: heartbeats (name -> ``required``) and in-process readiness gates."""
 
     components: dict[str, bool] = field(default_factory=dict)
+    readiness: dict[str, ReadinessGate] = field(default_factory=dict)
 
     def register(self, component: str, *, required: bool = False) -> None:
         self.components[component] = required
 
+    def register_readiness(self, component: str) -> ReadinessGate:
+        """Critical check ``component`` backed by a :class:`ReadinessGate` (idempotent)."""
+        return self.readiness.setdefault(component, ReadinessGate())
+
     def checks(self, redis: Redis, *, ttl: int) -> list[HealthCheck]:
-        return [
+        checks = [
             HealthCheck(f"heartbeat:{name}", _heartbeat_probe(redis, name, ttl), critical=required)
             for name, required in sorted(self.components.items())
         ]
+        checks.extend(
+            HealthCheck(name, gate.probe, critical=True)
+            for name, gate in sorted(self.readiness.items())
+        )
+        return checks
 
 
 def _heartbeat_probe(redis: Redis, component: str, ttl: int) -> Probe:

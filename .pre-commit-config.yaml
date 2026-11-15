@@ -4,6 +4,8 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # pybabel writes catalogs with a trailing blank line (make i18n-*).
+        exclude: ^app/locales/.*\.(po|pot)$
       - id: check-yaml
       - id: check-toml
       - id: detect-private-key

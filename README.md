@@ -305,6 +305,22 @@ urgentry — `https://<VPS_IP>/` (`ip`) или `https://<URGENTRY_DOMAIN>/` (`do
 Caddy/CrowdSec (баны, смена ключа bouncer, проверка Caddyfile), обновление `.env`, созданного
 старой версией, и устройство стека мониторинга — [docs/ops/observability.md](docs/ops/observability.md).
 
+## Master Bot
+
+Панель управления платформой — Telegram-бот (`master_bot`), только в личных сообщениях.
+
+1. В `.env`: `MASTER_BOT_TOKEN`; при работе через прокси — `MASTER_BOT_USE_PROXY=true` и
+   `MASTER_BOT_PROXY_URL` (только `socks5://`, `socks4://`, `http://`, формат
+   `scheme://[user:pass@]host:port`).
+2. Суперпользователь: `make superuser TG_ID=<ваш Telegram ID>`.
+3. `make up` (или `make agent-up`) → написать боту `/start` → главное меню с разделами по правам.
+
+Неизвестным, деактивированным пользователям и пользователям без прав бот не отвечает. Если
+Telegram или прокси недоступны, `getMe` повторяется с нарастающей задержкой (1 с → … → 60 с),
+`/health/ready` отвечает not-ready с проверкой `telegram`, `/health/live` остаётся ok
+(контейнер не перезапускается). Неверный токен (401) — процесс завершается с ошибкой.
+Пул прокси ботов магазинов — [docs/ops/bot-runtime.md](docs/ops/bot-runtime.md).
+
 ## Локальная разработка
 
 `make install` (uv + pre-commit), затем `make env` и в `.env`: `PROJECT_ENVIRONMENT=loc`,

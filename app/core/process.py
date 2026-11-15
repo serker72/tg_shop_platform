@@ -141,11 +141,14 @@ async def run_service(
     *,
     components: Sequence[ServiceComponent] = (),
     heartbeats: Mapping[str, bool] | None = None,
+    readiness: Sequence[str] = (),
 ) -> None:
     """Service with Sentry, the health/metrics HTTP server and pluggable components.
 
     Serves ``/health/live``, ``/health/ready`` and ``/metrics`` until SIGTERM/SIGINT.
     ``heartbeats`` (component -> required) are declared before the health checker is built;
+    ``readiness`` names in-process gates (``HeartbeatRegistry.register_readiness``): critical
+    checks that stay not-ready until the component calls ``set_ready()``;
     ``components`` are async context managers entered in order after the HTTP server and
     exited in reverse order on shutdown (graceful stop of loops/brokers). A dead supervised
     background task stops the process with ``SystemExit(1)`` after the regular cleanup.
@@ -191,10 +194,11 @@ async def run_service(
     )
     exit_code = 0
     try:
-        if heartbeats:
-            registry = await container.get(HeartbeatRegistry)
-            for component, required in heartbeats.items():
-                registry.register(component, required=required)
+        registry = await container.get(HeartbeatRegistry)
+        for component, required in (heartbeats or {}).items():
+            registry.register(component, required=required)
+        for component in readiness:
+            registry.register_readiness(component)
         checker = await container.get(HealthChecker)
         metrics = await container.get(AppMetrics)
         set_build_info(metrics, component=name)

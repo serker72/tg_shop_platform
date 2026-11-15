@@ -261,6 +261,17 @@ superuser: ## Superuser: TG_ID=<id> [TG_USERNAME=<name>] [ACTION=create|revoke] 
 		$(SU_ACTION) --telegram-id '$(TG_ID)' \
 		$(if $(filter revoke,$(SU_ACTION)),$(if $(filter 1,$(FORCE)),--force),$(if $(TG_USERNAME),--username '$(TG_USERNAME)'))
 
+.PHONY: i18n-extract i18n-update i18n-compile
+
+i18n-extract: ## gettext: collect _() strings of app/ into app/locales/messages.pot (Babel)
+	uv run pybabel extract -F babel.cfg --no-location --sort-output -o app/locales/messages.pot .
+
+i18n-update: ## gettext: merge messages.pot into app/locales/<lang>/LC_MESSAGES/messages.po
+	uv run pybabel update -i app/locales/messages.pot -d app/locales -D messages --no-fuzzy-matching
+
+i18n-compile: ## gettext: compile messages.po -> messages.mo (commit both)
+	uv run pybabel compile -d app/locales -D messages --statistics
+
 lint: ## Run ruff and mypy
 	uv run ruff check . && uv run mypy app tests
 
