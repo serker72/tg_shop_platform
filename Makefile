@@ -81,7 +81,7 @@ vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
 endef
 
-.PHONY: help install env env-check init-dirs env-test version up ready down migrate lint format format-check check test \
+.PHONY: help install env env-check env-role init-dirs env-test version up ready down migrate lint format format-check check test \
 	test-integration test-integration-down test-alerts test-report clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-auth obs-bans obs-validate obs-crowdsec-rekey \
 	agent-config agent-up agent-down agent-logs
@@ -206,6 +206,12 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 
 env-check: ## Check ENV_FILE and TEST_ENV_FILE have all keys of .env.example (names only, rc=1 if missing)
 	@bash ops/scripts/env_check.sh .env.example "$(ENV_FILE)" "$(TEST_ENV_FILE)"
+
+# Two-host deploy: one .env is made on VPS 2 and copied to VPS 1 (README.md); each host clears
+# the secrets of the other one (values only, keys stay; backup <file>.bak.<ts>, mode 600).
+env-role: ## Clear secrets of the other host in ENV_FILE: ROLE=app (VPS 1) | ROLE=obs (VPS 2), backup .bak.<ts>
+	@case "$(ROLE)" in app|obs) ;; *) echo "ERROR: ROLE=app|obs required: make env-role ROLE=app (VPS 1, application) or ROLE=obs (VPS 2, monitoring)" >&2; exit 2;; esac; \
+	sh ops/scripts/env_role.sh "$(ROLE)" "$(ENV_FILE)"
 
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
 	@bash ops/scripts/env_test.sh "$(ENV_FILE)" "$(TEST_ENV_FILE)"
