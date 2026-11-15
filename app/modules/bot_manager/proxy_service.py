@@ -5,13 +5,16 @@ the passed session itself (it must hold no pending changes - ``session_not_clean
 error rolls back, rows are locked with ``FOR UPDATE`` + ``populate_existing``, audit is
 written in the same transaction, constraint errors become domain errors.
 
-The number of bots of a proxy is never stored: ``COUNT(bots WHERE proxy_id AND NOT
-is_deleted)`` is recounted under the ``FOR UPDATE`` lock of the proxy row, so two parallel
-assignments never exceed ``PROXY_MAX_BOTS_PER_IP``.
+**Lock order: proxy row, then bot row** (``assign_proxy``, ``register_strike``, ``ban``),
+so parallel assignment and quarantine/ban never deadlock. The number of bots of a proxy is
+never stored: ``COUNT(bots WHERE proxy_id AND NOT is_deleted)`` is recounted under the
+``FOR UPDATE`` lock of the proxy row, so parallel assignments never exceed
+``PROXY_MAX_BOTS_PER_IP``.
 """
 
 from __future__ import annotations
 
+import enum
 import hashlib
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -22,17 +25,12 @@ from uuid import UUID
 
 import structlog
 from redis.exceptions import RedisError
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import ProxySettings
 from app.core.proxy_url import mask_proxy_url, validate_proxy_url
-from app.modules.bot_manager.metrics import (
-    LabeledCounter,
-    OutageGauge,
-    proxy_failure_verdicts_total,
-    telegram_outage,
-)
+from app.modules.bot_manager.metrics import LabeledCounter, proxy_failure_verdicts_total
 from app.modules.bot_manager.models import (
     PROXY_STATUS_ACTIVE,
     PROXY_STATUS_BANNED,
@@ -42,7 +40,7 @@ from app.modules.bot_manager.models import (
 from app.modules.bot_manager.proxy_health import ProxyHealthTracker
 from app.modules.bot_manager.proxy_repository import ProxyRepository
 from app.modules.bot_manager.repository import BotRepository
-from app.modules.iam.admin_service import SESSION_NOT_CLEAN, map_integrity_error
+from app.modules.iam.admin_service import CONFLICT, SESSION_NOT_CLEAN, map_integrity_error
 from app.modules.iam.permissions import PROXIES_MANAGE
 from app.modules.logging.audit import SqlAuditLogger
 from app.modules.logging.events import AuditEvent
@@ -75,6 +73,8 @@ NO_PROXY_AVAILABLE: Final = "no_proxy_available"
 PROXY_EXISTS: Final = "proxy_exists"
 PROXY_NOT_FOUND: Final = "proxy_not_found"
 _LAST_ERROR_MAX: Final = 500
+#: Re-reads of ``bots.proxy_id`` when it changes concurrently during ``assign_proxy``.
+_ASSIGN_ATTEMPTS: Final = 3
 
 VerdictKind = Literal["strike", "outage", "single_proxy", "deduplicated", "error"]
 _log = structlog.get_logger(__name__)
@@ -85,8 +85,8 @@ def _utcnow() -> datetime:
 
 
 def proxy_url_hash(url: str) -> str:
-    """sha256 of the stripped URL (``proxies.url_hash``)."""
-    return hashlib.sha256(url.strip().encode()).hexdigest()
+    """sha256 of the normalized URL (``proxies.url_hash``)."""
+    return hashlib.sha256(validate_proxy_url(url).encode()).hexdigest()
 
 
 class NoProxyAvailableError(DomainError):
@@ -120,8 +120,16 @@ class FailureVerdict:
     released_bot_ids: tuple[UUID, ...] = ()
 
 
-class _Skip(Exception):  # noqa: N818 - internal control-flow signal
-    pass
+class _Bind(enum.Enum):
+    BOUND = "bound"
+    UNAVAILABLE = "unavailable"
+    CHANGED = "changed"
+
+
+class _Abort(Exception):  # noqa: N818 - internal control-flow signal
+    def __init__(self, outcome: _Bind) -> None:
+        super().__init__(outcome.value)
+        self.outcome = outcome
 
 
 class ProxyPoolService:
@@ -140,7 +148,6 @@ class ProxyPoolService:
         audit: AuditLogger | None = None,
         clock: Callable[[], datetime] = _utcnow,
         verdicts: LabeledCounter = proxy_failure_verdicts_total,
-        outage: OutageGauge = telegram_outage,
     ) -> None:
         self._session = session
         self._settings = settings
@@ -149,7 +156,6 @@ class ProxyPoolService:
         self._audit_logger: AuditLogger = audit or SqlAuditLogger()
         self._clock = clock
         self._verdicts = verdicts
-        self._outage = outage
         self._repo = ProxyRepository(session)
         self._bots = BotRepository(session)
 
@@ -203,40 +209,60 @@ class ProxyPoolService:
         """Best ACTIVE proxy with a free slot (strikes, load, id); read only, no commit."""
         return await self._repo.pick_available(self._settings.proxy_max_bots_per_ip)
 
+    async def _try_bind(
+        self, bot_id: UUID, proxy_id: UUID, *, expected: UUID | None, keep: bool
+    ) -> _Bind:
+        """In a savepoint: lock the proxy, recount, lock the bot, re-check its proxy and
+        bind. A rejected proxy releases its lock (savepoint rollback)."""
+        limit = self._settings.proxy_max_bots_per_ip
+        try:
+            async with self._session.begin_nested():
+                proxy = await self._repo.get(proxy_id, for_update=True)
+                if proxy is None or proxy.status != PROXY_STATUS_ACTIVE:
+                    raise _Abort(_Bind.UNAVAILABLE)
+                count = await self._repo.bot_count(proxy_id)
+                # ``keep``: the bot is already counted - stay while not overfull.
+                if count > limit or (not keep and count >= limit):
+                    raise _Abort(_Bind.UNAVAILABLE)
+                bot = await self._bots.get(bot_id, for_update=True)
+                if bot is None:
+                    raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
+                if bot.proxy_id != expected:
+                    raise _Abort(_Bind.CHANGED)
+                if not keep:
+                    bot.proxy_id = proxy_id
+                    await self._session.flush()
+        except _Abort as abort:
+            return abort.outcome
+        return _Bind.BOUND
+
     async def assign_proxy(self, bot_id: UUID) -> UUID:
         """Bind the bot to a proxy (sticky) and commit; :class:`NoProxyAvailableError`."""
         limit = self._settings.proxy_max_bots_per_ip
         async with self._transaction():
-            bot = await self._bots.get(bot_id, for_update=True)
-            if bot is None:
-                raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
-            current = bot.proxy_id
-            if current is not None:
-                proxy = await self._repo.get(current, for_update=True)
-                if (
-                    proxy is not None
-                    and proxy.status == PROXY_STATUS_ACTIVE
-                    and await self._repo.bot_count(current) <= limit
-                ):
-                    return current
-            for candidate in await self._repo.available_ids(limit, exclude=current):
-                try:
-                    # A savepoint per candidate: a skipped proxy releases its row lock.
-                    async with self._session.begin_nested():
-                        proxy = await self._repo.get(candidate, for_update=True)
-                        if (
-                            proxy is None
-                            or proxy.status != PROXY_STATUS_ACTIVE
-                            or await self._repo.bot_count(candidate) >= limit
-                        ):
-                            raise _Skip
-                        bot.proxy_id = candidate
-                        await self._session.flush()
-                except _Skip:
-                    continue
-                _log.info("proxy_assigned", bot_id=str(bot_id), proxy_id=str(candidate))
-                return candidate
-            raise NoProxyAvailableError
+            for _ in range(_ASSIGN_ATTEMPTS):
+                row = await self._repo.bot_proxy_id(bot_id)
+                if row is None:
+                    raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
+                (current,) = row
+                if current is not None:
+                    outcome = await self._try_bind(bot_id, current, expected=current, keep=True)
+                    if outcome is _Bind.BOUND:
+                        return current
+                    if outcome is _Bind.CHANGED:
+                        continue
+                changed = False
+                for candidate in await self._repo.available_ids(limit, exclude=current):
+                    outcome = await self._try_bind(bot_id, candidate, expected=current, keep=False)
+                    if outcome is _Bind.BOUND:
+                        _log.info("proxy_assigned", bot_id=str(bot_id), proxy_id=str(candidate))
+                        return candidate
+                    if outcome is _Bind.CHANGED:
+                        changed = True
+                        break
+                if not changed:
+                    raise NoProxyAvailableError
+            raise DomainError("Bot proxy changed concurrently", code=CONFLICT)
         raise AssertionError("unreachable")  # pragma: no cover
 
     async def release_proxy(self, bot_id: UUID) -> UUID | None:
@@ -255,11 +281,15 @@ class ProxyPoolService:
     async def report_failure(
         self, proxy_id: UUID, exc: BaseException | None = None
     ) -> FailureVerdict:
-        """Strike only when the other ACTIVE proxies work (pool correlation); fail-closed."""
+        """Strike only when the other ACTIVE proxies work (pool correlation).
+
+        Fail-closed: a Redis or database error (deadlock included) gives ``error`` - no
+        strike, logged and counted, never raised to the poller.
+        """
         reason = type(exc).__name__ if exc is not None else "failure"
         try:
             verdict = await self._decide(proxy_id, reason)
-        except (RedisError, OSError) as error:
+        except (RedisError, OSError, SQLAlchemyError) as error:
             _log.warning(
                 "proxy_failure_verdict_error", proxy_id=str(proxy_id), error=type(error).__name__
             )
@@ -278,7 +308,7 @@ class ProxyPoolService:
         others = [item for item in active if item != proxy_id]
         health = await self._tracker.pool_health(others)
         if health.ok == 0 or health.failed / health.total >= self._settings.proxy_outage_ratio:
-            self._outage.set(1)
+            await self._tracker.set_outage()
             _log.warning(
                 "telegram_outage_suspected",
                 proxy_id=str(proxy_id),
@@ -287,28 +317,45 @@ class ProxyPoolService:
                 others=health.total,
             )
             return FailureVerdict("outage")
-        strike = await self.register_strike(proxy_id, reason)
+        strike = await self.register_strike(proxy_id, reason, allow_fallback=False)
         if not strike.applied:
             return FailureVerdict("deduplicated")
         return FailureVerdict("strike", strike.released_bot_ids)
 
-    async def register_strike(self, proxy_id: UUID, reason: str) -> StrikeResult:
-        """At most one strike per window (Redis ``SET NX EX``, fallback ``last_strike_at``);
-        ``>= PROXY_STRIKES_TO_QUARANTINE`` -> quarantine + all bots unbound."""
-        window = timedelta(seconds=self._settings.proxy_strike_window_seconds)
+    async def register_strike(
+        self, proxy_id: UUID, reason: str, *, allow_fallback: bool = True
+    ) -> StrikeResult:
+        """At most one strike per window (Redis ``SET NX EX``); ``>=
+        PROXY_STRIKES_TO_QUARANTINE`` -> quarantine + all bots unbound.
+
+        Redis unavailable: ``allow_fallback=True`` (direct call) dedups by ``last_strike_at``
+        in PostgreSQL, ``False`` (from :meth:`report_failure`) re-raises. A failed
+        transaction frees the taken dedup key (best effort).
+        """
         try:
             first: bool | None = await self._tracker.try_acquire_strike(proxy_id)
         except (RedisError, OSError) as error:
+            if not allow_fallback:
+                raise
             _log.warning("proxy_strike_dedup_fallback", error=type(error).__name__)
             first = None
         if first is False:
             return StrikeResult(applied=False)
+        try:
+            return await self._apply_strike(proxy_id, reason, pg_dedup=first is None)
+        except BaseException:
+            if first:
+                await self._tracker.release_strike(proxy_id)
+            raise
+
+    async def _apply_strike(self, proxy_id: UUID, reason: str, *, pg_dedup: bool) -> StrikeResult:
+        window = timedelta(seconds=self._settings.proxy_strike_window_seconds)
         async with self._transaction():
             proxy = await self._repo.get(proxy_id, for_update=True)
             if proxy is None or proxy.status != PROXY_STATUS_ACTIVE:
                 return StrikeResult(applied=False)
             now = self._clock()
-            if first is None and proxy.last_strike_at is not None:
+            if pg_dedup and proxy.last_strike_at is not None:
                 if now - proxy.last_strike_at < window:
                     return StrikeResult(applied=False)
             proxy.strike_count += 1
@@ -351,6 +398,7 @@ class ProxyPoolService:
 
     # --- manual management (P5) -------------------------------------------------------
     async def add(self, url: str, label: str | None, actor: int) -> UUID:
+        """Add a proxy; the URL is normalized (scheme/host lower-cased) before hashing."""
         await self._require(actor)
         try:
             value = validate_proxy_url(url)

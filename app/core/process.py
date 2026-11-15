@@ -32,12 +32,17 @@ async def run_service(name: str) -> None:
     """
     import sentry_sdk
     from dishka import make_async_container
+    from redis import Redis as SyncRedis
 
     from app.core.config import Settings, get_settings
     from app.core.logging import configure_logging
     from app.core.observability.health import HealthChecker
     from app.core.observability.http_server import create_app, serve_observability
-    from app.core.observability.metrics import AppMetrics, set_build_info
+    from app.core.observability.metrics import (
+        AppMetrics,
+        register_component_metrics,
+        set_build_info,
+    )
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
     from app.core.telemetry import init_telemetry, shutdown_telemetry
@@ -53,6 +58,7 @@ async def run_service(name: str) -> None:
     sentry_enabled = init_sentry(settings, component=name)
     # Before the container: the engine/broker capture the tracer provider when built.
     init_telemetry(settings, service_name=name)
+    outage_redis: SyncRedis | None = None
     container = make_async_container(
         DatabaseProvider(),
         RedisProvider(),
@@ -64,6 +70,12 @@ async def run_service(name: str) -> None:
         checker = await container.get(HealthChecker)
         metrics = await container.get(AppMetrics)
         set_build_info(metrics, component=name)
+        if name == "master_bot":
+            # Sync client for the scrape-time ``EXISTS proxy:outage`` (short timeouts).
+            outage_redis = SyncRedis.from_url(
+                settings.redis_url, socket_timeout=0.5, socket_connect_timeout=0.5
+            )
+        register_component_metrics(metrics, component=name, outage_redis=outage_redis)
         obs = settings.observability
         async with serve_observability(
             create_app(
@@ -78,6 +90,8 @@ async def run_service(name: str) -> None:
         ):
             await run_placeholder(name)
     finally:
+        if outage_redis is not None:
+            outage_redis.close()
         await container.close()
         # Flush/shutdown blocks (exporter deadline): keep the event loop free.
         await asyncio.to_thread(shutdown_telemetry)

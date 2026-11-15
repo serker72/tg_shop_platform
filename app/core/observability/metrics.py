@@ -10,19 +10,20 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Info, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
+from redis.exceptions import RedisError
 
 from app.core.version import VersionInfo, get_version_info
 from app.modules.bot_manager.metrics import (
+    OUTAGE_KEY,
     LabeledCounter,
-    OutageGauge,
     proxy_failure_verdicts_total,
     proxy_probe_total,
-    telegram_outage,
 )
 from app.modules.iam.metrics import (
     INVALIDATION_SCOPES,
@@ -36,8 +37,10 @@ __all__ = [
     "AppMetrics",
     "IamCacheInvalidationCollector",
     "LogsDroppedCollector",
-    "ProxyPoolCollector",
+    "ProxyFailureCollector",
+    "TelegramOutageCollector",
     "build_metrics",
+    "register_component_metrics",
     "render_metrics",
     "set_build_info",
 ]
@@ -103,16 +106,13 @@ class IamCacheInvalidationCollector(Collector):
         return []
 
 
-class ProxyPoolCollector(Collector):
-    """``proxy_failure_verdicts_total{verdict}``, ``proxy_probe_total{result}`` and the
-    ``telegram_outage`` gauge (every label value is exported with ``0``)."""
+class ProxyFailureCollector(Collector):
+    """``proxy_failure_verdicts_total{verdict}`` and ``proxy_probe_total{result}`` of this
+    process (``bot_worker``); every label value is exported with ``0``."""
 
-    def __init__(
-        self, verdicts: LabeledCounter, probes: LabeledCounter, outage: OutageGauge
-    ) -> None:
+    def __init__(self, verdicts: LabeledCounter, probes: LabeledCounter) -> None:
         self._verdicts = verdicts
         self._probes = probes
-        self._outage = outage
 
     def collect(self) -> Iterable[Metric]:
         verdicts = CounterMetricFamily(
@@ -129,10 +129,31 @@ class ProxyPoolCollector(Collector):
         for result, value in sorted(self._probes.snapshot().items()):
             probes.add_metric([result], value)
         yield probes
+
+    def describe(self) -> Iterable[Metric]:
+        return []
+
+
+class TelegramOutageCollector(Collector):
+    """``telegram_outage`` (0/1) = ``EXISTS proxy:outage`` read at scrape time (``master_bot``).
+
+    ``redis`` is a SYNC client with short socket timeouts (the scrape blocks at most for
+    them). Redis unavailable -> the series is omitted (``absent(telegram_outage)``), the
+    rest of ``/metrics`` is served.
+    """
+
+    def __init__(self, redis: Any) -> None:
+        self._redis = redis
+
+    def collect(self) -> Iterable[Metric]:
+        try:
+            value = 1 if self._redis.exists(OUTAGE_KEY) else 0
+        except (RedisError, OSError):
+            return
         yield GaugeMetricFamily(
             "telegram_outage",
             "1 - every proxy fails at once (Telegram unreachable), reset by the first success.",
-            value=self._outage.value,
+            value=value,
         )
 
     def describe(self) -> Iterable[Metric]:
@@ -174,9 +195,6 @@ def build_metrics(
     registry = CollectorRegistry(auto_describe=False)
     registry.register(LogsDroppedCollector(counter))
     registry.register(IamCacheInvalidationCollector(iam_cache_invalidation_failures_total))
-    registry.register(
-        ProxyPoolCollector(proxy_failure_verdicts_total, proxy_probe_total, telegram_outage)
-    )
     metrics = AppMetrics(
         registry=registry,
         logs_dropped=counter,
@@ -202,6 +220,22 @@ def build_metrics(
     )
     set_build_info(metrics, component=component)
     return metrics
+
+
+def register_component_metrics(
+    metrics: AppMetrics, *, component: str, outage_redis: Any | None = None
+) -> None:
+    """Register the collectors owned by a process role (no duplicate series elsewhere).
+
+    ``bot_worker`` - proxy failure verdicts and probes (aggregate with ``sum`` across
+    replicas); ``master_bot`` - the shared ``telegram_outage`` gauge (needs ``outage_redis``).
+    """
+    if component == "bot_worker":
+        metrics.registry.register(
+            ProxyFailureCollector(proxy_failure_verdicts_total, proxy_probe_total)
+        )
+    elif component == "master_bot" and outage_redis is not None:
+        metrics.registry.register(TelegramOutageCollector(outage_redis))
 
 
 def render_metrics(registry: CollectorRegistry) -> bytes:

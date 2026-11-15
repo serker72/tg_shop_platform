@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,10 +13,17 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import ProxySettings, Settings
-from app.modules.bot_manager.metrics import PROBE_RESULTS, LabeledCounter
+from app.core.observability.metrics import (
+    build_metrics,
+    register_component_metrics,
+    render_metrics,
+)
+from app.core.proxy_url import validate_proxy_url
+from app.modules.bot_manager.metrics import FAILURE_VERDICTS, PROBE_RESULTS, LabeledCounter
 from app.modules.bot_manager.models import Proxy
 from app.modules.bot_manager.proxy_health import probe_handshake
 from app.modules.bot_manager.sessions import build_bot_session, mask_proxy_url
+from app.modules.logging.metrics import LogsDroppedCounter
 
 pytestmark = pytest.mark.req("R-II.14")
 
@@ -32,6 +40,8 @@ def _proxy_settings(**values: Any) -> ProxySettings:
         ("http://u:p@proxy.example:3128/path?x=1", "http://proxy.example:3128"),
         ("socks4://[::1]:9050", "socks4://[::1]:9050"),
         ("garbage", "?://?"),
+        ("login:pass@host:1080", "?://?"),
+        ("ftp://u:secret@h:21", "?://h:21"),
         ("socks5://u:p@h:99999", "<invalid proxy url>"),
     ],
 )
@@ -49,9 +59,57 @@ def test_proxy_repr_has_no_url() -> None:
 
 
 def test_proxy_settings_defaults() -> None:
-    s = _proxy_settings(master_bot_use_proxy=False, master_bot_proxy_url=None)
-    assert s.proxy_max_bots_per_ip >= 1
-    assert 0 < s.proxy_outage_ratio <= 1
+    s = _proxy_settings()
+    assert (s.master_bot_use_proxy, s.master_bot_proxy_url, s.tenants_use_proxy) == (
+        False,
+        None,
+        False,
+    )
+    assert (
+        s.proxy_max_bots_per_ip,
+        s.proxy_strikes_to_quarantine,
+        s.proxy_quarantine_days,
+        s.proxy_strike_window_seconds,
+        s.proxy_failure_threshold,
+        s.proxy_outage_ratio,
+    ) == (20, 2, 7, 3600, 5, 0.5)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("proxy_max_bots_per_ip", 0),
+        ("proxy_strikes_to_quarantine", 0),
+        ("proxy_quarantine_days", 0),
+        ("proxy_strike_window_seconds", 0),
+        ("proxy_failure_threshold", 0),
+        ("proxy_outage_ratio", 0),
+        ("proxy_outage_ratio", 1.1),
+    ],
+)
+def test_proxy_settings_bounds(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        _proxy_settings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("SOCKS5://User:Pass@Host.Example:1080", "socks5://User:Pass@host.example:1080"),
+        (" http://10.0.0.1:3128/path ", "http://10.0.0.1:3128"),
+        ("socks4://[::1]:9050", "socks4://[::1]:9050"),
+    ],
+)
+def test_validate_proxy_url_normalizes(url: str, expected: str) -> None:
+    assert validate_proxy_url(url) == expected
+
+
+@pytest.mark.parametrize("url", ["socks5://u:secret@h", "login:secret@host:1080", "https://h:1"])
+def test_validate_proxy_url_rejects_without_secret(url: str) -> None:
+    with pytest.raises(ValueError) as info:  # noqa: PT011 - message checked below
+        validate_proxy_url(url)
+    assert "secret" not in str(info.value)
+    assert "login" not in str(info.value)
 
 
 def test_master_proxy_url_required_when_enabled() -> None:
@@ -175,10 +233,13 @@ async def test_probe_proxy_auth_rejected_is_proxy_dead() -> None:
 
 
 async def test_probe_proxy_unreachable_is_proxy_dead() -> None:
-    async with _server("ok") as port:
-        pass  # closed: nothing listens on the port any more
-    result = await probe_handshake(f"socks5://127.0.0.1:{port}", 2.0, tls=False)
-    assert result.error_kind == "proxy_dead"
+    # Bound but not listening (kept open): the port can not be reused by anyone else and a
+    # connect is refused deterministically (Linux/macOS), no race with a closed server.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        port = holder.getsockname()[1]
+        result = await probe_handshake(f"socks5://127.0.0.1:{port}", 2.0, tls=False)
+    assert (result.proxy_ok, result.error_kind) == (False, "proxy_dead")
 
 
 @pytest.mark.parametrize("tls", [False, True])
@@ -200,3 +261,58 @@ async def test_probe_ok() -> None:
         )
     assert (result.proxy_ok, result.telegram_ok, result.error_kind) == (True, True, None)
     assert counter.snapshot() == {"ok": 1, "proxy_dead": 0, "telegram_blocked": 0}
+
+
+# --- metrics by process role ---------------------------------------------------------------
+
+
+class _FakeSyncRedis:
+    def __init__(self, value: int | Exception) -> None:
+        self.value = value
+        self.keys: list[str] = []
+
+    def exists(self, key: str) -> int:
+        self.keys.append(key)
+        if isinstance(self.value, Exception):
+            raise self.value
+        return self.value
+
+
+def _render(component: str, redis: Any = None) -> str:
+    metrics = build_metrics(LogsDroppedCounter())
+    register_component_metrics(metrics, component=component, outage_redis=redis)
+    return render_metrics(metrics.registry).decode()
+
+
+def test_worker_exports_proxy_counters_with_zeros() -> None:
+    text = _render("bot_worker")
+    for verdict in FAILURE_VERDICTS:
+        assert f'proxy_failure_verdicts_total{{verdict="{verdict}"}}' in text
+    for result in PROBE_RESULTS:
+        assert f'proxy_probe_total{{result="{result}"}}' in text
+    assert "telegram_outage" not in text
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(1, "telegram_outage 1.0"), (0, "telegram_outage 0.0")]
+)
+def test_master_exports_outage_gauge_from_redis(value: int, expected: str) -> None:
+    redis = _FakeSyncRedis(value)
+    text = _render("master_bot", redis)
+    assert expected in text
+    assert redis.keys == ["proxy:outage"]
+    assert "proxy_failure_verdicts_total" not in text
+
+
+def test_master_outage_gauge_omitted_when_redis_down() -> None:
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    text = _render("master_bot", _FakeSyncRedis(RedisConnectionError("down")))
+    assert "telegram_outage" not in text
+    assert "logs_dropped_total" in text  # the rest of /metrics is served
+
+
+def test_other_processes_export_no_proxy_series() -> None:
+    text = _render("db_update")
+    assert "proxy_" not in text
+    assert "telegram_outage" not in text

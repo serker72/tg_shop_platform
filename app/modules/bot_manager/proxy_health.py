@@ -3,7 +3,8 @@
 Keys (TTL = ``PROXY_STRIKE_WINDOW_SECONDS``): ``proxy:ok:{id}`` - last successful
 ``getUpdates`` through the proxy (the poller calls :meth:`ProxyHealthTracker.mark_ok`,
 throttled locally), ``proxy:fail:{id}`` - the poller reached ``PROXY_FAILURE_THRESHOLD``
-errors (:meth:`ProxyHealthTracker.mark_fail`), ``proxy:strike:{id}`` - dedup of strikes.
+errors (:meth:`ProxyHealthTracker.mark_fail`), ``proxy:strike:{id}`` - dedup of strikes,
+``proxy:outage`` - suspected Telegram outage shared by all processes.
 A proxy is "ok" when it has ``proxy:ok`` and no newer ``proxy:fail``.
 """
 
@@ -21,14 +22,10 @@ from uuid import UUID
 import structlog
 from redis.exceptions import RedisError
 
-from app.modules.bot_manager.metrics import (
-    LabeledCounter,
-    OutageGauge,
-    proxy_probe_total,
-    telegram_outage,
-)
+from app.modules.bot_manager.metrics import OUTAGE_KEY, LabeledCounter, proxy_probe_total
 
 __all__ = [
+    "OUTAGE_KEY",
     "TELEGRAM_API_HOST",
     "HandshakeResult",
     "PoolHealth",
@@ -77,7 +74,7 @@ class PoolHealth:
 
 
 class ProxyHealthTracker:
-    """Redis marks of proxy success/failure. Not for concurrent use across event loops."""
+    """Redis marks of proxy success/failure and of a Telegram outage."""
 
     def __init__(
         self,
@@ -86,30 +83,28 @@ class ProxyHealthTracker:
         window_seconds: int,
         ok_throttle_seconds: float = DEFAULT_OK_THROTTLE_SECONDS,
         clock: Callable[[], float] = time.time,
-        outage: OutageGauge = telegram_outage,
     ) -> None:
         self._redis = redis
         self._window = window_seconds
         self._throttle = ok_throttle_seconds
         self._clock = clock
-        self._outage = outage
         self._last_ok: dict[UUID, float] = {}
 
     async def mark_ok(self, proxy_id: UUID) -> bool:
-        """Mark a successful request; ``False`` - throttled or Redis failed (logged)."""
+        """Mark a successful request and clear the outage key (one ``SET`` + one ``DEL``
+        per throttle period); ``False`` - throttled or Redis failed (logged)."""
         now = self._clock()
         last = self._last_ok.get(proxy_id)
         if last is not None and now - last < self._throttle:
             return False
         try:
             await self._redis.set(ok_key(proxy_id), f"{now:.6f}", ex=self._window)
+            if await self._redis.delete(OUTAGE_KEY):
+                _log.info("telegram_outage_cleared", proxy_id=str(proxy_id))
         except (RedisError, OSError) as error:
             _log.warning("proxy_mark_ok_failed", proxy_id=str(proxy_id), error=type(error).__name__)
             return False
         self._last_ok[proxy_id] = now
-        if self._outage.value:
-            self._outage.set(0)
-            _log.info("telegram_outage_cleared", proxy_id=str(proxy_id))
         return True
 
     async def mark_fail(self, proxy_id: UUID) -> bool:
@@ -140,6 +135,13 @@ class ProxyHealthTracker:
                 failed += 1
         return PoolHealth(ok=ok, failed=failed, total=len(ids))
 
+    async def set_outage(self) -> None:
+        """``SET proxy:outage <ts> EX window``; Redis errors propagate."""
+        await self._redis.set(OUTAGE_KEY, f"{self._clock():.6f}", ex=self._window)
+
+    async def outage_active(self) -> bool:
+        return bool(await self._redis.exists(OUTAGE_KEY))
+
     async def try_acquire_strike(self, proxy_id: UUID) -> bool:
         """``SET proxy:strike:{id} NX EX window``: ``True`` - the first strike in the window."""
         return bool(
@@ -147,6 +149,15 @@ class ProxyHealthTracker:
                 strike_key(proxy_id), f"{self._clock():.6f}", nx=True, ex=self._window
             )
         )
+
+    async def release_strike(self, proxy_id: UUID) -> None:
+        """Best effort: free the dedup key of a strike whose transaction failed."""
+        try:
+            await self._redis.delete(strike_key(proxy_id))
+        except (RedisError, OSError) as error:
+            _log.warning(
+                "proxy_strike_release_failed", proxy_id=str(proxy_id), error=type(error).__name__
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +188,7 @@ async def probe_handshake(
 
     Failure while connecting/authenticating to the proxy -> ``proxy_dead``; the tunnel is
     open but TLS/HTTP to Telegram fails -> ``telegram_blocked``. Counted in
-    ``proxy_probe_total{result}``.
+    ``proxy_probe_total{result}``. ``timeout_seconds`` applies to every network step.
     """
     result = await _probe(proxy_url, timeout_seconds, host=host, port=port, tls=tls)
     counter.inc(result.result)
@@ -185,12 +196,7 @@ async def probe_handshake(
 
 
 async def _probe(
-    proxy_url: str,
-    timeout_seconds: float,
-    *,
-    host: str,
-    port: int,
-    tls: bool,
+    proxy_url: str, timeout_seconds: float, *, host: str, port: int, tls: bool
 ) -> HandshakeResult:
     from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
     from python_socks.async_.asyncio import Proxy as SocksProxy

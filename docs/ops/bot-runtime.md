@@ -8,8 +8,9 @@ one IP does not stop every bot. Code: `app/modules/bot_manager/proxy_service.py`
 ## Pool and assignment
 - Proxies live in the `proxies` table (URL encrypted, unique by `url_hash`), managed in the
   Master Bot panel (permission `proxies.manage`): add / ban / activate. Schemes: `socks5`,
-  `socks4`, `http` (`scheme://[user:pass@]host:port`); `https://` proxies are not supported
-  by `aiohttp-socks`/`python-socks`.
+  `socks4`, `http` (`scheme://[user:pass@]host:port`, port required; scheme and host are
+  lower-cased before hashing, so `SOCKS5://Host:1` and `socks5://host:1` are one proxy);
+  `https://` proxies are not supported by `aiohttp-socks`/`python-socks`.
 - A bot is bound by `bots.proxy_id`; the load of a proxy is `COUNT` of its live bots (not
   stored). `assign_proxy` locks the proxy row (`FOR UPDATE`) and recounts, so the limit
   `PROXY_MAX_BOTS_PER_IP` holds under parallel assignments. Binding is sticky: an ACTIVE,
@@ -37,8 +38,25 @@ one IP does not stop every bot. Code: `app/modules/bot_manager/proxy_service.py`
 - `probe_handshake` tells a dead proxy (`proxy_dead`: connect/auth to the proxy fails) from a
   Telegram block (`telegram_blocked`: tunnel opened, TLS/HTTP to `api.telegram.org` fails).
 
-Metrics: `proxy_failure_verdicts_total{verdict}`, `proxy_probe_total{result}`,
-`telegram_outage`. 401 from Telegram is an invalid token, never a proxy strike.
+401 from Telegram is an invalid token, never a proxy strike.
+
+## Metrics: which process exports what
+| Series | Process | Source | Aggregation |
+|---|---|---|---|
+| `proxy_failure_verdicts_total{verdict}` (`strike`, `outage`, `single_proxy`, `deduplicated`, `error`) | `bot_worker` (every replica) | in-process counter | `sum by (verdict) (rate(...))` |
+| `proxy_probe_total{result}` (`ok`, `proxy_dead`, `telegram_blocked`) | `bot_worker` | in-process counter | `sum by (result) (rate(...))` |
+| `telegram_outage` (0/1) | `master_bot` only | `EXISTS proxy:outage` in Redis at scrape time | `max(telegram_outage)` |
+
+All label values are exported with `0`. The outage state is shared: any worker sets
+`proxy:outage` (TTL `PROXY_STRIKE_WINDOW_SECONDS`) on an `outage` verdict, the first
+successful `mark_ok` of any worker deletes it. If Redis is unreachable during a scrape,
+`telegram_outage` is omitted (use `absent(telegram_outage)`), the rest of `/metrics` works.
+Pool gauges from PostgreSQL (proxies by status, capacity) - `master_bot`, task 13.
+
+## Lock order
+Proxy row first, then the bot row (`assign_proxy`, `register_strike`, `ban`): no deadlock
+between parallel assignment and quarantine/ban. A DB error inside `report_failure` gives
+the verdict `error` (logged, counted), never an exception to the poller.
 
 ## Parameters (`.env`)
 | Variable | Default | Meaning |

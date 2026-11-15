@@ -81,6 +81,12 @@ class ProxyRepository:
             stmt = stmt.where(Proxy.id != exclude)
         return list(await self._session.scalars(stmt))
 
+    async def bot_proxy_id(self, bot_id: UUID) -> tuple[UUID | None] | None:
+        """``(proxy_id,)`` of a live bot without a lock; ``None`` - no such bot."""
+        stmt = select(Bot.proxy_id).where(Bot.id == bot_id, Bot.is_deleted.is_(false()))
+        row = (await self._session.execute(stmt)).first()
+        return None if row is None else (row[0],)
+
     async def bot_count(self, proxy_id: UUID) -> int:
         stmt = (
             select(func.count())

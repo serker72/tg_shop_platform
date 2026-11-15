@@ -1,31 +1,36 @@
-"""In-process metrics of the proxy pool, exported by
-:class:`~app.core.observability.metrics.ProxyPoolCollector`:
+"""In-process counters of the proxy pool and the shared outage key.
 
 * ``proxy_failure_verdicts_total{verdict}`` - decisions of ``ProxyPoolService.report_failure``;
-* ``proxy_probe_total{result}`` - results of ``probe_handshake``;
-* ``telegram_outage`` (gauge 0/1) - set by an ``outage`` verdict, reset by the first
-  confirmed ``mark_ok`` (source of the ``TelegramUnreachable`` alert, task 13).
+* ``proxy_probe_total{result}`` - results of ``probe_handshake``.
 
-Every label value is exported with ``0`` before its first event.
+Both are incremented and exported by the process that runs the bots (``bot_worker``);
+Prometheus aggregates them with ``sum``. Every label value is exported with ``0``.
+
+The Telegram outage state is shared between processes: Redis key :data:`OUTAGE_KEY`
+(set by an ``outage`` verdict with TTL = strike window, deleted by the first successful
+``mark_ok``). Only ``master_bot`` exports it as the ``telegram_outage`` gauge
+(:class:`~app.core.observability.metrics.TelegramOutageCollector`).
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
+from typing import Final
 
 __all__ = [
     "FAILURE_VERDICTS",
+    "OUTAGE_KEY",
     "PROBE_RESULTS",
     "LabeledCounter",
-    "OutageGauge",
     "proxy_failure_verdicts_total",
     "proxy_probe_total",
-    "telegram_outage",
 ]
 
 FAILURE_VERDICTS: tuple[str, ...] = ("strike", "outage", "single_proxy", "deduplicated", "error")
 PROBE_RESULTS: tuple[str, ...] = ("ok", "proxy_dead", "telegram_blocked")
+#: Redis key of a suspected Telegram outage (value - unix ts, TTL - strike window).
+OUTAGE_KEY: Final = "proxy:outage"
 
 
 class LabeledCounter:
@@ -52,23 +57,5 @@ class LabeledCounter:
             self._values = dict.fromkeys(self._known, 0)
 
 
-class OutageGauge:
-    """0/1 gauge."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._value = 0
-
-    def set(self, value: int) -> None:
-        with self._lock:
-            self._value = 1 if value else 0
-
-    @property
-    def value(self) -> int:
-        with self._lock:
-            return self._value
-
-
 proxy_failure_verdicts_total = LabeledCounter(FAILURE_VERDICTS)
 proxy_probe_total = LabeledCounter(PROBE_RESULTS)
-telegram_outage = OutageGauge()
