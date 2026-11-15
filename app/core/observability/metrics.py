@@ -17,11 +17,17 @@ from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
 from app.core.version import VersionInfo, get_version_info
+from app.modules.iam.metrics import (
+    INVALIDATION_SCOPES,
+    CacheInvalidationFailures,
+    iam_cache_invalidation_failures_total,
+)
 from app.modules.logging.metrics import DROP_REASONS, LogsDroppedCounter, logs_dropped_total
 
 __all__ = [
     "METRICS_CONTENT_TYPE",
     "AppMetrics",
+    "IamCacheInvalidationCollector",
     "LogsDroppedCollector",
     "build_metrics",
     "render_metrics",
@@ -67,6 +73,28 @@ class LogsDroppedCollector(Collector):
         return []
 
 
+class IamCacheInvalidationCollector(Collector):
+    """Expose :class:`CacheInvalidationFailures` as ``iam_cache_invalidation_failures_total``."""
+
+    def __init__(self, counter: CacheInvalidationFailures) -> None:
+        self._counter = counter
+
+    def collect(self) -> Iterable[Metric]:
+        family = CounterMetricFamily(
+            "iam_cache_invalidation_failures",
+            "Permission-cache invalidations not confirmed by Redis after a committed IAM change.",
+            labels=["scope"],
+        )
+        values = dict.fromkeys(INVALIDATION_SCOPES, 0)
+        values.update(self._counter.by_scope)
+        for scope, value in sorted(values.items()):
+            family.add_metric([scope], value)
+        yield family
+
+    def describe(self) -> Iterable[Metric]:
+        return []
+
+
 @dataclass(frozen=True, slots=True)
 class AppMetrics:
     """Registry and the application metrics registered in it."""
@@ -101,6 +129,7 @@ def build_metrics(
     counter = dropped if dropped is not None else logs_dropped_total
     registry = CollectorRegistry(auto_describe=False)
     registry.register(LogsDroppedCollector(counter))
+    registry.register(IamCacheInvalidationCollector(iam_cache_invalidation_failures_total))
     metrics = AppMetrics(
         registry=registry,
         logs_dropped=counter,

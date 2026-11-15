@@ -9,13 +9,28 @@ Every mutating method follows one pattern:
 4. ``session.commit()`` (any error -> rollback, nothing is written);
 5. strictly AFTER the commit - ``invalidate(telegram_user_id)`` or ``invalidate_all``.
 
+A request that changes nothing (the requested state already holds) commits the read-only
+transaction and writes neither audit nor invalidation.
+
+**Cache contract.** After every mutating call :attr:`_AdminService.cache_invalidated` tells
+whether Redis confirmed the invalidation. ``False`` -> the change IS stored, but other
+processes may serve the old permissions until the snapshot TTL; the failure is logged
+(ERROR) and counted in ``iam_cache_invalidation_failures_total``. Callers (panel dialogs)
+show a warning. There is no immediate retry: the cache circuit breaker makes it useless.
+
+**Session contract.** The services commit the request session themselves, so it must not
+hold foreign pending changes on entry (``session_not_clean``). Changes already *flushed*
+by the caller can not be detected - do not mix them with these services in one session.
+
 ``is_superuser`` is never set here (CLI only). Actors and targets are identified by the
-Telegram user id. Error codes are the module constants (``DomainError.code``).
+Telegram user id; a missing/inactive actor is answered with ``permission_denied`` (its
+existence is not disclosed). Error codes are the module constants (``DomainError.code``).
 """
 
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import AsyncIterator, Callable, Collection, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -27,6 +42,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.iam.admin_repository import IamAdminRepository
+from app.modules.iam.metrics import (
+    CacheInvalidationFailures,
+    iam_cache_invalidation_failures_total,
+)
 from app.modules.iam.models import (
     PERMISSION_SLUG_PATTERN,
     ROLE_SLUG_PATTERN,
@@ -52,6 +71,7 @@ from app.modules.logging.audit import SqlAuditLogger
 from app.modules.logging.events import ActorType, AuditEvent
 from app.modules.logging.ports import AuditLogger
 from app.shared_kernel.domain.exceptions import (
+    DomainError,
     EntityAlreadyExistsError,
     EntityNotFoundError,
     PermissionDeniedError,
@@ -60,10 +80,10 @@ from app.shared_kernel.domain.exceptions import (
 from app.shared_kernel.infrastructure.base_repository import BaseRepository
 
 __all__ = [
-    "ACTOR_NOT_FOUND",
     "CONFLICT",
     "EXPIRES_AT_NOT_IN_FUTURE",
     "GLOBAL_PERMISSION_TENANT_OVERRIDE",
+    "INVALID_EXPIRES_AT",
     "INVALID_NAME",
     "INVALID_ROLE_SLUG",
     "INVALID_SETTINGS",
@@ -80,6 +100,7 @@ __all__ = [
     "ROLE_NOT_FOUND",
     "ROLE_SLUG_TAKEN",
     "SELF_MODIFICATION_FORBIDDEN",
+    "SESSION_NOT_CLEAN",
     "SUPERUSER_PROTECTED",
     "SYSTEM_ROLE_PROTECTED",
     "TENANT_NOT_FOUND",
@@ -93,7 +114,9 @@ __all__ = [
     "TenantAdminService",
     "UserAdminService",
     "ensure_not_self",
+    "ensure_superuser_protected",
     "ensure_system_role_mutable",
+    "map_integrity_error",
     "normalize_username",
     "validate_expires_at",
     "validate_name",
@@ -106,10 +129,10 @@ __all__ = [
 ]
 
 # --- error codes ---------------------------------------------------------------------
-ACTOR_NOT_FOUND: Final = "actor_not_found"
 CONFLICT: Final = "conflict"
 EXPIRES_AT_NOT_IN_FUTURE: Final = "expires_at_not_in_future"
 GLOBAL_PERMISSION_TENANT_OVERRIDE: Final = "global_permission_tenant_override"
+INVALID_EXPIRES_AT: Final = "invalid_expires_at"
 INVALID_NAME: Final = "invalid_name"
 INVALID_ROLE_SLUG: Final = "invalid_role_slug"
 INVALID_SETTINGS: Final = "invalid_settings"
@@ -126,6 +149,7 @@ ROLE_NOT_ASSIGNED: Final = "role_not_assigned"
 ROLE_NOT_FOUND: Final = "role_not_found"
 ROLE_SLUG_TAKEN: Final = "role_slug_taken"
 SELF_MODIFICATION_FORBIDDEN: Final = "self_modification_forbidden"
+SESSION_NOT_CLEAN: Final = "session_not_clean"
 SUPERUSER_PROTECTED: Final = "superuser_protected"
 SYSTEM_ROLE_PROTECTED: Final = "system_role_protected"
 TENANT_NOT_FOUND: Final = "tenant_not_found"
@@ -146,6 +170,23 @@ TENANT_SETTINGS_FIELDS: Final[Mapping[str, str]] = {
     "news_chat_id": "chat",
 }
 
+#: Unique constraint -> domain code (names from the IAM revisions' naming convention).
+_UNIQUE_CODES: Final[Mapping[str, str]] = {
+    "uq_tenants_slug": TENANT_SLUG_TAKEN,
+    "uq_roles_slug": ROLE_SLUG_TAKEN,
+    "uq_users_telegram_user_id": USER_EXISTS,
+    "uq_user_roles_user_id_role_id": ROLE_ALREADY_ASSIGNED,
+    "uq_tenant_moderators_user_id_tenant_id": MODERATOR_ALREADY_ASSIGNED,
+}
+#: FK names end with ``_<referred table>`` (``fk_user_roles_role_id_roles``).
+_FK_CODES: Final[Mapping[str, str]] = {
+    "users": USER_NOT_FOUND,
+    "tenants": TENANT_NOT_FOUND,
+    "roles": ROLE_NOT_FOUND,
+    "permissions": PERMISSION_NOT_FOUND,
+    "languages": LANGUAGE_NOT_FOUND,
+}
+
 _TENANT_SLUG_RE = re.compile(TENANT_SLUG_PATTERN)
 _ROLE_SLUG_RE = re.compile(ROLE_SLUG_PATTERN)
 _PERMISSION_SLUG_RE = re.compile(PERMISSION_SLUG_PATTERN)
@@ -155,6 +196,10 @@ _log = structlog.get_logger(__name__)
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+class _NoChange(Exception):  # noqa: N818 - internal control-flow signal
+    """The requested state already holds: commit the read, skip audit and invalidation."""
 
 
 # --- pure business rules (unit-tested) -------------------------------------------------
@@ -238,7 +283,7 @@ def validate_expires_at(expires_at: datetime | None, now: datetime) -> None:
     if expires_at is None:
         return
     if expires_at.tzinfo is None or expires_at.utcoffset() is None:
-        raise ValidationError("expires_at must be timezone-aware", code=EXPIRES_AT_NOT_IN_FUTURE)
+        raise ValidationError("expires_at must be timezone-aware", code=INVALID_EXPIRES_AT)
     if expires_at <= now:
         raise ValidationError("expires_at must be in the future", code=EXPIRES_AT_NOT_IN_FUTURE)
 
@@ -261,6 +306,22 @@ def validate_tenant_settings(changes: Mapping[str, Any]) -> dict[str, Any]:
             raise ValidationError(f"Invalid value for {key}", code=INVALID_SETTINGS)
         result[key] = value
     return result
+
+
+def map_integrity_error(error: IntegrityError) -> DomainError:
+    """Database constraint error -> domain error; the SQL text is never put in the message."""
+    orig = error.orig
+    sqlstate = getattr(orig, "sqlstate", None)
+    constraint = getattr(getattr(orig, "diag", None), "constraint_name", None) or ""
+    if sqlstate == "23505":
+        return EntityAlreadyExistsError(
+            "Entity already exists", code=_UNIQUE_CODES.get(constraint, CONFLICT)
+        )
+    if sqlstate == "23503":
+        for table, code in _FK_CODES.items():
+            if constraint.endswith(f"_{table}"):
+                return EntityNotFoundError("Referenced entity not found", code=code)
+    return EntityAlreadyExistsError("Concurrent change conflict", code=CONFLICT)
 
 
 def _jsonable(value: Any) -> Any:
@@ -291,12 +352,18 @@ class _AdminService:
         audit: AuditLogger | None = None,
         repository: IamAdminRepository | None = None,
         clock: Callable[[], datetime] = _utcnow,
+        invalidation_failures: CacheInvalidationFailures = iam_cache_invalidation_failures_total,
     ) -> None:
         self._session = session
         self._permissions = permissions
         self._audit_logger: AuditLogger = audit or SqlAuditLogger()
         self._repo = repository or IamAdminRepository(session)
         self._clock = clock
+        self._failures = invalidation_failures
+        self._noop = False
+        #: Result of the last mutating call: ``False`` -> Redis did not confirm the
+        #: invalidation (change stored, stale permissions possible until the TTL).
+        self.cache_invalidated = True
 
     async def _authorize(
         self, actor_telegram_id: int, slug: str, tenant_id: UUID | None = None
@@ -360,28 +427,57 @@ class _AdminService:
             ),
         )
 
+    def _ensure_clean_session(self) -> None:
+        for name in ("new", "dirty", "deleted"):
+            if getattr(self._session, name, None):
+                raise ValidationError(
+                    "Session holds foreign pending changes", code=SESSION_NOT_CLEAN
+                )
+
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
-        """Commit on success; rollback on any error (unique races -> ``conflict``)."""
+        """Commit on success; :class:`_NoChange` -> commit the read only; error -> rollback."""
+        self._ensure_clean_session()
+        self._noop = False
+        self.cache_invalidated = True
         try:
             yield
             await self._session.commit()
+        except _NoChange:
+            # Nothing pending: commit ends the read transaction (and its row locks) without
+            # expiring the loaded objects (``rollback`` would).
+            await self._session.commit()
+            self._noop = True
         except IntegrityError as error:
             await self._session.rollback()
-            raise EntityAlreadyExistsError("Concurrent change conflict", code=CONFLICT) from error
+            raise map_integrity_error(error) from error
         except BaseException:
             await self._session.rollback()
             raise
 
-    async def _invalidate(self, users: Iterable[int] = (), *, everything: bool = False) -> None:
-        """AFTER commit only. One retry; an unconfirmed result is logged by PermissionService."""
+    async def _invalidate(self, users: Iterable[int] = (), *, everything: bool = False) -> bool:
+        """AFTER commit only; sets and returns :attr:`cache_invalidated` (no retry)."""
+        if self._noop:
+            return True
+        targets = tuple(users)
+        ok = True
         if everything:
             if not (await self._permissions.invalidate_all()).ok:
-                await self._permissions.invalidate_all()
-            return
-        for telegram_user_id in users:
-            if not (await self._permissions.invalidate(telegram_user_id)).ok:
-                await self._permissions.invalidate(telegram_user_id)
+                ok = False
+                self._failures.inc(scope="all")
+        else:
+            for telegram_user_id in targets:
+                if not (await self._permissions.invalidate(telegram_user_id)).ok:
+                    ok = False
+                    self._failures.inc(scope="user")
+        if not ok:
+            _log.error(
+                "iam_admin_cache_invalidation_failed",
+                telegram_user_ids=list(targets),
+                everything=everything,
+            )
+        self.cache_invalidated = ok
+        return ok
 
 
 def _tenant_state(tenant: Tenant) -> dict[str, Any]:
@@ -409,6 +505,16 @@ def _role_state(role: Role) -> dict[str, Any]:
         "is_active": role.is_active,
         "is_deleted": role.is_deleted,
         "is_system": role.is_system,
+    }
+
+
+def _override_state(row: UserPermissionOverride, slug: str) -> dict[str, Any]:
+    return {
+        "permission": slug,
+        "tenant_id": row.tenant_id,
+        "is_granted": row.is_granted,
+        "expires_at": row.expires_at,
+        "reason": row.reason,
     }
 
 
@@ -446,8 +552,11 @@ class TenantAdminService(_AdminService):
         async with self._transaction():
             await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
             tenant = await self._live_tenant(tenant_id, for_update=True)
+            new_name = validate_name(name)
+            if tenant.name == new_name:
+                raise _NoChange
             before = _tenant_state(tenant)
-            tenant.name = validate_name(name)
+            tenant.name = new_name
             await self._session.flush()
             await self._audit(
                 actor_telegram_id,
@@ -470,6 +579,8 @@ class TenantAdminService(_AdminService):
         async with self._transaction():
             await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
             tenant = await self._live_tenant(tenant_id, for_update=True)
+            if tenant.is_active == active:
+                raise _NoChange
             before = _tenant_state(tenant)
             tenant.is_active = active
             await self._session.flush()
@@ -508,6 +619,8 @@ class TenantAdminService(_AdminService):
             tenant = await self._repo.get_tenant(tenant_id, include_deleted=True, for_update=True)
             if tenant is None:
                 raise EntityNotFoundError("Tenant not found", code=TENANT_NOT_FOUND)
+            if not tenant.is_deleted:
+                raise _NoChange
             before = _tenant_state(tenant)
             await BaseRepository(self._session, Tenant).restore(tenant)
             await self._audit(
@@ -533,6 +646,9 @@ class TenantAdminService(_AdminService):
             settings = await self._repo.get_tenant_settings(tenant_id, for_update=True)
             if settings is None:
                 raise EntityNotFoundError("Tenant settings not found", code=TENANT_NOT_FOUND)
+            values = {k: v for k, v in values.items() if getattr(settings, k) != v}
+            if not values:
+                raise _NoChange
             code = values.get("default_language_code")
             if code is not None and not await self._repo.language_is_live(code):
                 raise ValidationError(f"Unknown language {code!r}", code=LANGUAGE_NOT_FOUND)
@@ -601,13 +717,16 @@ class UserAdminService(_AdminService):
     async def update_username(self, telegram_user_id: int, username: str | None) -> User | None:
         """Pick up the username on ``/start`` (self-reported data, no permission check).
 
-        Unknown or deleted user -> ``None`` (nothing written); unchanged -> no write.
+        Unknown or deleted user -> ``None``; unchanged -> plain read, no lock/commit/audit.
         """
         new = normalize_username(username)
+        current = await self._repo.get_user_by_telegram_id(telegram_user_id)
+        if current is None or current.telegram_user_name == new:
+            return current
         async with self._transaction():
             user = await self._repo.get_user_by_telegram_id(telegram_user_id, for_update=True)
             if user is None or user.telegram_user_name == new:
-                return user
+                raise _NoChange
             before = _user_state(user)
             user.telegram_user_name = new
             await self._session.flush()
@@ -635,6 +754,16 @@ class UserAdminService(_AdminService):
             user = await self._target_user(telegram_user_id)
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)
+            if user.is_active == active:
+                raise _NoChange
+            if active:
+                # Activation gives the rights back: the actor must hold every one of them.
+                grants = await self._repo.user_granted_permissions(user.id, now=self._clock())
+                by_tenant: dict[UUID | None, set[str]] = defaultdict(set)
+                for slug, tenant_id in grants:
+                    by_tenant[tenant_id].add(slug)
+                for tenant_id, slugs in by_tenant.items():
+                    await self._ensure_actor_holds(actor_telegram_id, slugs, tenant_id)
             before = _user_state(user)
             user.is_active = active
             await self._session.flush()
@@ -676,6 +805,8 @@ class UserAdminService(_AdminService):
             user = await self._target_user(telegram_user_id, include_deleted=True)
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)
+            if not user.is_deleted:
+                raise _NoChange
             before = _user_state(user)
             await BaseRepository(self._session, User).restore(user)
             await self._audit(
@@ -744,8 +875,11 @@ class RoleAdminService(_AdminService):
         async with self._transaction():
             await self._authorize(actor_telegram_id, ROLES_MANAGE)
             role = await self._role(role_id)
+            new_name = validate_name(name)
+            if role.name == new_name:
+                raise _NoChange
             before = _role_state(role)
-            role.name = validate_name(name)
+            role.name = new_name
             await self._session.flush()
             await self._audit(
                 actor_telegram_id,
@@ -763,7 +897,9 @@ class RoleAdminService(_AdminService):
             role = await self._role(role_id)
             ensure_system_role_mutable(role, "change slug")
             validate_role_slug(slug)
-            if slug != role.slug and await self._repo.role_slug_taken(slug):
+            if slug == role.slug:
+                raise _NoChange
+            if await self._repo.role_slug_taken(slug):
                 raise EntityAlreadyExistsError("Role slug is taken", code=ROLE_SLUG_TAKEN)
             before = _role_state(role)
             role.slug = slug
@@ -776,6 +912,7 @@ class RoleAdminService(_AdminService):
                 before=before,
                 after=_role_state(role),
             )
+        await self._invalidate(everything=True)  # snapshots carry role slugs
         return role
 
     async def activate(self, actor_telegram_id: int, role_id: UUID) -> Role:
@@ -789,9 +926,12 @@ class RoleAdminService(_AdminService):
             await self._authorize(actor_telegram_id, ROLES_MANAGE)
             role = await self._role(role_id)
             ensure_system_role_mutable(role, "activate" if active else "deactivate")
+            if role.is_active == active:
+                raise _NoChange
             if active:
                 await self._ensure_actor_holds(
-                    actor_telegram_id, await self._repo.role_permission_slugs(role.id)
+                    actor_telegram_id,
+                    await self._repo.role_permission_slugs(role.id, live_only=True),
                 )
             before = _role_state(role)
             role.is_active = active
@@ -834,9 +974,11 @@ class RoleAdminService(_AdminService):
             ensure_system_role_mutable(role, "set permissions")
             permissions = await self._resolve_permissions(permission_slugs)
             before = await self._repo.role_permission_slugs(role.id)
-            await self._ensure_actor_holds(actor_telegram_id, set(permissions) - before)
-            await self._repo.replace_role_permissions(role.id, permissions.values())
             after = frozenset(permissions)
+            if before == after:
+                raise _NoChange
+            await self._ensure_actor_holds(actor_telegram_id, after - before)
+            await self._repo.replace_role_permissions(role.id, permissions.values())
             await self._audit(
                 actor_telegram_id,
                 "iam.role.set_permissions",
@@ -867,7 +1009,7 @@ class AccessAdminService(_AdminService):
             if role is None or not role.is_active:
                 raise EntityNotFoundError("Role not found", code=ROLE_NOT_FOUND)
             await self._ensure_actor_holds(
-                actor_telegram_id, await self._repo.role_permission_slugs(role.id)
+                actor_telegram_id, await self._repo.role_permission_slugs(role.id, live_only=True)
             )
             if await self._repo.get_user_role(user.id, role.id) is not None:
                 raise EntityAlreadyExistsError("Role already assigned", code=ROLE_ALREADY_ASSIGNED)
@@ -921,7 +1063,11 @@ class AccessAdminService(_AdminService):
         expires_at: datetime | None = None,
         reason: str | None = None,
     ) -> UserPermissionOverride:
-        """Allow/deny one permission in the (user, permission, tenant) slot (update or insert)."""
+        """Allow/deny one permission in the (user, permission, tenant) slot.
+
+        ``INSERT ... ON CONFLICT DO UPDATE``: two concurrent upserts of an empty slot both
+        succeed (the last one wins) instead of failing on the unique constraint.
+        """
         async with self._transaction():
             actor = await self._authorize(actor_telegram_id, ROLES_MANAGE)
             validate_override_scope(permission_slug, tenant_id)
@@ -938,21 +1084,23 @@ class AccessAdminService(_AdminService):
                 await self._live_tenant(tenant_id)
             if is_granted:
                 await self._ensure_actor_holds(actor_telegram_id, [permission_slug], tenant_id)
-            row = await self._repo.get_override(user.id, permission.id, tenant_id)
-            before = None if row is None else _override_state(row, permission_slug)
-            if row is None:
-                row = UserPermissionOverride(
-                    user_id=user.id,
-                    permission_id=permission.id,
-                    tenant_id=tenant_id,
-                    is_granted=is_granted,
-                )
-                self._session.add(row)
-            row.is_granted = is_granted
-            row.expires_at = expires_at
-            row.reason = reason
-            row.granted_by_id = actor.id
-            await self._session.flush()
+            existing = await self._repo.get_override(user.id, permission.id, tenant_id)
+            before = None if existing is None else _override_state(existing, permission_slug)
+            if existing is not None and (
+                existing.is_granted,
+                existing.expires_at,
+                existing.reason,
+            ) == (is_granted, expires_at, reason):
+                raise _NoChange
+            row = await self._repo.upsert_override(
+                user_id=user.id,
+                permission_id=permission.id,
+                tenant_id=tenant_id,
+                is_granted=is_granted,
+                expires_at=expires_at,
+                reason=reason,
+                granted_by_id=actor.id,
+            )
             await self._audit(
                 actor_telegram_id,
                 "iam.override.upsert",
@@ -962,6 +1110,8 @@ class AccessAdminService(_AdminService):
                 before=before,
                 after=_override_state(row, permission_slug),
             )
+        if self._noop and existing is not None:
+            return existing
         await self._invalidate([telegram_user_id])
         return row
 
@@ -973,19 +1123,24 @@ class AccessAdminService(_AdminService):
         *,
         tenant_id: UUID | None = None,
     ) -> None:
+        """Delete the slot. Removing a deny of a live permission grants it back, so the
+        actor must hold that permission (anti-escalation); inactive permissions are found too.
+        """
         async with self._transaction():
             actor = await self._authorize(actor_telegram_id, ROLES_MANAGE)
             user = await self._target_user(telegram_user_id)
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)
-            permission = (await self._repo.live_permissions([permission_slug])).get(permission_slug)
+            permission = await self._repo.get_permission_by_slug(permission_slug)
             row = (
                 None
                 if permission is None
                 else await self._repo.get_override(user.id, permission.id, tenant_id)
             )
-            if row is None:
+            if permission is None or row is None:
                 raise EntityNotFoundError("Override not found", code=OVERRIDE_NOT_FOUND)
+            if not row.is_granted and permission.is_active and not permission.is_deleted:
+                await self._ensure_actor_holds(actor_telegram_id, [permission_slug], tenant_id)
             before = _override_state(row, permission_slug)
             await self._session.delete(row)
             await self._session.flush()
@@ -1048,13 +1203,3 @@ class AccessAdminService(_AdminService):
                 before={"telegram_user_id": telegram_user_id, "tenant_id": tenant_id},
             )
         await self._invalidate([telegram_user_id])
-
-
-def _override_state(row: UserPermissionOverride, slug: str) -> dict[str, Any]:
-    return {
-        "permission": slug,
-        "tenant_id": row.tenant_id,
-        "is_granted": row.is_granted,
-        "expires_at": row.expires_at,
-        "reason": row.reason,
-    }

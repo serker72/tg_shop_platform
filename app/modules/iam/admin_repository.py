@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from uuid import UUID
+from datetime import datetime
+from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.dialects.postgresql import Insert, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.iam.models import (
@@ -21,7 +23,43 @@ from app.modules.iam.models import (
     UserRole,
 )
 
-__all__ = ["IamAdminRepository"]
+__all__ = ["OVERRIDE_SLOT_CONSTRAINT", "IamAdminRepository", "build_override_upsert"]
+
+#: ``UNIQUE NULLS NOT DISTINCT (user_id, permission_id, tenant_id)`` of the ``iam_rbac`` revision.
+OVERRIDE_SLOT_CONSTRAINT = "uq_user_permission_overrides_user_id_permission_id_tenant_id"
+
+
+def build_override_upsert(
+    *,
+    user_id: UUID,
+    permission_id: UUID,
+    tenant_id: UUID | None,
+    is_granted: bool,
+    expires_at: datetime | None,
+    reason: str | None,
+    granted_by_id: UUID | None,
+) -> Insert:
+    """``INSERT ... ON CONFLICT ON CONSTRAINT <slot> DO UPDATE ... RETURNING`` (race-free)."""
+    stmt = insert(UserPermissionOverride).values(
+        id=uuid4(),
+        user_id=user_id,
+        permission_id=permission_id,
+        tenant_id=tenant_id,
+        is_granted=is_granted,
+        expires_at=expires_at,
+        reason=reason,
+        granted_by_id=granted_by_id,
+    )
+    return stmt.on_conflict_do_update(
+        constraint=OVERRIDE_SLOT_CONSTRAINT,
+        set_={
+            "is_granted": stmt.excluded.is_granted,
+            "expires_at": stmt.excluded.expires_at,
+            "reason": stmt.excluded.reason,
+            "granted_by_id": stmt.excluded.granted_by_id,
+            "updated_at": func.now(),
+        },
+    )
 
 
 class IamAdminRepository:
@@ -57,6 +95,38 @@ class IamAdminRepository:
             ).all()
             counts[name] = len(ids)
         return counts
+
+    async def user_granted_permissions(
+        self, user_id: UUID, *, now: datetime
+    ) -> set[tuple[str, UUID | None]]:
+        """Allow-grants of the user: live role permissions (global) + live allow-overrides."""
+        live_perm = (Permission.is_active.is_(True), Permission.is_deleted.is_(False))
+        role_stmt = (
+            select(Permission.slug)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .join(Role, Role.id == RolePermission.role_id)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user_id, Role.is_active.is_(True))
+            .where(Role.is_deleted.is_(False), *live_perm)
+        )
+        result: set[tuple[str, UUID | None]] = {
+            (slug, None) for slug in (await self._session.scalars(role_stmt)).all()
+        }
+        override_stmt = (
+            select(Permission.slug, UserPermissionOverride.tenant_id)
+            .join(Permission, Permission.id == UserPermissionOverride.permission_id)
+            .where(
+                UserPermissionOverride.user_id == user_id,
+                UserPermissionOverride.is_granted.is_(True),
+                or_(
+                    UserPermissionOverride.expires_at.is_(None),
+                    UserPermissionOverride.expires_at > now,
+                ),
+                *live_perm,
+            )
+        )
+        result.update((row[0], row[1]) for row in (await self._session.execute(override_stmt)))
+        return result
 
     # --- tenants ---------------------------------------------------------------------
 
@@ -132,12 +202,22 @@ class IamAdminRepository:
         )
         return {p.slug: p for p in (await self._session.scalars(stmt)).all()}
 
-    async def role_permission_slugs(self, role_id: UUID) -> frozenset[str]:
+    async def get_permission_by_slug(self, slug: str) -> Permission | None:
+        """Any permission row (inactive / soft-deleted included)."""
+        stmt = select(Permission).where(Permission.slug == slug)
+        return (await self._session.scalars(stmt)).one_or_none()
+
+    async def role_permission_slugs(
+        self, role_id: UUID, *, live_only: bool = False
+    ) -> frozenset[str]:
+        """Permissions linked to the role; ``live_only`` drops inactive/deleted ones."""
         stmt = (
             select(Permission.slug)
             .join(RolePermission, RolePermission.permission_id == Permission.id)
             .where(RolePermission.role_id == role_id)
         )
+        if live_only:
+            stmt = stmt.where(Permission.is_active.is_(True), Permission.is_deleted.is_(False))
         return frozenset((await self._session.scalars(stmt)).all())
 
     async def replace_role_permissions(
@@ -167,6 +247,29 @@ class IamAdminRepository:
             else UserPermissionOverride.tenant_id == tenant_id,
         )
         return (await self._session.scalars(stmt.with_for_update())).one_or_none()
+
+    async def upsert_override(
+        self,
+        *,
+        user_id: UUID,
+        permission_id: UUID,
+        tenant_id: UUID | None,
+        is_granted: bool,
+        expires_at: datetime | None,
+        reason: str | None,
+        granted_by_id: UUID | None,
+    ) -> UserPermissionOverride:
+        stmt = build_override_upsert(
+            user_id=user_id,
+            permission_id=permission_id,
+            tenant_id=tenant_id,
+            is_granted=is_granted,
+            expires_at=expires_at,
+            reason=reason,
+            granted_by_id=granted_by_id,
+        ).returning(UserPermissionOverride)
+        result = await self._session.scalars(stmt, execution_options={"populate_existing": True})
+        return result.one()
 
     async def get_tenant_moderator(self, user_id: UUID, tenant_id: UUID) -> TenantModerator | None:
         stmt = select(TenantModerator).where(
