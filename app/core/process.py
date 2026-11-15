@@ -168,6 +168,7 @@ async def run_service(
     from app.core.telemetry import init_telemetry, shutdown_telemetry
     from app.modules.bot_manager.metrics import OutageState
     from app.modules.bot_manager.proxy_health import OutageMonitor
+    from app.modules.iam.ioc import IamProvider
     from app.modules.logging.ioc import LoggingProvider
     from app.shared_kernel.infrastructure.providers import (
         DatabaseProvider,
@@ -185,6 +186,7 @@ async def run_service(
         RedisProvider(),
         LoggingProvider(),
         ObservabilityProvider(),
+        IamProvider(),
         context={Settings: settings},
     )
     exit_code = 0

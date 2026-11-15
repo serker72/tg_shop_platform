@@ -511,6 +511,25 @@ class ProxySettings(BaseSettings):
         return self
 
 
+class TelegramSettings(BaseSettings):
+    """Master Bot token (``MASTER_BOT_TOKEN``, secret of ``APP_SECRETS``), no env prefix.
+
+    Empty -> ``None``: only the ``master_bot`` process requires it (fails on start).
+    """
+
+    model_config = _base_config("")
+    model_config["hide_input_in_errors"] = True
+
+    master_bot_token: SecretStr | None = None
+
+    @field_validator("master_bot_token", mode="before")
+    @classmethod
+    def _empty_token_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+
 class SchedulerSettings(BaseSettings):
     """Background scheduler of ``bot_worker`` (``app/core/scheduler``), no env prefix.
 
@@ -545,6 +564,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "observability": ObservabilitySettings,
     "proxy": ProxySettings,
     "scheduler": SchedulerSettings,
+    "telegram": TelegramSettings,
 }
 
 
@@ -573,6 +593,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     proxy: ProxySettings = Field(default_factory=ProxySettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    telegram: TelegramSettings = Field(default_factory=TelegramSettings)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.
