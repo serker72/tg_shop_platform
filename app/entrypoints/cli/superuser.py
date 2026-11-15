@@ -21,6 +21,7 @@ import asyncio
 import os
 from collections.abc import Sequence
 
+from redis.asyncio import Redis
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings, get_settings
@@ -73,8 +74,9 @@ async def run(settings: Settings, args: argparse.Namespace) -> SuperuserResult:
             "POSTGRES_PASSWORD is not configured", code="postgres_password_missing"
         )
     engine = build_engine(settings)
-    redis = build_redis(settings)
+    redis: Redis | None = None
     try:
+        redis = build_redis(settings)
         session_factory = build_session_factory(engine)
         async with session_factory() as session:
             installer = SuperuserInstaller(
@@ -85,7 +87,8 @@ async def run(settings: Settings, args: argparse.Namespace) -> SuperuserResult:
             return await installer.revoke(args.telegram_id, force=args.force)
     finally:
         try:
-            await redis.aclose()
+            if redis is not None:
+                await redis.aclose()
         finally:
             await engine.dispose()
 

@@ -123,11 +123,11 @@
 
    ```bash
    make agent-up
-   make superuser TELEGRAM_ID=<ваш Telegram id>   # первый суперпользователь (вход в Master Bot)
+   make superuser TG_ID=<ваш Telegram id>   # первый суперпользователь (вход в Master Bot)
    ```
 
    Собирает образ, поднимает основной стек и Alloy (профиль `observability`), подключает их к
-   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен. `make superuser` выполняется один раз: создаёт первого суперпользователя (без него вход в Master Bot невозможен; повтор безопасен).
+   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен. `make superuser` выполняется один раз: создаёт первого суперпользователя (без него вход в Master Bot невозможен; повтор безопасен). Команда работает в образе приложения: после обновления кода сначала `make agent-up` (пересобирает образ), затем `make superuser`.
 
 8. **Проверка** — раздел [Проверка результата](#проверка-результата).
 
@@ -187,7 +187,7 @@
    make agent-config        # проверка .env и compose после очистки
    make init-dirs
    make agent-up            # основной стек + Alloy + make ready
-   make superuser TELEGRAM_ID=<ваш Telegram id>   # первый суперпользователь (вход в Master Bot)
+   make superuser TG_ID=<ваш Telegram id>   # первый суперпользователь (вход в Master Bot)
    ```
 
    Если на VPS 1 другие `APP_UID`/`APP_GID` или `PROJECT_DATA_DIR` — исправьте их в `.env`
@@ -313,7 +313,7 @@ Caddy/CrowdSec (баны, смена ключа bouncer, проверка Caddyf
 | `make help` | список всех целей |
 | `make down` | остановить основной стек |
 | `make migrate` | применить миграции БД |
-| `make superuser TELEGRAM_ID=… [USERNAME=…] [REVOKE=1] [FORCE=1]` | создать/восстановить суперпользователя или снять флаг (на поднятом стеке, идемпотентно) |
+| `make superuser TG_ID=… [TG_USERNAME=…] [ACTION=create\|revoke] [FORCE=1]` | создать/восстановить суперпользователя (`ACTION=revoke` снимает флаг, последнего — только с `FORCE=1`); на поднятом стеке, идемпотентно; после обновления кода сначала `make agent-up` |
 | `make env-test` | сгенерировать `.env.test` (изолированные данные, порты +20000) |
 | `make test-integration` | поднять тестовую инфраструктуру и прогнать интеграционные тесты |
 | `make check` | линтеры + проверка форматирования + unit-тесты |

@@ -33,8 +33,11 @@ def tg_id() -> int:
     return next(_IDS)
 
 
-async def superuser_cli(settings: Settings, *args: str) -> subprocess.CompletedProcess[str]:
+async def superuser_cli(
+    settings: Settings, *args: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     env = cli_env(settings, f"postgresql://cli@localhost/{settings.postgres.db}")
+    env.update(extra_env or {})
     proc = await asyncio.to_thread(run_cli, [sys.executable, "-m", _MODULE, *args], env)
     assert settings.postgres.password is not None
     assert_no_password(proc.stdout + proc.stderr, settings.postgres.password.get_secret_value())
@@ -85,6 +88,59 @@ async def test_create_flags_existing_user(clean_db: AsyncEngine, settings: Setti
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert await user_rows(clean_db, tid) == [(True, True, False, None)]
     assert await audit_count(clean_db, ACTION_GRANT, tid) == 1
+
+
+async def test_create_activates_inactive_user(clean_db: AsyncEngine, settings: Settings) -> None:
+    tid = tg_id()
+    async with clean_db.begin() as conn:
+        await conn.execute(
+            insert(User).values(
+                telegram_user_id=tid, is_superuser=False, is_active=False, is_deleted=False
+            )
+        )
+    proc = await superuser_cli(settings, "create", "--telegram-id", str(tid))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert await user_rows(clean_db, tid) == [(True, True, False, None)]
+    assert await audit_count(clean_db, ACTION_GRANT, tid) == 1
+
+
+async def test_redis_down_is_warning_exit_0(clean_db: AsyncEngine, settings: Settings) -> None:
+    """Closed port: the change is stored, the CLI warns about the cache and returns 0."""
+    tid = tg_id()
+    proc = await superuser_cli(
+        settings,
+        "create",
+        "--telegram-id",
+        str(tid),
+        extra_env={"REDIS_HOST": "127.0.0.1", "REDIS_PORT": "1"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "superuser_cache_invalidation_failed" in proc.stdout + proc.stderr
+    assert await user_rows(clean_db, tid) == [(True, True, False, None)]
+    assert await audit_count(clean_db, ACTION_GRANT, tid) == 1
+
+
+async def test_concurrent_revoke_keeps_one_superuser(
+    clean_db: AsyncEngine, settings: Settings
+) -> None:
+    """Two parallel revokes of the last two superusers: exactly one succeeds.
+
+    Deterministic: both lock every active superuser (``FOR UPDATE``, id order), so they
+    serialize; under READ COMMITTED the second re-checks the WHERE after the first
+    commits, sees one superuser left and refuses (``last_superuser``).
+    """
+    first, second = tg_id(), tg_id()
+    for tid in (first, second):
+        assert (await superuser_cli(settings, "create", "--telegram-id", str(tid))).returncode == 0
+    procs = await asyncio.gather(
+        superuser_cli(settings, "revoke", "--telegram-id", str(first)),
+        superuser_cli(settings, "revoke", "--telegram-id", str(second)),
+    )
+    assert sorted(p.returncode for p in procs) == [0, 1], [p.stdout + p.stderr for p in procs]
+    refused = next(p for p in procs if p.returncode == 1)
+    assert "last_superuser" in refused.stdout + refused.stderr
+    flags = [(await user_rows(clean_db, tid))[0][0] for tid in (first, second)]
+    assert sorted(flags) == [False, True]
 
 
 async def test_create_restores_soft_deleted(clean_db: AsyncEngine, settings: Settings) -> None:

@@ -236,13 +236,30 @@ migrate: init-dirs ## Apply DB migrations (db_update service); creates bind-moun
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update
 
 .PHONY: superuser
+# Superuser parameters are validated by make itself (also under `make -n`; `$(error)` -> rc 2)
+# before anything reaches the shell: TG_ID - digits only, TG_USERNAME - [A-Za-z0-9_@] only,
+# ACTION - create|revoke, FORCE - only the literal 1. Values are then single-quoted.
+# TG_* names on purpose: USERNAME is set by the OS environment of most shells.
+SU_DIGITS := 0 1 2 3 4 5 6 7 8 9
+SU_NAME_CHARS := $(SU_DIGITS) a b c d e f g h i j k l m n o p q r s t u v w x y z \
+	A B C D E F G H I J K L M N O P Q R S T U V W X Y Z _ @
+# $(call su_rest,<value>,<allowed chars>): what is left after removing the allowed characters
+su_rest = $(if $2,$(call su_rest,$(subst $(firstword $2),,$1),$(wordlist 2,$(words $2),$2)),$(strip $1))
+SU_ACTION = $(or $(ACTION),create)
+su_check = $(strip \
+	$(if $(or $(filter-out 1,$(words $(SU_ACTION))),$(filter-out create revoke,$(SU_ACTION))),\
+		$(error ACTION must be create or revoke (got '$(ACTION)'))) \
+	$(if $(or $(filter-out 1,$(words $(TG_ID))),$(call su_rest,$(TG_ID),$(SU_DIGITS))),\
+		$(error TG_ID must be a positive integer: make superuser TG_ID=<telegram user id>)) \
+	$(if $(TG_USERNAME),$(if $(or $(filter-out 1,$(words $(TG_USERNAME))),$(call su_rest,$(TG_USERNAME),$(SU_NAME_CHARS))),\
+		$(error TG_USERNAME may contain only A-Z a-z 0-9 _ @))))
+
 # Not part of migrate.sh (Q10): run once on the started stack (after make agent-up).
-superuser: ## Create/restore superuser TELEGRAM_ID=<id> [USERNAME=<name>]; REVOKE=1 [FORCE=1] clears the flag
-	@test -n "$(TELEGRAM_ID)" || { echo "ERROR: TELEGRAM_ID is required: make superuser TELEGRAM_ID=<telegram user id>" >&2; exit 2; }
-	@$(version_env); \
+superuser: ## Superuser on the started stack: TG_ID=<id> [TG_USERNAME=<name>] [ACTION=create|revoke] [FORCE=1]
+	@$(su_check)$(version_env); \
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update python -m app.entrypoints.cli.superuser \
-		$(if $(REVOKE),revoke,create) --telegram-id "$(TELEGRAM_ID)" \
-		$(if $(REVOKE),$(if $(FORCE),--force),$(if $(USERNAME),--username "$(USERNAME)"))
+		$(SU_ACTION) --telegram-id '$(TG_ID)' \
+		$(if $(filter revoke,$(SU_ACTION)),$(if $(filter 1,$(FORCE)),--force),$(if $(TG_USERNAME),--username '$(TG_USERNAME)'))
 
 lint: ## Run ruff and mypy
 	uv run ruff check . && uv run mypy app tests
