@@ -61,7 +61,7 @@ Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale u
 | RabbitMQ management | 15672 | `127.0.0.1:${RABBITMQ_MGMT_PORT_HOST:-15672}` | SSH-туннель |
 | MinIO API | 9000 | `127.0.0.1:${MINIO_API_PORT_HOST:-9000}` | только локально |
 | MinIO console | 9001 | `127.0.0.1:${MINIO_CONSOLE_PORT_HOST:-9001}` | SSH-туннель |
-| `/health/*`, `/metrics` приложения | `${OBSERVABILITY_HTTP_PORT:-8080}` | — / VPN-IP | Prometheus VPS 2 через VPN |
+| `/health/*`, `/metrics` приложения | `${OBSERVABILITY_HTTP_PORT:-8080}` | не публикуется | только Docker-сеть: Alloy VPS 1 скрейпит локально и шлёт remote_write на VPS 2 |
 | WireGuard | 51820/udp | `0.0.0.0` | только с IP VPS 2 |
 
 ### VPS 2 (`docker-compose.obs.yml`)
@@ -69,12 +69,12 @@ Tailscale: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale u
 | Сервис | Хост по умолчанию | Доступ |
 |---|---|---|
 | Grafana | `127.0.0.1:${GRAFANA_PORT_HOST:-3000}` | через Caddy (HTTPS) |
-| urgentry UI (8080 в контейнере) | `127.0.0.1:${URGENTRY_PORT_HOST:-8000}` | через Caddy (HTTPS, корень `/`) |
+| urgentry UI (8080 в контейнере) | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${URGENTRY_PORT_HOST:-8000}` | через Caddy (HTTPS, корень `/`); API retention для obs-bootstrap; с VPS 1 не нужен |
 | urgentry ingest (Caddy :8081) | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${URGENTRY_INGEST_PORT_HOST:-8081}` | Sentry SDK с VPS 1 — только VPN; без Basic Auth |
 | Tempo OTLP gRPC / HTTP | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:4317` / `:4318` | Alloy VPS 1 — только VPN |
 | Tempo API | `127.0.0.1:${TEMPO_PORT_HOST:-3200}` | только Grafana/локально |
-| Loki | `127.0.0.1:${LOKI_PORT_HOST:-3100}` | VPS 1 (Alloy/push логов) — только через VPN |
-| Prometheus | `127.0.0.1:${PROMETHEUS_PORT_HOST:-9090}` | remote write / UI — только VPN или SSH-туннель |
+| Loki | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${LOKI_PORT_HOST:-3100}` | VPS 1 (Alloy/push логов) — только через VPN |
+| Prometheus | `${OBS_INGEST_BIND_ADDRESS:-127.0.0.1}:${PROMETHEUS_PORT_HOST:-9090}` | remote write / UI — только VPN или SSH-туннель |
 | Alertmanager | `127.0.0.1:${ALERTMANAGER_PORT_HOST:-9093}` | только локально (исходящие в Telegram) |
 | **Caddy** | `${CADDY_BIND_ADDRESS:-0.0.0.0}:80`, `:443` | **публично**, Basic Auth на всё |
 | WireGuard | `0.0.0.0:51820/udp` | только с IP VPS 1 |
@@ -126,7 +126,7 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp
 sudo ufw allow from <публичный IP VPS 2> to any port 51820 proto udp
-sudo ufw allow in on wg0 from 10.10.0.2 to 10.10.0.1 port 8080 proto tcp   # скрейп /metrics
+# входящих с VPS 2 нет: Alloy VPS 1 сам отправляет логи/метрики/трейсы (remote_write, OTLP)
 sudo ufw enable
 ```
 
@@ -144,7 +144,7 @@ table inet filter {
     tcp dport 22 accept
     tcp dport { 80, 443 } accept
     udp dport 51820 ip saddr <публичный IP VPS 1> accept
-    iifname "wg0" ip saddr 10.10.0.1 tcp dport { 3100, 9090, 8000 } accept
+    iifname "wg0" ip saddr 10.10.0.1 tcp dport { 3100, 9090, 4317, 8081 } accept
     icmp type echo-request accept
   }
 }

@@ -142,10 +142,15 @@ make migrate     # init-dirs + db_update: wait_for_db → alembic upgrade head �
 ## 5. Запуск
 
 ```bash
-make up                                  # основной стек + make ready
-make obs-up                              # стек наблюдаемости (на VPS 2)
+# один хост (ALLOY_SINGLE_HOST=1): строго в этом порядке
+make init-dirs
+make obs-up                              # стек наблюдаемости, сеть <PROJECT_NAME>_obs_default, SENTRY_DSN
+make agent-up                            # основной стек + Alloy + make ready
 docker compose --env-file .env ps        # все сервисы running/healthy
 ```
+
+Два сервера (VPS 1 + VPS 2): VPS 2 — `make init-dirs && make obs-up`, VPS 1 —
+`make init-dirs && make agent-up`; подробно — [README](../../README.md#сценарий-2--vps-1-приложение--vps-2-мониторинг).
 
 ## 6. Проверка health
 

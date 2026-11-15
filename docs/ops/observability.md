@@ -2,8 +2,9 @@
 
 Loki, Prometheus, Alertmanager (→ Telegram), Grafana, Tempo (трейсы), urgentry (журнал ошибок,
 Sentry-совместимый; заменил GlitchTip), Caddy (reverse proxy + автоматический TLS), CrowdSec.
-Целевой хост — VPS 2; сейчас стек запускается на той же машине, что и основной
-`docker-compose.yml`.
+Целевой хост — VPS 2 (приложение на VPS 1, связь по VPN) или та же машина, что и основной
+`docker-compose.yml` (`ALLOY_SINGLE_HOST=1`). Порядок развёртывания обоих вариантов и схема одного
+`.env` для двух серверов (`make env-role ROLE=app|obs`) — [README](../../README.md#развёртывание).
 
 ## Запуск
 
@@ -24,10 +25,12 @@ test `tg_shop_platform_test_obs`; dev и test работают одноврем�
 
 ## Сеть
 
-Собственная сеть compose-проекта, без общей внешней сети с основным стеком. Все сервисы,
-кроме Caddy, публикуются только на `127.0.0.1:${*_PORT_HOST}`. Приложение отправляет логи/
-метрики через порты хоста (на VPS 2 — через VPN). Prometheus видит хост как
-`host.docker.internal` (host-gateway) для скрейпа метрик приложения.
+Собственная сеть compose-проекта `<PROJECT_NAME>_obs_default`. На одном хосте (`ALLOY_SINGLE_HOST=1`)
+Alloy и боты подключаются к ней overlay-файлом `ops/observability/alloy/compose.single-host.yml`
+и обращаются к `loki`, `prometheus`, `tempo`, `caddy:8081` по именам. На двух хостах Alloy VPS 1
+сам отправляет логи, метрики (remote_write) и трейсы (OTLP) на VPN-IP VPS 2; скрейпа VPS 1 с VPS 2 нет.
+Loki, Prometheus, Tempo OTLP, urgentry UI и ingest `:8081` публикуются на `${OBS_INGEST_BIND_ADDRESS}`
+(по умолчанию `127.0.0.1`, на VPS 2 — VPN-IP), Grafana, Alertmanager и Tempo API — на `127.0.0.1`.
 Caddy публикуется на `${CADDY_BIND_ADDRESS:-0.0.0.0}:80/443` и закрывает **всё** HTTP Basic Auth
 (`OBS_AUTH_USER` / `OBS_AUTH_HASH`, без исключений; заголовок `Authorization` в Grafana/urgentry
 не передаётся).
@@ -82,15 +85,13 @@ base64-хеш напрямую). Вход: Basic Auth → затем логин 
 | Tempo OTLP gRPC / HTTP | `TEMPO_OTLP_GRPC_PORT_HOST` / `TEMPO_OTLP_HTTP_PORT_HOST` | 4317 / 4318 | 24317 / 24318 |
 | Tempo API    | `TEMPO_PORT_HOST`        | 3200 | 23200 |
 | Caddy HTTP   | `CADDY_HTTP_PORT_HOST`   | 80   | 20080 |
+
 `OBS_URGENTRY_DATA_DIR`, `OBS_TEMPO_DATA_DIR`, `OBS_GRAFANA_DATA_DIR`,
 `OBS_PROMETHEUS_DATA_DIR`, `OBS_LOKI_DATA_DIR`, `OBS_ALERTMANAGER_DATA_DIR`,
 `OBS_CADDY_DATA_DIR` — создаются `make init-dirs`.
 Grafana/Prometheus/Loki/Alertmanager запущены с `user: APP_UID:APP_GID`, поэтому их
 каталоги принадлежат пользователю хоста. Каталог urgentry принадлежит uid 10001 (пользователь
 образа), Caddy стартует от root и сам выставляет владельца.
-`PROJECT_DATA_DIR` должен быть доступен на запись `APP_UID` (см. `.env.example`).
-каталоги принадлежат пользователю хоста (chown не нужен). PostgreSQL/Valkey/Caddy стартуют
-от root и сами выставляют владельца своих каталогов (как postgres/redis в основном стеке).
 `PROJECT_DATA_DIR` должен быть доступен на запись `APP_UID` (см. `.env.example`).
 
 ## Retention
@@ -428,7 +429,7 @@ docker run -d --name rp-demo --restart=always alpine:3.20 sh -c 'sleep 2; exit 1
 | `OBS_LOKI_PUSH_URL` | `http://<loki>:3100/loki/api/v1/push` |
 | `OBS_PROMETHEUS_REMOTE_WRITE_URL` | `http://<prometheus>:9090/api/v1/write` |
 | `POSTGRES_MONITORING_USER/PASSWORD` | read-only роль (`pg_monitor`) |
-| `OBS_INGEST_BIND_ADDRESS` | (VPS 2) адрес публикации портов Loki/Prometheus |
+| `OBS_INGEST_BIND_ADDRESS` | адрес публикации Loki, Prometheus, Tempo OTLP и urgentry (UI и ingest `:8081`): VPS 2 — VPN-IP, один хост — `127.0.0.1` |
 
 ### Роль мониторинга PostgreSQL
 
@@ -456,7 +457,7 @@ Obs-стек должен быть уже запущен (`make obs-up`).
 ```bash
 make obs-up          # если ещё не запущен
 make agent-up        # основной стек + alloy, --wait (боты healthy)
-make agent-logs / agent-down   # agent-down останавливает только alloy
+make agent-logs / agent-down   # agent-down останавливает alloy, docker-events, docker-socket-proxy
 ```
 
 **Порядок остановки** (только single-host):
@@ -478,12 +479,16 @@ obs-проекта на VPS 1 нет, проблема не возникает.
 
 ### Перенос на реальные VPS 1 / VPS 2
 
-- VPS 2 (`.env`): `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>` — Loki/Prometheus слушают
+- VPS 2 (`.env`): `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>` — Loki/Prometheus/Tempo/urgentry слушают
   только VPN-интерфейс (никогда не `0.0.0.0`); фаервол — только с VPN-IP VPS 1.
 - VPS 1 (`.env`): `ALLOY_SINGLE_HOST=0`,
   `OBS_LOKI_PUSH_URL=http://<VPN-IP VPS 2>:3100/loki/api/v1/push`,
   `OBS_PROMETHEUS_REMOTE_WRITE_URL=http://<VPN-IP VPS 2>:9090/api/v1/write`,
-  `ALLOY_HOST_LABEL=vps1`, `PROJECT_ENVIRONMENT=prod`; затем `make agent-up`.
+  `OBS_TEMPO_OTLP_ENDPOINT=<VPN-IP VPS 2>:4317`, `SENTRY_DSN` (строка из `.env` VPS 2,
+  записанная `make obs-up`), `ALLOY_HOST_LABEL=vps1`, `PROJECT_ENVIRONMENT=prod`; затем `make agent-up`.
+- Один `.env` на оба хоста: создаётся на VPS 2, копируется на VPS 1, затем
+  `make env-role ROLE=app` (VPS 1) / `make env-role ROLE=obs` (VPS 2) очищают секреты чужого
+  хоста — пошагово в [README](../../README.md#сценарий-2--vps-1-приложение--vps-2-мониторинг).
 - Трафик идёт внутри VPN (WireGuard), поэтому без TLS/basic-auth; при отказе от VPN
   нужен reverse proxy с TLS и аутентификацией.
 
@@ -515,7 +520,7 @@ curl -sG http://127.0.0.1:3100/loki/api/v1/query_range \
 - **IPv6**: не задавайте `CADDY_BIND_ADDRESS=::` при выключенном IPv6 в Docker — IPv6-клиенты пойдут через docker-proxy и будут видны как IP шлюза (whitelist), то есть CrowdSec их не забанит. Оставляйте `0.0.0.0` или включите IPv6 в Docker (`ip6tables`).
 - **Баны**: `make obs-bans` — список решений; `make obs-bans UNBAN=<ip>` — снять бан (значение проверяется как IP). Не баньте вручную IP шлюза Docker (`172.x.0.1`): `cscli decisions add` применяется и к адресам из whitelist, и это отрежет весь локальный доступ.
 - **Аргументы make**: GNU make раскрывает аргументы (`X=...`) до запуска цели — `$(shell …)` в значении выполнится. Не вставляйте в аргументы make непроверенный текст (например, IP из логов — сначала проверьте его). `UNBAN` дополнительно защищён (`unexport` + проверка IP).
-- **Ресурсы**: crowdsec `mem_limit: 256m`.
+- **Ресурсы**: crowdsec `mem_limit: ${CROWDSEC_MEM_LIMIT:-512m}` (`.env.example`: 512m).
 
 ### Ротация ключа bouncer
 
