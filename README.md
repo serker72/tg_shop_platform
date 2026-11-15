@@ -43,112 +43,215 @@
 
 ## Развёртывание
 
-1. Клонировать репозиторий:
+Два сценария: **всё на одном хосте** (stage, демо) и **VPS 1 (приложение) + VPS 2 (мониторинг)**,
+связанные VPN (prod). `.env.example` по умолчанию настроен на **два сервера**
+(`ALLOY_SINGLE_HOST=0`, URL мониторинга на `10.10.0.2`) — для одного хоста значения меняются
+на шаге 4 сценария 1.
+
+### Требования к хосту
+
+Подробно — [docs/ops/requirements.md](docs/ops/requirements.md). Кратко:
+
+- Docker Engine + плагин `docker compose` v2, `make`, `git`, `openssl` (генерация секретов в `make env`);
+- `python3` — на хосте мониторинга (`make obs-up`/`obs-bootstrap`: проверка `URGENTRY_INTERNAL_URL`
+  и настройка retention urgentry; `make obs-bans UNBAN=<ip>`); приложению на хосте Python не нужен;
+- синхронизация времени (chrony) и swap.
+
+Пароли в `.env` — только hex (Makefile читает файл через `source`, символ `$` не поддерживается).
+
+### Сценарий 1 — всё на одном хосте
+
+1. **Подготовка хоста** — Docker, make, git, openssl, python3, chrony, swap (см. выше).
+
+2. **Код и теги версий:**
 
    ```bash
-   git clone <URL репозитория>
-   cd tg_shop_platform
+   git clone <URL репозитория> && cd tg_shop_platform
+   git fetch --tags
    ```
 
-2. Создать каталог данных (один раз, нужен sudo):
+   Без тега майлстоуна сборка образа (`make up`/`make agent-up`) падает — см.
+   [docs/ops/versioning.md](docs/ops/versioning.md).
 
-   ```bash
-   sudo mkdir -p /opt/tg_shop_platform_data && sudo chown -R $(id -u):$(id -g) /opt/tg_shop_platform_data
-   ```
-
-   Владелец каталога должен совпадать с `APP_UID`/`APP_GID` в `.env` (по умолчанию `1000:1000`):
-   приложение в контейнерах работает от этого uid и пишет в `LOGS_DATA_DIR`. Если ваш
-   `id -u` не равен 1000, исправьте `APP_UID`/`APP_GID` в `.env`.
-
-3. Создать `.env`:
+3. **Создать `.env`:**
 
    ```bash
    make env
    ```
 
-   Шаг можно пропустить: `make init-dirs` (а через него `make migrate`, `make obs-up`,
-   `make agent-up`) сам вызовет `make env`, если `.env` ещё нет. Команда копирует
-   `.env.example`, подставляет случайные пароли (`change_me*`, `ENCRYPTION_KEY`,
-   `POSTGRES_MONITORING_PASSWORD`) и ставит на файл права `600`. Существующий `.env` она
-   не трогает. Также генерируется Basic Auth для Caddy: `OBS_AUTH_USER=admin` и случайный
-   пароль — **он выводится один раз, сохраните его** (в `.env` только base64 bcrypt-хеш
-   `OBS_AUTH_HASH`; без docker хеш останется пустым — выполните `make obs-auth`; новый пароль —
-   тоже `make obs-auth`). После этого заполните вручную: `MASTER_BOT_TOKEN` (обязательно), а также
-   `ALERT_TELEGRAM_BOT_TOKEN` / `ALERT_TELEGRAM_CHAT_ID`, режим доступа к мониторингу
-   (`CADDY_MODE=ip` + `VPS_IP` — `https://<VPS_IP>/` urgentry и `https://<VPS_IP>/grafana/`,
-   самоподписанный сертификат, браузер покажет предупреждение; или `CADDY_MODE=domain` +
-   `GRAFANA_DOMAIN` / `URGENTRY_DOMAIN` с Let's Encrypt, подойдёт `grafana.<ip>.nip.io`) и URL
-   для Alloy (см. ниже). Вход: Basic Auth → затем логин Grafana/urgentry. Для локальной
-   разработки поставьте `PROJECT_ENVIRONMENT=loc` и `VPS_IP=127.0.0.1`.
+   Копирует `.env.example`, подставляет случайные пароли (права `600`), генерирует Basic Auth для
+   Caddy: `OBS_AUTH_USER=admin` и пароль — **он печатается один раз (блок `SAVE THIS PASSWORD`),
+   сохраните его**. Потеряли — `make obs-auth` задаст новый. Существующий `.env` не трогается;
+   `make env FORCE=1` перегенерирует все секреты (бэкап `.env.bak.<ts>`) — на рабочих данных не
+   использовать: БД, Redis, RabbitMQ продолжат требовать старые пароли, а новый
+   `ENCRYPTION_KEY` не расшифрует сохранённые секреты.
 
-   > ⚠️ Пароль Basic Auth печатается **один раз** (блок `SAVE THIS PASSWORD`). Если `.env` создан
-   > неявно (`make init-dirs`, `make obs-up`, `make migrate`, ...), блок легко пропустить в
-   > длинном выводе, а в CI он попадёт в лог — в CI создавайте `.env` заранее. Потеряли пароль —
-   > задайте новый: `make obs-auth`.
+4. **Заполнить `.env`** (до следующих шагов):
 
-   > ⚠️ `make env FORCE=1` сначала генерирует новый файл в `.env.new`, затем сохраняет текущий
-   > в `.env.bak.<YYYYmmddHHMMSS>` (права 600, не перезаписывается) и заменяет его.
-   > Если данные уже инициализированы, PostgreSQL, Redis и RabbitMQ продолжат требовать
-   > **старые** пароли, а новый `ENCRYPTION_KEY` не расшифрует уже сохранённые секреты.
-   > На рабочих данных `FORCE=1` не используйте.
+   | Переменная | Значение |
+   |---|---|
+   | `MASTER_BOT_TOKEN` | токен мастер-бота (обязательно) |
+   | `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | бот и чат для алертов (без них алерты не отправляются) |
+   | `APP_UID`, `APP_GID` | `id -u` / `id -g` владельца каталога данных |
+   | `ALLOY_SINGLE_HOST` | `1` |
+   | `OBS_LOKI_PUSH_URL` | `http://loki:3100/loki/api/v1/push` |
+   | `OBS_PROMETHEUS_REMOTE_WRITE_URL` | `http://prometheus:9090/api/v1/write` |
+   | `OBS_TEMPO_OTLP_ENDPOINT` | `tempo:4317` |
+   | `CADDY_MODE` | `ip` + `VPS_IP=<публичный IP>` (самоподписанный сертификат) или `domain` + `GRAFANA_DOMAIN`/`URGENTRY_DOMAIN` (Let's Encrypt) |
+   | `URGENTRY_INTERNAL_URL` | оставить `http://caddy:8081` |
+   | `OBS_INGEST_BIND_ADDRESS` | оставить `127.0.0.1` |
 
-   **Обновление существующего .env** (созданного до появления Basic Auth в Caddy): допишите
-   переменные из `.env.example`, иначе `make obs-up` / `make obs-config` / `make obs-auth`
-   откажутся работать (молчаливого перехода на режим `ip` нет):
-   - `CADDY_MODE=domain` — если мониторинг уже открывался по `GRAFANA_DOMAIN` / `URGENTRY_DOMAIN`
-     (оставьте их), или `CADDY_MODE=ip` + `VPS_IP=<публичный IP VPS 2>`;
-   - `OBS_AUTH_USER=admin` и пустой `OBS_AUTH_HASH=`, затем `make obs-auth` (пароль показывается
-     один раз) и `make obs-up`;
-   - `SENTRY_DSN` с публичным хостом (например `urgentry.localhost` или публичный домен)
-     теперь отвергается при запуске приложения: очистите его и выполните `make obs-bootstrap`
-     (DSN строится из `URGENTRY_INTERNAL_URL`, только приватный IP или имя Docker-сервиса).
-   - `CROWDSEC_BOUNCER_KEY=<вывод openssl rand -hex 32>`, `OBS_CADDY_LOGS_DIR`, `OBS_CROWDSEC_DATA_DIR`
-     (см. `.env.example`) — **до** любых obs-команд (иначе падают даже `make obs-down`/`obs-ps`),
-     затем `make init-dirs && make obs-up`. `make env FORCE=1` здесь не используйте — он
-     перегенерирует все секреты.
+5. **Каталоги данных:**
 
-   **Защита публичного Caddy:** запросы на чужие адреса сбрасываются (catch-all), CrowdSec
-   по access-логу Caddy блокирует сканеры и подбор пароля Basic Auth (бан 4 ч); список банов —
-   `make obs-bans`, снять — `make obs-bans UNBAN=<ip>` (не баньте вручную IP шлюза Docker
-   `172.x.0.1` — отрежете весь локальный доступ). Смена ключа bouncer — `make obs-crowdsec-rekey`,
-   проверка Caddyfile — `make obs-validate`. Подробнее: [docs/ops/observability.md](docs/ops/observability.md).
+   ```bash
+   make init-dirs
+   ```
 
-4. **Stage/prod на двух серверах** (VPS 1 — приложение, VPS 2 — наблюдаемость; сеть между
-   ними — VPN, см. [docs/ops/network.md](docs/ops/network.md)):
-   - VPS 2: **до** `make obs-up` укажите в `.env` `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>`
-     (на этом адресе публикуются Loki, Prometheus, Tempo 4317 и ingest urgentry 8081),
-     `URGENTRY_INTERNAL_URL=http://<VPN-IP VPS 2>:8081` (только приватный адрес: публичный
-     DSN запрещён и приложение с ним не стартует), `CADDY_MODE` и `VPS_IP`/домены. Затем `make obs-up`:
-     поднимется стек наблюдаемости, в urgentry будет создан администратор, а в `.env` запишется
-     `SENTRY_DSN` с хостом из `URGENTRY_INTERNAL_URL`.
-   - VPS 1: `ALLOY_SINGLE_HOST=0` (значение по умолчанию). В `OBS_LOKI_PUSH_URL` и
-     `OBS_PROMETHEUS_REMOTE_WRITE_URL` и `OBS_TEMPO_OTLP_ENDPOINT=<VPN-IP VPS 2>:4317` укажите VPN-IP VPS 2 и выполните `make agent-up`:
-     поднимется основной стек и Alloy, после чего команда дождётся готовности ботов.
-     Если нужна отправка ошибок, скопируйте `SENTRY_DSN` из `.env` VPS 2 в `.env` VPS 1
-     (можно и позже) и повторите `make agent-up`.
+   Создаёт bind-mount каталоги из `PROJECT_DATA_DIR` (по умолчанию `/opt/tg_shop_platform_data`).
+   Если не хватает прав, команда печатает нужные `sudo mkdir`/`chown` — выполните и повторите.
 
-   Подробнее — [docs/ops/observability.md](docs/ops/observability.md).
+6. **Стек мониторинга:**
 
-5. **Один хост** (stage/локально): в `.env` выставьте `ALLOY_SINGLE_HOST=1` и укажите URL
-   `http://loki:3100/loki/api/v1/push` и `http://prometheus:9090/api/v1/write` (закомментированы
-   в `.env.example`). Затем сначала `make obs-up`, потом `make agent-up`: Alloy подключается
-   к сети obs-стека, поэтому она должна уже существовать. Приложение шлёт ошибки на
-   `caddy:8081` (внутренний ingest → urgentry), трейсы — на `alloy:4317` → `tempo:4317`
-   (`OBS_TEMPO_OTLP_ENDPOINT=tempo:4317`). Отключить трейсинг: `OTEL_SDK_DISABLED=true`.
-   Проверка цепочки: `make otel-smoke`.
-   Порядок при `ALLOY_SINGLE_HOST=1`: `make init-dirs` → `make obs-up` → `make up` → `make agent-up` → `make ready` (`init-dirs` и `ready` уже входят в
-   `obs-up`/`agent-up`, `make up` не обязателен): `obs-up` создаёт сеть `<PROJECT_NAME>_obs_default`
-   и пишет `SENTRY_DSN`; `make up` без obs-стека поднимает ботов без obs-сети (WARN), подключает их `make agent-up`.
-   Остановка — строго `make agent-down` → `make down` → `make obs-down`, см. [порядок остановки](docs/ops/observability.md#запуск-на-одном-хосте-devtest).
+   ```bash
+   make obs-up
+   ```
 
-6. **Локальная разработка**: в `.env` поставьте `PROJECT_ENVIRONMENT=loc` и
-   `PROJECT_DATA_DIR` в домашнем каталоге (например `/home/<user>/tg_shop_platform_data`;
-   путь должен быть абсолютным и без `$`). Иначе `make env-test` / `make test-integration`
-   создадут `/opt/tg_shop_platform_data_test`, а для этого понадобится `sudo mkdir` + `chown`.
-   Для наблюдаемости на той же машине используйте `ALLOY_SINGLE_HOST=1` и single-host URL из п. 5.
+   Поднимает Loki, Prometheus, Alertmanager, Grafana, Tempo, urgentry, Caddy, CrowdSec, создаёт сеть
+   `<PROJECT_NAME>_obs_default`, администратора urgentry и записывает в `.env` `SENTRY_DSN`.
 
-7. Проверить готовность: `make ready` ждёт ответа `/health/ready` = 200 от `master_bot` и
-   `bot_worker`.
+7. **Приложение + агент сбора:**
+
+   ```bash
+   make agent-up
+   ```
+
+   Собирает образ, поднимает основной стек и Alloy (профиль `observability`), подключает их к
+   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен.
+
+8. **Проверка** — раздел [Проверка результата](#проверка-результата).
+
+### Сценарий 2 — VPS 1 (приложение) + VPS 2 (мониторинг)
+
+Один `.env` создаётся на VPS 2, заполняется для **обоих** хостов и копируется на VPS 1. Общих
+секретов у хостов нет: Loki/Prometheus/Tempo/urgentry ingest принимают данные без авторизации и
+защищены только адресом в VPN; связывает хосты одна строка `SENTRY_DSN`. VPS 2 публичный
+(Caddy на 80/443), поэтому на нём не должно оставаться `MASTER_BOT_TOKEN`, `ENCRYPTION_KEY`,
+паролей БД — а на VPS 1 не нужны пароли Grafana/urgentry/Caddy. Это делает
+`make env-role ROLE=app|obs`: очищает значения секретов чужого хоста (ключи остаются, бэкап
+`.env.bak.<ts>` с правами 600, `SENTRY_DSN` не трогается).
+
+0. **Оба хоста**: WireGuard, firewall, chrony, swap — [docs/ops/network.md](docs/ops/network.md).
+   Ниже `<VPN-IP VPS 2>` — адрес VPS 2 в туннеле (в примерах `10.10.0.2`).
+
+1. **VPS 2: код и `.env`:**
+
+   ```bash
+   git clone <URL репозитория> && cd tg_shop_platform && git fetch --tags
+   make env            # сохраните пароль Basic Auth
+   ```
+
+   Заполните `.env` для обоих хостов (полный список — [таблица](#переменные-env)):
+   - для VPS 2: `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>` (интерфейс `wg0` уже должен существовать,
+     иначе контейнеры не опубликуют порты), `URGENTRY_INTERNAL_URL=http://<VPN-IP VPS 2>:8081`,
+     `CADDY_MODE` + `VPS_IP`/домены, `ALERT_TELEGRAM_*`, `APP_UID`/`APP_GID`;
+   - для VPS 1: `ALLOY_SINGLE_HOST=0`, `OBS_LOKI_PUSH_URL`, `OBS_PROMETHEUS_REMOTE_WRITE_URL`,
+     `OBS_TEMPO_OTLP_ENDPOINT` на `<VPN-IP VPS 2>`, `MASTER_BOT_TOKEN`, `PROJECT_ENVIRONMENT`,
+     `ALLOY_HOST_LABEL`.
+
+2. **VPS 2: мониторинг:**
+
+   ```bash
+   make init-dirs
+   make obs-up         # пишет SENTRY_DSN=http://<key>@<VPN-IP VPS 2>:8081/1 в .env
+   ```
+
+3. **Скопировать `.env` на VPS 1** (с правами 600):
+
+   ```bash
+   scp -p .env <user>@<VPS 1>:~/tg_shop_platform.env    # с VPS 2
+   ```
+
+4. **VPS 1: приложение:**
+
+   ```bash
+   git clone <URL репозитория> && cd tg_shop_platform && git fetch --tags
+   install -m 600 ~/tg_shop_platform.env .env && rm ~/tg_shop_platform.env
+   make env-role ROLE=app   # очищает секреты мониторинга
+   make init-dirs
+   make agent-up            # основной стек + Alloy + make ready
+   ```
+
+   Если на VPS 1 другие `APP_UID`/`APP_GID` или `PROJECT_DATA_DIR` — исправьте их в `.env`
+   **до** `make init-dirs`.
+
+5. **VPS 2: убрать секреты приложения:**
+
+   ```bash
+   make env-role ROLE=obs
+   ```
+
+6. **Проверки** с обеих сторон — [Проверка результата](#проверка-результата).
+
+Изменение `SENTRY_DSN`: если после повторного `make obs-up`/`make obs-bootstrap` на VPS 2
+изменился `SENTRY_DSN`, перенесите на VPS 1 **только эту строку** (весь файл копировать нельзя:
+на VPS 2 после `env-role` секретов приложения уже нет) и выполните на VPS 1 `make agent-up`.
+
+### Переменные `.env`
+
+| Переменная | Один хост | VPS 2 (мониторинг) | VPS 1 (приложение) |
+|---|---|---|---|
+| `PROJECT_ENVIRONMENT` | `stage` | как на VPS 1 | `prod` / `stage` |
+| `APP_UID`, `APP_GID`, `PROJECT_DATA_DIR` | свои | свои | свои (проверить после копирования) |
+| `MASTER_BOT_TOKEN` | задать | очищается `env-role` | задать |
+| Пароли БД/Redis/RabbitMQ/MinIO, `ENCRYPTION_KEY` | `make env` | очищаются `env-role` | `make env` (с VPS 2) |
+| `OBS_AUTH_HASH`, `GRAFANA_ADMIN_PASSWORD`, `CROWDSEC_BOUNCER_KEY`, `URGENTRY_BOOTSTRAP_*` | `make env` / `make obs-up` | `make env` / `make obs-up` | очищаются `env-role` |
+| `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | задать | задать | токен очищается `env-role` |
+| `CADDY_MODE` + `VPS_IP` / `GRAFANA_DOMAIN`, `URGENTRY_DOMAIN` | задать | задать | не используется |
+| `OBS_INGEST_BIND_ADDRESS` | `127.0.0.1` | `<VPN-IP VPS 2>` | не используется |
+| `URGENTRY_INTERNAL_URL` | `http://caddy:8081` | `http://<VPN-IP VPS 2>:8081` | не используется |
+| `SENTRY_DSN` | пишет `make obs-up` | пишет `make obs-up` | копия с VPS 2 |
+| `ALLOY_SINGLE_HOST` | `1` | не используется | `0` |
+| `ALLOY_HOST_LABEL` | любое | не используется | `vps1` |
+| `OBS_LOKI_PUSH_URL` | `http://loki:3100/loki/api/v1/push` | не используется | `http://<VPN-IP VPS 2>:3100/loki/api/v1/push` |
+| `OBS_PROMETHEUS_REMOTE_WRITE_URL` | `http://prometheus:9090/api/v1/write` | не используется | `http://<VPN-IP VPS 2>:9090/api/v1/write` |
+| `OBS_TEMPO_OTLP_ENDPOINT` | `tempo:4317` | не используется | `<VPN-IP VPS 2>:4317` |
+
+### Проверка результата
+
+```bash
+make ready      # хост приложения: /health/ready = 200 у master_bot и bot_worker
+make obs-ps     # хост мониторинга: все сервисы running/healthy
+curl -k -u admin:<пароль Basic Auth> -o /dev/null -w '%{http_code}\n' https://<VPS_IP>/grafana/api/health   # 200
+curl -k -o /dev/null -w '%{http_code}\n' https://<VPS_IP>/grafana/api/health                                  # 401
+make otel-smoke # хост приложения: span → SQL → RabbitMQ → ошибка в urgentry, печатает TRACE_ID
+```
+
+urgentry — `https://<VPS_IP>/` (Basic Auth, затем логин `URGENTRY_BOOTSTRAP_EMAIL` и пароль
+`URGENTRY_BOOTSTRAP_PASSWORD` из `.env` хоста мониторинга); ошибка из `make otel-smoke` должна
+появиться в проекте, трейс — в Grafana (Tempo) по `TRACE_ID`.
+
+### Остановка, обновление, откат
+
+- **Остановка** (один хост — строго в этом порядке):
+  `make agent-down` → `make down` → `make obs-down`. Если после этого осталась сеть
+  `<PROJECT_NAME>_docker_api` — `docker network rm <PROJECT_NAME>_docker_api`. На двух хостах:
+  VPS 1 — `make agent-down`, `make down`; VPS 2 — `make obs-down`.
+- **Обновление**: `git pull && git fetch --tags`, затем `make agent-up` (хост приложения; миграции
+  применяет `db_update`) и `make obs-up` (хост мониторинга).
+- **Откат**: `git checkout <предыдущий тег>` + `make agent-up`; миграции БД автоматически не
+  откатываются — порядок восстановления в [docs/ops/recovery.md](docs/ops/recovery.md).
+
+Caddy/CrowdSec (баны, смена ключа bouncer, проверка Caddyfile), обновление `.env`, созданного
+старой версией, и устройство стека мониторинга — [docs/ops/observability.md](docs/ops/observability.md).
+
+## Локальная разработка
+
+`make install` (uv + pre-commit), затем `make env` и в `.env`: `PROJECT_ENVIRONMENT=loc`,
+`PROJECT_DATA_DIR` в домашнем каталоге (абсолютный путь без `$`, например
+`/home/<user>/tg_shop_platform_data` — иначе `make env-test`/`make test-integration` создадут
+`/opt/tg_shop_platform_data_test` и потребуют `sudo`), `VPS_IP=127.0.0.1` и single-host значения
+из шага 4 сценария 1. Дальше — как в сценарии 1 (`make init-dirs` → `make obs-up` → `make agent-up`).
+Тесты: `make check`, `make test-integration`.
 
 ## Полезные команды
 
