@@ -14,10 +14,11 @@ from prometheus_client import CollectorRegistry
 from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
-from app.core.process import ServiceContext
+from app.core.process import ServiceContext, serve_components
 from app.core.scheduler import Schedule, ScheduledTask, SchedulerRunner, TaskRegistry
 from app.entrypoints.bot_worker import scheduler as component_mod
 from app.modules.bot_manager import tasks as tasks_mod
+from tests.unit.test_process import WAIT_TIMEOUT, sigterm_when, wait_until
 from tests.unit.test_scheduler import FakeRedis, RecordingPublisher
 
 pytestmark = pytest.mark.req("R-II.15")
@@ -104,14 +105,20 @@ async def test_heartbeat_runs_on_own_interval_and_loops_survive_errors() -> None
     redis = BeatRedis()
     redis.error = RuntimeError("unexpected")  # tick errors must not kill the loop
     runner = SchedulerRunner(_registry(), redis, RecordingPublisher(), tick_seconds=3600)
+    # catch_up: the first tick attempts the passed slot at once (and hits the Redis error).
+    caught_up = _registry(
+        ScheduledTask("t.daily", Schedule.daily_at("00:00"), "tasks.t.daily", catch_up=True)
+    )
     runner_hb = SchedulerRunner(
-        _registry(), redis, RecordingPublisher(), tick_seconds=3600, heartbeat_ttl=30
+        caught_up, redis, RecordingPublisher(), tick_seconds=3600, heartbeat_ttl=30
     )
     assert runner_hb.heartbeat_interval == 10
     assert runner.heartbeat_interval >= 1
     async with runner_hb.running() as loop_tasks:
         assert {t.get_name() for t in loop_tasks} == {"scheduler", "scheduler-heartbeat"}
-        await asyncio.sleep(0.05)
+        # Loops keep running after a failed tick (error counted) and a written beat.
+        await wait_until(lambda: bool(redis.beats) and bool(runner_hb.stats.runs))
+        assert runner_hb.stats.runs == {("t.daily", "error"): 1}
         assert all(not t.done() for t in loop_tasks)
     assert redis.beats == ["heartbeat:scheduler"]
     assert all(t.cancelled() for t in loop_tasks)
@@ -179,13 +186,21 @@ async def test_scheduler_component_enter_exit(monkeypatch: pytest.MonkeyPatch) -
         container=cast(Any, Container()),
         metrics=cast(Any, metrics),
     )
+
+    def started() -> bool:
+        # catch_up: the 03:00 slot already passed today -> published on start.
+        published = any(k.startswith("sched:lock:proxy.rehabilitate:") for k in redis.store)
+        return published and bool(redis.beats)
+
+    killer = sigterm_when(started)
     async with TestRabbitBroker(broker):
-        async with component_mod.scheduler_component(ctx):
-            await asyncio.sleep(0.05)
-            # catch_up: the 03:00 slot already passed today -> published on start.
-            assert any(k.startswith("sched:lock:proxy.rehabilitate:") for k in redis.store)
-            assert redis.beats
-            ctx.supervisor.begin_shutdown()  # as serve_components does before exit
+        with capture_logs() as logs:
+            code = await asyncio.wait_for(
+                serve_components(ctx, [component_mod.scheduler_component]), timeout=WAIT_TIMEOUT
+            )
+    await killer
+    assert code == 0
+    assert not [e for e in logs if e["event"] == "background_task_died"]
     assert ctx.supervisor.failed == []
     assert (
         metrics.registry.get_sample_value(

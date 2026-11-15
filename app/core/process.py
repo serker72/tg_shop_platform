@@ -120,11 +120,15 @@ async def serve_components(context: ServiceContext, components: Sequence[Service
     """
     supervisor = context.supervisor
     async with AsyncExitStack() as stack:
-        stack.callback(supervisor.begin_shutdown)  # runs first on exit (LIFO)
+        # Safety net only: registered first, so on LIFO exit it runs LAST - covers an
+        # exception while entering components, not the regular shutdown below.
+        stack.callback(supervisor.begin_shutdown)
         for component_factory in components:
             await stack.enter_async_context(component_factory(context))
         print(f"{context.name} started", flush=True)
         sig = await wait_for_shutdown(supervisor.stop_requested)
+        # Before the components exit: the tasks they cancel and await are expected to end.
+        supervisor.begin_shutdown()
         if sig is not None:
             print(f"{context.name} received {sig.name}, shutting down", flush=True)
         else:
