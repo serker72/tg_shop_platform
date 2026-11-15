@@ -24,7 +24,8 @@ from app.modules.bot_manager.tasks import register_proxy_tasks
 async def scheduler_component(ctx: ServiceContext) -> AsyncIterator[None]:
     """Subscribers always consume; the runner ticks only with ``SCHEDULER_ENABLED=true``.
 
-    Exit order: runner loop cancelled first, then the broker stops (subscribers drained).
+    Exit order: runner loops cancelled first, then the broker stops (in-flight handlers get
+    ``BROKER_GRACEFUL_TIMEOUT_SECONDS``). Runner loops are supervised (``ctx.supervisor``).
     """
     settings = ctx.settings
     redis = await ctx.container.get(Redis)
@@ -49,5 +50,7 @@ async def scheduler_component(ctx: ServiceContext) -> AsyncIterator[None]:
             tick_seconds=settings.scheduler.scheduler_tick_seconds,
             heartbeat_ttl=settings.observability.heartbeat_ttl_seconds,
         )
-        async with runner.running():
+        async with runner.running() as tasks:
+            for task in tasks:
+                ctx.supervisor.watch(task)
             yield

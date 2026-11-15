@@ -29,6 +29,11 @@ def broker_logger() -> logging.Logger:
     return logger
 
 
+#: Time the broker waits for in-flight handlers on stop; compose ``stop_grace_period`` of the
+#: bot services (30 s) must stay above it plus telemetry/Sentry flush.
+BROKER_GRACEFUL_TIMEOUT_SECONDS = 15.0
+
+
 def build_rabbit_broker(settings: Settings) -> RabbitBroker:
     """Broker on ``settings.rabbitmq_url`` with OTel spans and the JSON logger.
 
@@ -40,6 +45,7 @@ def build_rabbit_broker(settings: Settings) -> RabbitBroker:
     return RabbitBroker(
         settings.rabbitmq_url,
         logger=broker_logger(),
+        graceful_timeout=BROKER_GRACEFUL_TIMEOUT_SECONDS,
         middlewares=[
             RabbitTelemetryMiddleware(tracer_provider=get_tracer_provider()),
             # Only when tracing is off: trace_id header for log correlation.

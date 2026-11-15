@@ -76,3 +76,45 @@ the verdict `error` (logged, counted), never an exception to the poller.
 | `PROXY_STRIKE_WINDOW_SECONDS` | `3600` | dedup window of strikes and TTL of health marks |
 | `PROXY_FAILURE_THRESHOLD` | `5` | consecutive errors of a bot before `mark_fail` |
 | `PROXY_OUTAGE_RATIO` | `0.5` | share of failed other proxies meaning an outage |
+
+## Scheduler (periodic tasks, `bot_worker` only)
+Mechanism: `app/core/scheduler` (`Schedule`, `ScheduledTask`, `TaskRegistry`,
+`SchedulerRunner`); tasks and handlers live in the modules (`app/modules/bot_manager/tasks.py`).
+Every `SCHEDULER_TICK_SECONDS` each replica computes the planned slot
+`schedule.previous_fire(now)` (UTC) and runs `SET sched:lock:<task>:<slot ISO>Z <token> NX EX <ttl>`
+(TTL = period + min(period, 1 h); daily -> 25 h). The winner publishes
+`{"task", "scheduled_at", "payload"}` to the durable queue `tasks.<task>` (persistent message,
+publisher confirms, `message_id=<task>:<slot>`); the others count `skipped`.
+
+Adding a task:
+1. In the module: `registry.register(ScheduledTask(name, Schedule.daily_at("HH:MM") | Schedule.every(s), task_queue(name), payload_factory=..., catch_up=...))`.
+2. Subscriber on the same queue: `broker.subscriber(RabbitQueue(task_queue(name), durable=True), ack_policy=AckPolicy.REJECT_ON_ERROR)`.
+3. Wire the registration into `app/entrypoints/bot_worker/scheduler.py`.
+
+Guarantees - handlers MUST be idempotent:
+- at most one successful publication per slot across replicas; competing consumers - one
+  replica handles a message;
+- publish error or cancel (shutdown) -> the lock is released (token compare-and-delete), the
+  next tick retries;
+- confirm timeout -> the message may already be queued, the retry adds a duplicate;
+- ambiguous `SET` (written, reply lost) -> the slot stays locked until TTL: lost (at-most-once);
+- Redis error (incl. `OOM command not allowed` under `noeviction`) -> fail closed: no
+  publication, `log.error`, `result="error"`;
+- `catch_up=True`: on start the already passed slot is published (same lock key). Without it
+  the runner waits for the next slot. `every(s)` with `s < tick` skips slots (warning at start).
+- Ack policy `REJECT_ON_ERROR`: a failing handler is logged (`scheduled_task_failed` with
+  `scheduled_at`) and the message dropped - no redelivery loop; the next slot repeats it.
+
+Metrics (`bot_worker`): `scheduler_runs_total{task,result=published|skipped|error}` (all with
+`0`; sum across replicas), `scheduler_last_success_timestamp_seconds{task}` - only on the
+replica that published, use `max by (task) (...)`. Heartbeat `heartbeat:scheduler`
+(non-critical, degrades readiness) every `OBSERVABILITY_HEARTBEAT_TTL_SECONDS / 3`.
+Scheduler loops are supervised by `run_service`: a dead loop stops the process (exit 1) and
+the container is restarted. Stop: loops cancelled, then the broker (`graceful_timeout` 15 s);
+compose `stop_grace_period: 30s`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SCHEDULER_ENABLED` | `true` | tick loop on/off (subscribers consume anyway) |
+| `SCHEDULER_TICK_SECONDS` | `30` | tick period |
+| `PROXY_REHABILITATE_AT` | `03:00` | daily `proxy.rehabilitate`, UTC (catch_up on) |

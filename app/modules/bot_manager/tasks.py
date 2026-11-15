@@ -44,6 +44,7 @@ def register_proxy_tasks(
     redis: Any,
 ) -> ScheduledTask:
     """Register ``proxy.rehabilitate`` (catch_up) and its competing-consumer subscriber."""
+    from faststream import AckPolicy
     from faststream.rabbit import RabbitQueue
 
     task = registry.register(
@@ -56,7 +57,17 @@ def register_proxy_tasks(
     )
 
     async def handle_rehabilitate(body: dict[str, Any]) -> None:
-        count = await rehabilitate_proxies(session_factory, settings.proxy, redis)
+        try:
+            count = await rehabilitate_proxies(session_factory, settings.proxy, redis)
+        except Exception:
+            # REJECT_ON_ERROR: no redelivery loop; the next daily slot (or catch_up on the
+            # next start) repeats the idempotent UPDATE.
+            _log.exception(
+                "scheduled_task_failed",
+                task=REHABILITATE_TASK,
+                scheduled_at=body.get("scheduled_at"),
+            )
+            raise
         _log.info(
             "scheduled_task_done",
             task=REHABILITATE_TASK,
@@ -64,5 +75,7 @@ def register_proxy_tasks(
             rehabilitated=count,
         )
 
-    broker.subscriber(RabbitQueue(task.queue, durable=True))(handle_rehabilitate)
+    broker.subscriber(RabbitQueue(task.queue, durable=True), ack_policy=AckPolicy.REJECT_ON_ERROR)(
+        handle_rehabilitate
+    )
     return task
