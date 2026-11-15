@@ -26,6 +26,7 @@ APP_SECRETS = (
     "ENCRYPTION_KEY",
     "ENCRYPTION_KEYS_OLD",
     "MASTER_BOT_TOKEN",
+    "MASTER_BOT_PROXY_URL",
 )
 OBS_SECRETS = (
     "GRAFANA_ADMIN_PASSWORD",
@@ -48,7 +49,7 @@ NOT_ROLE_SECRETS = {
     "MINIO_ACCESS_KEY",  # MinIO root login (not a password), app-only, default = project name
     "SENTRY_DSN",  # the only link between the hosts: VPS 2 writes it, VPS 1 needs it
 }
-SECRET_LIKE = re.compile(r"PASSWORD|SECRET|TOKEN|_KEY$|_KEYS|HASH|_PAT$|DSN")
+SECRET_LIKE = re.compile(r"PASSWORD|SECRET|TOKEN|_KEY$|_KEYS|HASH|_PAT$|DSN|PROXY_URL")
 
 
 def _secret_value(key: str) -> str:

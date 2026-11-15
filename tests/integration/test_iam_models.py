@@ -13,7 +13,7 @@ from sqlalchemy import MetaData, Table, create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.bot_manager.models import Bot, TenantCustomer
+from app.modules.bot_manager.models import Bot, Proxy, TenantCustomer
 from app.modules.iam.models import (
     SEED_LANGUAGES,
     Language,
@@ -69,6 +69,7 @@ IAM_MODELS = (
     UserRole,
     UserPermissionOverride,
     TenantModerator,
+    Proxy,
     Bot,
     TenantCustomer,
 )

@@ -30,6 +30,8 @@ from app.modules.iam.models import (
 )
 from app.modules.iam.permissions import (
     GLOBAL_PERMISSIONS,
+    IAM_RBAC_PERMISSIONS,
+    LATER_PERMISSIONS,
     ROLE_ADMIN,
     ROLE_MODERATOR,
     ROLE_SENIOR_MODERATOR,
@@ -412,15 +414,19 @@ def test_rbac_eager_defaults() -> None:
 
 def test_seed_permissions() -> None:
     slugs = [slug for slug, _ in SEED_PERMISSIONS]
-    # The only place the catalogue size is pinned: 27 TZ 46.7 permissions + tenants.view_all.
-    assert len(slugs) == len(set(slugs)) == len(SEED_PERMISSION_SLUGS) == 28
+    # The only place the catalogue size is pinned: 27 TZ 46.7 permissions + tenants.view_all
+    # (iam_rbac) + proxies.manage (proxy_pool).
+    assert len(slugs) == len(set(slugs)) == len(SEED_PERMISSION_SLUGS) == 29
     assert GLOBAL_PERMISSIONS <= SEED_PERMISSION_SLUGS
     assert GLOBAL_PERMISSIONS == {
         "roles.manage",
         "settings.manage",
         "tenants.view_all",
         "moderators.manage",
+        "proxies.manage",
     }
+    assert len(IAM_RBAC_PERMISSIONS) == 28
+    assert [s for s, _ in LATER_PERMISSIONS] == ["proxies.manage"]
     assert all(re.fullmatch(PERMISSION_SLUG_PATTERN, s) for s in slugs)
     assert all(name.strip() for _, name in SEED_PERMISSIONS)
     assert TENANTS_VIEW_ALL in SEED_PERMISSION_SLUGS
@@ -452,4 +458,5 @@ def test_seed_roles() -> None:
     assert TENANTS_VIEW_ALL not in moderator
     assert moderator == senior - {TENANTS_VIEW_ALL}
     assert len(moderator) == 21
-    assert len(SEED_ROLE_PERMISSIONS[ROLE_ADMIN]) == 28
+    assert len(SEED_ROLE_PERMISSIONS[ROLE_ADMIN]) == 29
+    assert "proxies.manage" not in senior

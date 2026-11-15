@@ -24,6 +24,8 @@ __all__ = [
     "CASES_REPLY",
     "CASES_VIEW",
     "GLOBAL_PERMISSIONS",
+    "IAM_RBAC_PERMISSIONS",
+    "LATER_PERMISSIONS",
     "MODERATORS_MANAGE",
     "ORDERS_MANAGE",
     "ORDERS_VIEW",
@@ -32,6 +34,7 @@ __all__ = [
     "PAYOUTS_VIEW",
     "PREORDERS_MANAGE",
     "PREORDERS_VIEW",
+    "PROXIES_MANAGE",
     "PRODUCTS_CREATE",
     "PRODUCTS_DELETE",
     "PRODUCTS_EDIT",
@@ -83,9 +86,11 @@ ROLES_MANAGE = "roles.manage"
 SETTINGS_MANAGE = "settings.manage"
 #: Access to every shop without an assignment in ``tenant_moderators``.
 TENANTS_VIEW_ALL = "tenants.view_all"
+#: Proxy pool of the bots (add / ban / activate); added by the ``proxy_pool`` revision.
+PROXIES_MANAGE = "proxies.manage"
 
 #: ``(slug, name)`` rows seeded by the ``iam_rbac`` revision.
-SEED_PERMISSIONS: tuple[tuple[str, str], ...] = (
+IAM_RBAC_PERMISSIONS: tuple[tuple[str, str], ...] = (
     (PRODUCTS_VIEW, "Просмотр товаров"),
     (PRODUCTS_CREATE, "Создание товаров"),
     (PRODUCTS_EDIT, "Редактирование товаров"),
@@ -115,12 +120,18 @@ SEED_PERMISSIONS: tuple[tuple[str, str], ...] = (
     (SETTINGS_MANAGE, "Управление настройками"),
     (TENANTS_VIEW_ALL, "Доступ ко всем магазинам"),
 )
+#: ``(slug, name)`` rows added by later revisions (each one also grants them to ``admin``).
+LATER_PERMISSIONS: tuple[tuple[str, str], ...] = (
+    (PROXIES_MANAGE, "Управление прокси"),  # revision proxy_pool
+)
+#: The whole permission catalogue at ``head``.
+SEED_PERMISSIONS: tuple[tuple[str, str], ...] = IAM_RBAC_PERMISSIONS + LATER_PERMISSIONS
 SEED_PERMISSION_SLUGS: frozenset[str] = frozenset(slug for slug, _ in SEED_PERMISSIONS)
 
 #: Platform-wide permissions that make no sense per shop: a tenant-scoped override
 #: (``user_permission_overrides.tenant_id IS NOT NULL``) of these is forbidden by the service.
 GLOBAL_PERMISSIONS: frozenset[str] = frozenset(
-    {ROLES_MANAGE, SETTINGS_MANAGE, TENANTS_VIEW_ALL, MODERATORS_MANAGE}
+    {ROLES_MANAGE, SETTINGS_MANAGE, TENANTS_VIEW_ALL, MODERATORS_MANAGE, PROXIES_MANAGE}
 )
 
 ROLE_ADMIN = "admin"

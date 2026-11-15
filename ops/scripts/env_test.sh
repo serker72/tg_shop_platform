@@ -25,7 +25,8 @@
 #   REDIS_DB is forced to 15 so the test cache never shares keys with the dev cache;
 #   *_DATA_DIR are written as literal paths under the test PROJECT_DATA_DIR (order-independent);
 #   *_PORT_HOST are shifted by PORT_OFFSET (default 20000), result must be within 1..65535;
-#   MASTER_BOT_TOKEN -> mock; ENCRYPTION_KEYS_OLD -> empty;
+#   MASTER_BOT_TOKEN -> mock; MASTER_BOT_PROXY_URL -> empty, MASTER_BOT_USE_PROXY=false;
+#   ENCRYPTION_KEYS_OLD -> empty;
 #   ENCRYPTION_KEY is kept from an existing target file if valid, otherwise a new one is generated;
 #   URGENTRY_BOOTSTRAP_PASSWORD / URGENTRY_BOOTSTRAP_PAT of the test obs stack are own values
 #   (kept from an existing target file, otherwise generated); SENTRY_DSN, SENTRY_RELEASE -> empty;
@@ -232,6 +233,8 @@ k in dd                     { print k "=\"" tdir "/" dd[k] "\""; next }
 k in pd                     { print k "=" port(k, v); next }
 k in tv                     { print k "=" tv[k]; next }
 k == "MASTER_BOT_TOKEN"     { print k "=123456789:TEST-mock-master-bot-token"; next }
+k == "MASTER_BOT_PROXY_URL"  { print k "="; next }  # tests never use the real proxy
+k == "MASTER_BOT_USE_PROXY"  { print k "=false"; next }
 k == "ENCRYPTION_KEY"       { print k "=" key; next }
 k == "ENCRYPTION_KEYS_OLD"  { print k "="; next }
 k == "ALERT_TELEGRAM_BOT_TOKEN" || k == "ALERT_TELEGRAM_CHAT_ID" { print k "="; next }  # no test alerts to the real chat

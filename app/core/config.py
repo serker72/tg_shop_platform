@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Any, Final, Literal
 from urllib.parse import quote, urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
+
+from app.core.proxy_url import validate_proxy_url
 
 __all__ = [
     "EncryptionSettings",
@@ -466,6 +468,49 @@ class ObservabilitySettings(BaseSettings):
         return value.strip()
 
 
+class ProxySettings(BaseSettings):
+    """Proxy pool of the bots (``docs/ops/bot-runtime.md``), no env prefix.
+
+    ``MASTER_BOT_PROXY_URL`` (``socks5|socks4|http://[user:pass@]host:port``) is required when
+    ``MASTER_BOT_USE_PROXY=true``; it is a secret (``APP_SECRETS`` of ``env_role.sh``).
+    Shop-bot proxies live in the ``proxies`` table, not in env.
+    """
+
+    model_config = _base_config("")
+    # Never echo a proxy URL (credentials) in a ValidationError.
+    model_config["hide_input_in_errors"] = True
+
+    master_bot_use_proxy: bool = False
+    master_bot_proxy_url: SecretStr | None = None
+    tenants_use_proxy: bool = False
+    proxy_max_bots_per_ip: int = Field(default=20, ge=1)
+    proxy_strikes_to_quarantine: int = Field(default=2, ge=1)
+    proxy_quarantine_days: int = Field(default=7, ge=1)
+    proxy_strike_window_seconds: int = Field(default=3600, ge=1)
+    proxy_failure_threshold: int = Field(default=5, ge=1)
+    proxy_outage_ratio: float = Field(default=0.5, gt=0, le=1)
+
+    @field_validator("master_bot_proxy_url", mode="before")
+    @classmethod
+    def _empty_proxy_url_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("master_bot_proxy_url", mode="after")
+    @classmethod
+    def _check_proxy_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        return SecretStr(validate_proxy_url(value.get_secret_value()))
+
+    @model_validator(mode="after")
+    def _proxy_url_required(self) -> ProxySettings:
+        if self.master_bot_use_proxy and self.master_bot_proxy_url is None:
+            raise ValueError("MASTER_BOT_PROXY_URL is required when MASTER_BOT_USE_PROXY=true")
+        return self
+
+
 # ``Settings`` field name -> nested section class.
 _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "postgres": PostgresSettings,
@@ -477,6 +522,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "storage": StorageSettings,
     "logs": LogsSettings,
     "observability": ObservabilitySettings,
+    "proxy": ProxySettings,
 }
 
 
@@ -503,6 +549,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     logs: LogsSettings = Field(default_factory=LogsSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    proxy: ProxySettings = Field(default_factory=ProxySettings)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.

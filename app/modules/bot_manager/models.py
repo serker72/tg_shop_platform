@@ -20,6 +20,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     Text,
     UniqueConstraint,
     Uuid,
@@ -39,7 +40,12 @@ __all__ = [
     "BOT_STATUS_RUNNING",
     "BOT_STATUS_STARTING",
     "BOT_STATUS_STOPPED",
+    "PROXY_STATUSES",
+    "PROXY_STATUS_ACTIVE",
+    "PROXY_STATUS_BANNED",
+    "PROXY_STATUS_QUARANTINE",
     "Bot",
+    "Proxy",
     "TenantCustomer",
 ]
 
@@ -55,6 +61,16 @@ BOT_STATUSES: tuple[str, ...] = (
     BOT_STATUS_RUNNING,
     BOT_STATUS_INVALID_TOKEN,
     BOT_STATUS_ERROR,
+)
+
+PROXY_STATUS_ACTIVE: Final = "active"
+PROXY_STATUS_QUARANTINE: Final = "quarantine"
+PROXY_STATUS_BANNED: Final = "banned"
+#: Allowed ``proxies.status`` values (DB CHECK ``ck_proxies_status``).
+PROXY_STATUSES: tuple[str, ...] = (
+    PROXY_STATUS_ACTIVE,
+    PROXY_STATUS_QUARANTINE,
+    PROXY_STATUS_BANNED,
 )
 
 
@@ -87,6 +103,10 @@ class Bot(BusinessEntity, Base):
     configuration: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    #: Proxy of the bot (``ProxyPoolService``); ``NULL`` - not assigned / direct connection.
+    proxy_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("proxies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     def __repr__(self) -> str:
         # Never include ``encrypted_token`` / ``token_hash``: reprs end up in logs.
@@ -94,6 +114,43 @@ class Bot(BusinessEntity, Base):
             f"Bot(id={self.id!s}, tenant_id={self.tenant_id!s}, "
             f"telegram_bot_id={self.telegram_bot_id!r}, username={self.username!r}, "
             f"status={self.status!r})"
+        )
+
+
+class Proxy(BusinessEntity, Base):
+    """Outgoing proxy of the bot pool (decisions.md, "Пул прокси").
+
+    ``url`` keeps the credentials and is stored only encrypted; ``url_hash`` (sha256 of the
+    normalized URL) makes it unique. The number of bots of a proxy is never stored: it is
+    ``COUNT(bots WHERE proxy_id = id AND NOT is_deleted)``. ``last_ban_at`` - the moment the
+    proxy went to quarantine (or was banned).
+    """
+
+    __tablename__ = "proxies"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{value}'" for value in PROXY_STATUSES) + ")",
+            name="status",
+        ),
+        CheckConstraint("strike_count >= 0", name="strike_count_non_negative"),
+    )
+
+    url: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
+    url_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=PROXY_STATUS_ACTIVE, index=True
+    )
+    strike_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_strike_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_ban_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    def __repr__(self) -> str:
+        # Never include ``url`` / ``url_hash``: the URL carries the proxy credentials.
+        return (
+            f"Proxy(id={self.id!s}, label={self.label!r}, status={self.status!r}, "
+            f"strike_count={self.strike_count!r})"
         )
 
 

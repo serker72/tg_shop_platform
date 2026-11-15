@@ -12,11 +12,18 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Info, generate_latest
-from prometheus_client.core import CounterMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 from prometheus_client.metrics_core import Metric
 from prometheus_client.registry import Collector
 
 from app.core.version import VersionInfo, get_version_info
+from app.modules.bot_manager.metrics import (
+    LabeledCounter,
+    OutageGauge,
+    proxy_failure_verdicts_total,
+    proxy_probe_total,
+    telegram_outage,
+)
 from app.modules.iam.metrics import (
     INVALIDATION_SCOPES,
     CacheInvalidationFailures,
@@ -29,6 +36,7 @@ __all__ = [
     "AppMetrics",
     "IamCacheInvalidationCollector",
     "LogsDroppedCollector",
+    "ProxyPoolCollector",
     "build_metrics",
     "render_metrics",
     "set_build_info",
@@ -95,6 +103,42 @@ class IamCacheInvalidationCollector(Collector):
         return []
 
 
+class ProxyPoolCollector(Collector):
+    """``proxy_failure_verdicts_total{verdict}``, ``proxy_probe_total{result}`` and the
+    ``telegram_outage`` gauge (every label value is exported with ``0``)."""
+
+    def __init__(
+        self, verdicts: LabeledCounter, probes: LabeledCounter, outage: OutageGauge
+    ) -> None:
+        self._verdicts = verdicts
+        self._probes = probes
+        self._outage = outage
+
+    def collect(self) -> Iterable[Metric]:
+        verdicts = CounterMetricFamily(
+            "proxy_failure_verdicts",
+            "Decisions on proxy failures (strike / outage / single_proxy / deduplicated / error).",
+            labels=["verdict"],
+        )
+        for verdict, value in sorted(self._verdicts.snapshot().items()):
+            verdicts.add_metric([verdict], value)
+        yield verdicts
+        probes = CounterMetricFamily(
+            "proxy_probe", "Proxy handshake probes by result.", labels=["result"]
+        )
+        for result, value in sorted(self._probes.snapshot().items()):
+            probes.add_metric([result], value)
+        yield probes
+        yield GaugeMetricFamily(
+            "telegram_outage",
+            "1 - every proxy fails at once (Telegram unreachable), reset by the first success.",
+            value=self._outage.value,
+        )
+
+    def describe(self) -> Iterable[Metric]:
+        return []
+
+
 @dataclass(frozen=True, slots=True)
 class AppMetrics:
     """Registry and the application metrics registered in it."""
@@ -130,6 +174,9 @@ def build_metrics(
     registry = CollectorRegistry(auto_describe=False)
     registry.register(LogsDroppedCollector(counter))
     registry.register(IamCacheInvalidationCollector(iam_cache_invalidation_failures_total))
+    registry.register(
+        ProxyPoolCollector(proxy_failure_verdicts_total, proxy_probe_total, telegram_outage)
+    )
     metrics = AppMetrics(
         registry=registry,
         logs_dropped=counter,

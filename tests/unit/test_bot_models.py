@@ -46,7 +46,7 @@ def test_bot_table_contract() -> None:
     assert not table.c.tenant_id.nullable
     assert not table.c.telegram_bot_id.nullable
     assert not table.c.encrypted_token.nullable
-    assert "proxy_id" not in table.c
+    assert table.c.proxy_id.nullable
     assert "kind" not in table.c
     uniques = {
         tuple(c.name for c in u.columns)
@@ -57,9 +57,17 @@ def test_bot_table_contract() -> None:
     checks = [c for c in table.constraints if isinstance(c, CheckConstraint)]
     assert [c.name for c in checks] == ["ck_bots_status"]
     assert all(f"'{status}'" in str(checks[0].sqltext) for status in BOT_STATUSES)
-    fk = next(c for c in table.constraints if isinstance(c, ForeignKeyConstraint))
-    assert fk.ondelete == "RESTRICT"
-    assert {i.name for i in table.indexes} >= {"ix_bots_tenant_id", "ix_bots_status"}
+    ondelete = {
+        next(iter(c.columns)).name: c.ondelete
+        for c in table.constraints
+        if isinstance(c, ForeignKeyConstraint)
+    }
+    assert ondelete == {"tenant_id": "RESTRICT", "proxy_id": "SET NULL"}
+    assert {i.name for i in table.indexes} >= {
+        "ix_bots_tenant_id",
+        "ix_bots_status",
+        "ix_bots_proxy_id",
+    }
 
 
 def test_tenant_customer_contract() -> None:
