@@ -347,7 +347,7 @@ async def test_report_failure_strike_without_redis_fallback(factory: Any, redis:
     await pool.tracker.mark_ok(b)
 
     class _NoStrikeKey(ProxyHealthTracker):
-        async def try_acquire_strike(self, proxy_id: uuid.UUID) -> bool:
+        async def try_acquire_strike(self, proxy_id: uuid.UUID) -> str | None:
             raise RedisConnectionError("down")
 
     tracker = _NoStrikeKey(redis, window_seconds=3600)
@@ -399,6 +399,23 @@ async def test_manual_add_ban_activate(factory: Any, redis: Any) -> None:
     )
     assert [r[0] for r in audit] == ["proxy.add", "proxy.ban", "proxy.activate"]
     assert all(r[1] == ACTOR and "secret" not in r[2] for r in audit)
+
+
+async def test_release_strike_only_by_owner(redis: Any) -> None:
+    tracker = ProxyHealthTracker(redis, window_seconds=3600)
+    proxy_id = uuid.uuid4()
+    token = await tracker.try_acquire_strike(proxy_id)
+    assert token is not None
+    assert await tracker.try_acquire_strike(proxy_id) is None  # taken
+    assert not await tracker.release_strike(proxy_id, "foreign-token")
+    assert await redis.exists(strike_key(proxy_id)) == 1
+    assert await tracker.release_strike(proxy_id, token)
+    assert await redis.exists(strike_key(proxy_id)) == 0
+    # expired and re-taken by another process: the old owner can not remove it
+    other = await tracker.try_acquire_strike(proxy_id)
+    assert other is not None and other != token
+    assert not await tracker.release_strike(proxy_id, token)
+    assert await redis.exists(strike_key(proxy_id)) == 1
 
 
 # --- head catalogue and the revision ring -------------------------------------------------

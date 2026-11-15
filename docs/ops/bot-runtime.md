@@ -45,12 +45,18 @@ one IP does not stop every bot. Code: `app/modules/bot_manager/proxy_service.py`
 |---|---|---|---|
 | `proxy_failure_verdicts_total{verdict}` (`strike`, `outage`, `single_proxy`, `deduplicated`, `error`) | `bot_worker` (every replica) | in-process counter | `sum by (verdict) (rate(...))` |
 | `proxy_probe_total{result}` (`ok`, `proxy_dead`, `telegram_blocked`) | `bot_worker` | in-process counter | `sum by (result) (rate(...))` |
-| `telegram_outage` (0/1) | `master_bot` only | `EXISTS proxy:outage` in Redis at scrape time | `max(telegram_outage)` |
+| `telegram_outage` (0/1) | `master_bot` only | in-memory cache of `EXISTS proxy:outage`, polled every 15 s | `max(telegram_outage)` |
 
 All label values are exported with `0`. The outage state is shared: any worker sets
 `proxy:outage` (TTL `PROXY_STRIKE_WINDOW_SECONDS`) on an `outage` verdict, the first
-successful `mark_ok` of any worker deletes it. If Redis is unreachable during a scrape,
+successful `mark_ok` of any worker deletes it. Strike dedup keys hold an owner token
+(uuid4): a failed strike frees only its own key (Lua compare-and-delete). `master_bot` polls the key in a background task every 15 s (one async `EXISTS`, timeout
+2 s) and caches `(value, checked_at)`; `/metrics` only reads the cache and never waits for
+Redis. No successful check yet or the cache older than 30 s (Redis unreachable) ->
 `telegram_outage` is omitted (use `absent(telegram_outage)`), the rest of `/metrics` works.
+The task is cancelled on shutdown. The gauge may blink (an outage key set and cleared
+within a poll period, or re-set by the next failure): the `for:` of the
+`TelegramUnreachable` rule (task 13) must cover several poll periods.
 Pool gauges from PostgreSQL (proxies by status, capacity) - `master_bot`, task 13.
 
 ## Lock order

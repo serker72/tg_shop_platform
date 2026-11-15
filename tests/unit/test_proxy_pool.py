@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,9 +20,14 @@ from app.core.observability.metrics import (
     render_metrics,
 )
 from app.core.proxy_url import validate_proxy_url
-from app.modules.bot_manager.metrics import FAILURE_VERDICTS, PROBE_RESULTS, LabeledCounter
+from app.modules.bot_manager.metrics import (
+    FAILURE_VERDICTS,
+    PROBE_RESULTS,
+    LabeledCounter,
+    OutageState,
+)
 from app.modules.bot_manager.models import Proxy
-from app.modules.bot_manager.proxy_health import probe_handshake
+from app.modules.bot_manager.proxy_health import OutageMonitor, probe_handshake
 from app.modules.bot_manager.sessions import build_bot_session, mask_proxy_url
 from app.modules.logging.metrics import LogsDroppedCounter
 
@@ -104,7 +110,10 @@ def test_validate_proxy_url_normalizes(url: str, expected: str) -> None:
     assert validate_proxy_url(url) == expected
 
 
-@pytest.mark.parametrize("url", ["socks5://u:secret@h", "login:secret@host:1080", "https://h:1"])
+@pytest.mark.parametrize(
+    "url",
+    ["socks5://u:secret@h", "login:secret@host:1080", "https://h:1", "socks5://u:secret@h:0"],
+)
 def test_validate_proxy_url_rejects_without_secret(url: str) -> None:
     with pytest.raises(ValueError) as info:  # noqa: PT011 - message checked below
         validate_proxy_url(url)
@@ -266,26 +275,40 @@ async def test_probe_ok() -> None:
 # --- metrics by process role ---------------------------------------------------------------
 
 
-class _FakeSyncRedis:
-    def __init__(self, value: int | Exception) -> None:
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _FakeAsyncRedis:
+    def __init__(self, value: int) -> None:
         self.value = value
         self.keys: list[str] = []
 
-    def exists(self, key: str) -> int:
+    async def exists(self, key: str) -> int:
         self.keys.append(key)
-        if isinstance(self.value, Exception):
-            raise self.value
         return self.value
 
 
-def _render(component: str, redis: Any = None) -> str:
+class _BlackHoleRedis:
+    """``EXISTS`` that never answers (packets dropped)."""
+
+    async def exists(self, key: str) -> int:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+def _render(component: str, state: OutageState | None = None) -> str:
     metrics = build_metrics(LogsDroppedCounter())
-    register_component_metrics(metrics, component=component, outage_redis=redis)
+    register_component_metrics(metrics, component=component, outage_state=state)
     return render_metrics(metrics.registry).decode()
 
 
 def test_worker_exports_proxy_counters_with_zeros() -> None:
-    text = _render("bot_worker")
+    text = _render("bot_worker", OutageState())
     for verdict in FAILURE_VERDICTS:
         assert f'proxy_failure_verdicts_total{{verdict="{verdict}"}}' in text
     for result in PROBE_RESULTS:
@@ -296,23 +319,60 @@ def test_worker_exports_proxy_counters_with_zeros() -> None:
 @pytest.mark.parametrize(
     ("value", "expected"), [(1, "telegram_outage 1.0"), (0, "telegram_outage 0.0")]
 )
-def test_master_exports_outage_gauge_from_redis(value: int, expected: str) -> None:
-    redis = _FakeSyncRedis(value)
-    text = _render("master_bot", redis)
+async def test_master_exports_outage_gauge_from_cache(value: int, expected: str) -> None:
+    redis = _FakeAsyncRedis(value)
+    state = OutageState()
+    assert await OutageMonitor(redis, state).check_once()
+    text = _render("master_bot", state)
     assert expected in text
     assert redis.keys == ["proxy:outage"]
     assert "proxy_failure_verdicts_total" not in text
 
 
-def test_master_outage_gauge_omitted_when_redis_down() -> None:
-    from redis.exceptions import ConnectionError as RedisConnectionError
+def test_outage_cache_goes_stale() -> None:
+    clock = _Clock()
+    state = OutageState(max_age_seconds=30, clock=clock)
+    assert state.current() is None  # never checked
+    assert "telegram_outage" not in _render("master_bot", state)
+    state.update(True)
+    clock.now += 30
+    assert state.current() == 1
+    clock.now += 0.1
+    assert state.current() is None
+    assert "telegram_outage" not in _render("master_bot", state)
+    assert "logs_dropped_total" in _render("master_bot", state)  # rest of /metrics served
 
-    text = _render("master_bot", _FakeSyncRedis(RedisConnectionError("down")))
-    assert "telegram_outage" not in text
-    assert "logs_dropped_total" in text  # the rest of /metrics is served
+
+async def test_black_hole_redis_never_blocks_scrape() -> None:
+    clock = _Clock()
+    state = OutageState(max_age_seconds=30, clock=clock)
+    state.update(False)
+    monitor = OutageMonitor(_BlackHoleRedis(), state, timeout_seconds=0.05)
+    started = time.perf_counter()
+    assert not await monitor.check_once()  # bounded by the timeout
+    assert time.perf_counter() - started < 1
+    started = time.perf_counter()
+    assert "telegram_outage 0.0" in _render("master_bot", state)  # still fresh
+    clock.now += 31
+    assert "telegram_outage" not in _render("master_bot", state)
+    assert time.perf_counter() - started < 0.5  # rendering never touches Redis
+
+
+async def test_outage_monitor_runs_and_stops() -> None:
+    redis = _FakeAsyncRedis(1)
+    state = OutageState()
+    monitor = OutageMonitor(redis, state, interval_seconds=0.01)
+    async with monitor.running() as task:
+        for _ in range(100):
+            if len(redis.keys) >= 2:
+                break
+            await asyncio.sleep(0.01)
+        assert state.current() == 1
+        assert len(redis.keys) >= 2  # periodic
+    assert task.cancelled()
 
 
 def test_other_processes_export_no_proxy_series() -> None:
-    text = _render("db_update")
+    text = _render("db_update", OutageState())
     assert "proxy_" not in text
     assert "telegram_outage" not in text

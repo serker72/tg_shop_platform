@@ -30,9 +30,11 @@ async def run_service(name: str) -> None:
     Serves ``/health/live``, ``/health/ready`` and ``/metrics`` until SIGTERM/SIGINT; the
     bots themselves arrive in milestone II.
     """
+    from contextlib import AsyncExitStack
+
     import sentry_sdk
     from dishka import make_async_container
-    from redis import Redis as SyncRedis
+    from redis.asyncio import Redis
 
     from app.core.config import Settings, get_settings
     from app.core.logging import configure_logging
@@ -46,6 +48,8 @@ async def run_service(name: str) -> None:
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
     from app.core.telemetry import init_telemetry, shutdown_telemetry
+    from app.modules.bot_manager.metrics import OutageState
+    from app.modules.bot_manager.proxy_health import OutageMonitor
     from app.modules.logging.ioc import LoggingProvider
     from app.shared_kernel.infrastructure.providers import (
         DatabaseProvider,
@@ -58,7 +62,6 @@ async def run_service(name: str) -> None:
     sentry_enabled = init_sentry(settings, component=name)
     # Before the container: the engine/broker capture the tracer provider when built.
     init_telemetry(settings, service_name=name)
-    outage_redis: SyncRedis | None = None
     container = make_async_container(
         DatabaseProvider(),
         RedisProvider(),
@@ -70,28 +73,30 @@ async def run_service(name: str) -> None:
         checker = await container.get(HealthChecker)
         metrics = await container.get(AppMetrics)
         set_build_info(metrics, component=name)
-        if name == "master_bot":
-            # Sync client for the scrape-time ``EXISTS proxy:outage`` (short timeouts).
-            outage_redis = SyncRedis.from_url(
-                settings.redis_url, socket_timeout=0.5, socket_connect_timeout=0.5
-            )
-        register_component_metrics(metrics, component=name, outage_redis=outage_redis)
+        outage_state: OutageState | None = None
         obs = settings.observability
-        async with serve_observability(
-            create_app(
-                checker,
-                metrics.registry,
-                ready_cache_ttl=obs.ready_cache_ttl_seconds,
-                component=name,
-                environment=obs.sentry_environment or settings.project_environment,
-            ),
-            host=obs.http_host,
-            port=obs.http_port,
-        ):
+        async with AsyncExitStack() as stack:
+            if name == "master_bot":
+                # ``telegram_outage``: background poll of ``proxy:outage`` -> in-memory cache.
+                outage_state = OutageState()
+                monitor = OutageMonitor(await container.get(Redis), outage_state)
+                await stack.enter_async_context(monitor.running())
+            register_component_metrics(metrics, component=name, outage_state=outage_state)
+            await stack.enter_async_context(
+                serve_observability(
+                    create_app(
+                        checker,
+                        metrics.registry,
+                        ready_cache_ttl=obs.ready_cache_ttl_seconds,
+                        component=name,
+                        environment=obs.sentry_environment or settings.project_environment,
+                    ),
+                    host=obs.http_host,
+                    port=obs.http_port,
+                )
+            )
             await run_placeholder(name)
     finally:
-        if outage_redis is not None:
-            outage_redis.close()
         await container.close()
         # Flush/shutdown blocks (exporter deadline): keep the event loop free.
         await asyncio.to_thread(shutdown_telemetry)

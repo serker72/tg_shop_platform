@@ -332,20 +332,22 @@ class ProxyPoolService:
         in PostgreSQL, ``False`` (from :meth:`report_failure`) re-raises. A failed
         transaction frees the taken dedup key (best effort).
         """
+        fallback = False
+        token: str | None = None
         try:
-            first: bool | None = await self._tracker.try_acquire_strike(proxy_id)
+            token = await self._tracker.try_acquire_strike(proxy_id)
         except (RedisError, OSError) as error:
             if not allow_fallback:
                 raise
             _log.warning("proxy_strike_dedup_fallback", error=type(error).__name__)
-            first = None
-        if first is False:
+            fallback = True
+        if token is None and not fallback:
             return StrikeResult(applied=False)
         try:
-            return await self._apply_strike(proxy_id, reason, pg_dedup=first is None)
+            return await self._apply_strike(proxy_id, reason, pg_dedup=fallback)
         except BaseException:
-            if first:
-                await self._tracker.release_strike(proxy_id)
+            if token is not None:
+                await self._tracker.release_strike(proxy_id, token)
             raise
 
     async def _apply_strike(self, proxy_id: UUID, reason: str, *, pg_dedup: bool) -> StrikeResult:

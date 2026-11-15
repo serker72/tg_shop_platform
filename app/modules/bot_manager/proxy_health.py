@@ -14,7 +14,9 @@ import asyncio
 import contextlib
 import ssl
 import time
-from collections.abc import Callable, Sequence
+import uuid
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 from uuid import UUID
@@ -22,12 +24,19 @@ from uuid import UUID
 import structlog
 from redis.exceptions import RedisError
 
-from app.modules.bot_manager.metrics import OUTAGE_KEY, LabeledCounter, proxy_probe_total
+from app.modules.bot_manager.metrics import (
+    OUTAGE_KEY,
+    OUTAGE_POLL_INTERVAL_SECONDS,
+    LabeledCounter,
+    OutageState,
+    proxy_probe_total,
+)
 
 __all__ = [
     "OUTAGE_KEY",
     "TELEGRAM_API_HOST",
     "HandshakeResult",
+    "OutageMonitor",
     "PoolHealth",
     "ProxyHealthTracker",
     "fail_key",
@@ -39,6 +48,12 @@ __all__ = [
 TELEGRAM_API_HOST: Final = "api.telegram.org"
 DEFAULT_OK_THROTTLE_SECONDS: Final = 30.0
 _log = structlog.get_logger(__name__)
+#: Delete the strike key only if it still holds our token (compare-and-delete).
+_RELEASE_STRIKE_LUA: Final = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
+)
+#: Timeout of one ``EXISTS proxy:outage`` of :class:`OutageMonitor`, seconds.
+OUTAGE_CHECK_TIMEOUT_SECONDS: Final = 2.0
 
 ProbeErrorKind = Literal["proxy_dead", "telegram_blocked"]
 
@@ -142,22 +157,72 @@ class ProxyHealthTracker:
     async def outage_active(self) -> bool:
         return bool(await self._redis.exists(OUTAGE_KEY))
 
-    async def try_acquire_strike(self, proxy_id: UUID) -> bool:
-        """``SET proxy:strike:{id} NX EX window``: ``True`` - the first strike in the window."""
-        return bool(
-            await self._redis.set(
-                strike_key(proxy_id), f"{self._clock():.6f}", nx=True, ex=self._window
-            )
-        )
+    async def try_acquire_strike(self, proxy_id: UUID) -> str | None:
+        """``SET proxy:strike:{id} <token> NX EX window``: the owner token of the first
+        strike in the window, ``None`` - already taken. Redis errors propagate."""
+        token = uuid.uuid4().hex
+        acquired = await self._redis.set(strike_key(proxy_id), token, nx=True, ex=self._window)
+        return token if acquired else None
 
-    async def release_strike(self, proxy_id: UUID) -> None:
-        """Best effort: free the dedup key of a strike whose transaction failed."""
+    async def release_strike(self, proxy_id: UUID, token: str) -> bool:
+        """Best effort: free the dedup key of a strike whose transaction failed - only while
+        it still holds ``token`` (a key re-taken after expiry is never removed)."""
         try:
-            await self._redis.delete(strike_key(proxy_id))
+            return bool(await self._redis.eval(_RELEASE_STRIKE_LUA, 1, strike_key(proxy_id), token))
         except (RedisError, OSError) as error:
             _log.warning(
                 "proxy_strike_release_failed", proxy_id=str(proxy_id), error=type(error).__name__
             )
+            return False
+
+
+class OutageMonitor:
+    """Background poll of ``EXISTS proxy:outage`` into :class:`OutageState` (``master_bot``).
+
+    Every ``interval_seconds`` one async ``EXISTS`` bounded by ``timeout_seconds``; a failed
+    or timed-out check keeps the old value, which goes stale after ``2 x interval`` and the
+    ``telegram_outage`` series disappears. The ``/metrics`` handler never waits for Redis.
+    """
+
+    def __init__(
+        self,
+        redis: Any,
+        state: OutageState,
+        *,
+        interval_seconds: float = OUTAGE_POLL_INTERVAL_SECONDS,
+        timeout_seconds: float = OUTAGE_CHECK_TIMEOUT_SECONDS,
+    ) -> None:
+        self._redis = redis
+        self._state = state
+        self._interval = interval_seconds
+        self._timeout = timeout_seconds
+
+    async def check_once(self) -> bool:
+        """One bounded check; ``False`` - Redis failed or timed out (state unchanged)."""
+        try:
+            async with asyncio.timeout(self._timeout):
+                active = bool(await self._redis.exists(OUTAGE_KEY))
+        except (RedisError, OSError, TimeoutError) as error:
+            _log.warning("telegram_outage_check_failed", error=type(error).__name__)
+            return False
+        self._state.update(active)
+        return True
+
+    async def run(self) -> None:
+        while True:
+            await self.check_once()
+            await asyncio.sleep(self._interval)
+
+    @asynccontextmanager
+    async def running(self) -> AsyncIterator[asyncio.Task[None]]:
+        """Run the poll loop for the duration of the block; cancelled and awaited on exit."""
+        task = asyncio.create_task(self.run(), name="telegram-outage-monitor")
+        try:
+            yield task
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 @dataclass(frozen=True, slots=True)

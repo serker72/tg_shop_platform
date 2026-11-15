@@ -49,8 +49,8 @@ def validate_proxy_url(url: str) -> str:
         port = parts.port
     except ValueError:
         raise ValueError(f"Malformed proxy URL: {mask_proxy_url(value)}") from None
-    if not host or port is None:
-        raise ValueError(f"Proxy URL must contain host and port: {mask_proxy_url(value)}")
+    if not host or port is None or not 1 <= port <= 65535:
+        raise ValueError(f"Proxy URL must contain host and port 1..65535: {mask_proxy_url(value)}")
     userinfo, at, _ = parts.netloc.rpartition("@")
     host_part = f"[{host}]" if ":" in host else host
     return f"{scheme}://{userinfo}{at}{host_part}:{port}"
