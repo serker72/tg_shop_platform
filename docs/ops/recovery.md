@@ -185,18 +185,47 @@ curl -fsS http://127.0.0.1:<порт сервиса>/health/ready   # PostgreSQL
 
 Ревизия `bots` переименовала колонку бота в журналах: `bot_id uuid` → `telegram_bot_id
 bigint` (Telegram ID бота, `getMe().id`). RENAME/TYPE на родителе распространяется на все
-присоединённые партиции и `_default`, а также применяется к template-таблицам pg_partman
-(`partman.template_public_*`). **Отсоединённые партиции в схеме `archive` не затрагиваются**:
-в них остаётся `bot_id uuid`.
+**присоединённые** партиции и `_default` (они переименовываются вместе с родителем), а также
+применяется к template-таблицам pg_partman (`partman.template_public_*`). Старая колонка
+`bot_id uuid` остаётся **только у таблиц, уже находившихся в схеме `archive` в момент
+upgrade** (отсоединены retention раньше). Партиции, отсоединённые после upgrade, имеют
+`telegram_bot_id`.
 
-Следствия для архивации (`app/modules/logging/audit_archive.py`):
+### Guard ревизии `bots` (upgrade и downgrade)
 
-* список колонок берётся из самой таблицы (`SELECT * … LIMIT 0`), не из модели, поэтому
-  выгрузка старых партиций не ломается: заголовок CSV и `columns` в `manifest.json` для
-  партиций до ревизии `bots` содержат `bot_id`, для новых — `telegram_bot_id`;
-* при восстановлении из архива ориентироваться на `manifest.json → columns`: CSV со
-  `bot_id` загружать в таблицу со старой схемой (`CREATE TABLE … (LIKE …)` + `bot_id uuid`)
-  или с явным списком колонок без `bot_id` (значение UUID в `telegram_bot_id` не
-  конвертируется — сопоставления внутренний UUID → Telegram ID нет);
-* на момент ревизии `archive` пуст на всех стендах (retention 24 мес.), поэтому
-  смешанные архивы появятся только для партиций, созданных до ревизии `bots`.
+Каста uuid ↔ bigint нет, поэтому ревизия блокирует `user_activity` и `audit_logs`
+(`ACCESS EXCLUSIVE`) и отказывается работать, если остались ссылки на бота:
+
+* `public.user_activity is not empty` — click-log должен быть пуст: сделать бэкап
+  (`pg_dump -t 'public.user_activity*'`) и `TRUNCATE public.user_activity`;
+* `public.audit_logs has rows with <колонка> IS NOT NULL` — сделать бэкап и
+  `UPDATE public.audit_logs SET bot_id = NULL WHERE bot_id IS NOT NULL` (при downgrade —
+  `telegram_bot_id`). Строки `audit_logs` **не удалять**.
+
+Затем повторить `make migrate`.
+
+### Восстановление архива
+
+Архиватор (`app/modules/logging/audit_archive.py`) берёт список колонок из самой таблицы
+(`SELECT * … LIMIT 0`), не из модели: заголовок CSV и `columns` в `manifest.json` для
+таблиц, бывших в `archive` до ревизии `bots`, содержат `bot_id`, для остальных —
+`telegram_bot_id`. `COPY … FROM … (FORMAT csv, HEADER)` сопоставляет колонки по позиции,
+а не по имени, и не умеет пропустить колонку, поэтому архив со `bot_id` восстанавливать
+через staging-таблицу по `manifest.columns`:
+
+```sql
+-- колонки и порядок — строго из manifest.json -> columns
+CREATE TEMP TABLE audit_restore (id uuid, created_at timestamptz, tenant_id uuid,
+    bot_id uuid, actor_id bigint, actor_type text, action text, entity_type text,
+    entity_id uuid, payload jsonb, result text);
+\copy audit_restore FROM 'audit_logs_pYYYYMMDD.csv' WITH (FORMAT csv, HEADER true)
+INSERT INTO public.audit_logs (id, created_at, tenant_id, actor_id, actor_type, action,
+    entity_type, entity_id, payload, result)
+SELECT id, created_at, tenant_id, actor_id, actor_type, action, entity_type, entity_id,
+    payload, result
+FROM audit_restore;            -- bot_id отбрасывается: UUID → Telegram ID не сопоставить
+```
+
+`telegram_bot_id` таких строк остаётся `NULL`. На момент ревизии `archive` пуст на всех
+стендах (retention 24 мес.), поэтому архивы со `bot_id` могут появиться только там, где
+ревизию применят позже первой отсоединённой партиции.

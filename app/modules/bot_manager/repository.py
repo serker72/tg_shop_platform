@@ -17,6 +17,7 @@ from app.modules.bot_manager.models import (
     Bot,
     TenantCustomer,
 )
+from app.modules.iam.models import Language, Tenant
 
 __all__ = ["BotRepository", "TenantCustomerRepository"]
 
@@ -78,25 +79,32 @@ class BotRepository:
         return list(await self._session.scalars(stmt))
 
     async def list_runnable(self) -> list[Bot]:
-        """Live, enabled bots whose token is not known to be invalid."""
+        """Live, enabled bots of live, enabled tenants whose token is not known to be invalid."""
         stmt = (
             select(Bot)
+            .join(Tenant, Tenant.id == Bot.tenant_id)
             .where(
                 Bot.is_deleted.is_(false()),
                 Bot.is_active.is_(true()),
                 Bot.status != BOT_STATUS_INVALID_TOKEN,
+                Tenant.is_active.is_(true()),
+                Tenant.is_deleted.is_(false()),
             )
             .order_by(Bot.created_at, Bot.id)
         )
         return list(await self._session.scalars(stmt))
 
     async def set_status(self, bot: Bot, status: str, *, error: str | None = None) -> Bot:
-        """Set ``status`` / ``last_error`` / ``status_changed_at`` and flush."""
+        """Set ``status`` / ``last_error`` and flush.
+
+        ``status_changed_at`` moves only on a real transition (same status = no change).
+        """
         if status not in BOT_STATUSES:
             raise ValueError(f"unknown bot status: {status!r}")
-        bot.status = status
+        if bot.status != status:
+            bot.status = status
+            bot.status_changed_at = datetime.now(UTC)
         bot.last_error = error
-        bot.status_changed_at = datetime.now(UTC)
         await self._session.flush()
         return bot
 
@@ -118,14 +126,29 @@ class TenantCustomerRepository:
     ) -> TenantCustomer:
         """Insert or refresh the customer row of ``(tenant_id, telegram_user_id)``.
 
-        ``username`` is overwritten, ``language_code`` only when a new value is given,
-        ``first_bot_id`` is set once and never changed afterwards.
+        ``username`` is overwritten; ``first_bot_id`` is set once and never changed.
+        ``language_code`` (Telegram ``language_code``, lower-cased) is stored only when it is a
+        live language of ``languages`` (active, not deleted); an unknown code (``de``,
+        ``pt-br``, ...) becomes ``NULL`` instead of an FK violation. ``NULL`` / unknown keeps
+        the previous value of an existing row; the fallback chain is the language resolver's.
         """
+        code = language_code.strip().lower() if language_code else None
+        live_code: Any = (
+            select(Language.code)
+            .where(
+                Language.code == code,
+                Language.is_active.is_(true()),
+                Language.is_deleted.is_(false()),
+            )
+            .scalar_subquery()
+            if code
+            else None
+        )
         stmt = pg_insert(TenantCustomer).values(
             tenant_id=tenant_id,
             telegram_user_id=telegram_user_id,
             username=username,
-            language_code=language_code,
+            language_code=live_code,
             first_bot_id=first_bot_id,
         )
         stmt = stmt.on_conflict_do_update(

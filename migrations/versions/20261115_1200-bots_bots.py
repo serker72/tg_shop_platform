@@ -37,18 +37,29 @@ OLD_INDEX = "ix_user_activity_bot_id_created_at"
 NEW_INDEX = "ix_user_activity_telegram_bot_id_created_at"
 
 
-def _guard(column: str, hint: str) -> None:
+def _guard(column: str) -> None:
+    """Refuse to convert while a bot reference exists (runbook: docs/ops/recovery.md).
+
+    Both parents are locked first (ACCESS EXCLUSIVE, propagates to the partitions): no row
+    can appear between the emptiness check and the ALTERs of this transaction.
+    """
+    op.execute("LOCK TABLE public.user_activity, public.audit_logs IN ACCESS EXCLUSIVE MODE")
     op.execute(
         f"""
 DO $guard$
 BEGIN
     IF EXISTS (SELECT 1 FROM public.user_activity) THEN
         RAISE EXCEPTION 'bots: public.user_activity is not empty, column {column} cannot be '
-            'converted (no uuid/bigint cast). {hint}';
+            'converted (no uuid/bigint cast)'
+            USING HINT = 'The click-log table must be empty: back it up and run '
+                'TRUNCATE public.user_activity (docs/ops/recovery.md, revision bots).';
     END IF;
     IF EXISTS (SELECT 1 FROM public.audit_logs WHERE {column} IS NOT NULL) THEN
         RAISE EXCEPTION 'bots: public.audit_logs has rows with {column} IS NOT NULL, the '
-            'column cannot be converted (no uuid/bigint cast). {hint}';
+            'column cannot be converted (no uuid/bigint cast)'
+            USING HINT = 'Back up audit_logs and run UPDATE public.audit_logs SET {column} = '
+                'NULL WHERE {column} IS NOT NULL; never delete audit_logs rows '
+                '(docs/ops/recovery.md, revision bots).';
     END IF;
 END
 $guard$
@@ -87,10 +98,7 @@ $tpl$
 
 
 def upgrade() -> None:
-    _guard(
-        "bot_id",
-        "Clear the bot references first (dev: TRUNCATE public.user_activity after a backup).",
-    )
+    _guard("bot_id")
     _convert("bot_id", "telegram_bot_id", "bigint")
     op.execute(f"ALTER INDEX public.{OLD_INDEX} RENAME TO {NEW_INDEX}")
 
@@ -186,7 +194,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    _guard("telegram_bot_id", "Clear the bot references before the downgrade.")
+    _guard("telegram_bot_id")
     op.drop_table("tenant_customers")
     op.drop_table("bots")
     op.execute(f"ALTER INDEX public.{NEW_INDEX} RENAME TO {OLD_INDEX}")

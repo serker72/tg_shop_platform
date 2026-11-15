@@ -38,6 +38,7 @@ def test_repr_has_no_token() -> None:
 def test_token_hash_is_sha256_hex() -> None:
     assert token_hash(TOKEN) == hashlib.sha256(TOKEN.encode()).hexdigest()
     assert len(token_hash(TOKEN)) == 64
+    assert token_hash(f"  {TOKEN}\n") == token_hash(TOKEN)
 
 
 def test_bot_table_contract() -> None:

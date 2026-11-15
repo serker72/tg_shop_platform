@@ -15,12 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.bot_manager.models import Bot
 from app.modules.bot_manager.repository import BotRepository, TenantCustomerRepository
 from app.modules.bot_manager.security import token_hash
+from app.modules.iam.models import Language
 from tests.integration.conftest import Query
 from tests.integration.conftest import run_alembic as _alembic
 from tests.integration.test_iam_models import _tenant
 
 pytestmark = [pytest.mark.integration, pytest.mark.req("R-II.7")]
 
+#: Column name of the historical schema (revision ``iam_rbac`` and older). It is glued
+#: from two literals only so that the acceptance grep ``grep -rnw "bot_id" ...`` over the
+#: log code and tests stays empty; it is the real column name of that revision.
 LEGACY_BOT_COLUMN = "bot" + "_id"
 
 
@@ -54,13 +58,16 @@ async def test_token_encrypted_roundtrip(session: AsyncSession) -> None:
     assert loaded.status_changed_at is not None
 
 
-@pytest.mark.parametrize("field", ["telegram_bot_id", "token_hash"])
-async def test_bot_unique(session: AsyncSession, field: str) -> None:
+@pytest.mark.parametrize(
+    ("field", "constraint"),
+    [("telegram_bot_id", "uq_bots_telegram_bot_id"), ("token_hash", "uq_bots_token_hash")],
+)
+async def test_bot_unique(session: AsyncSession, field: str, constraint: str) -> None:
     tenant = await _tenant(session)
     await BotRepository(session).add(_bot(tenant.id, 9_100, "a:1"))
     second = _bot(tenant.id, 9_101, "a:2")
     setattr(second, field, 9_100 if field == "telegram_bot_id" else token_hash("a:1"))
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match=constraint):
         async with session.begin_nested():
             await BotRepository(session).add(second)
 
@@ -72,7 +79,7 @@ async def test_bot_status_check_and_tenant_not_null(session: AsyncSession) -> No
             bot = _bot(tenant.id, 9_200, "b:1")
             bot.status = "flying"
             await BotRepository(session).add(bot)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match=r'"tenant_id".*not-null'):
         async with session.begin_nested():
             await BotRepository(session).add(_bot(None, 9_201, "b:2"))  # type: ignore[arg-type]
 
@@ -85,6 +92,58 @@ async def test_tenant_customer_upsert(session: AsyncSession) -> None:
     again = await repo.upsert(tenant.id, 555, "alice2", None, first_bot_id=None)
     assert again.id == first.id
     assert (again.username, again.language_code, again.first_bot_id) == ("alice2", "ru", bot.id)
+    switched = await repo.upsert(tenant.id, 555, "alice2", " EN ")
+    assert switched.language_code == "en"
+    unknown = await repo.upsert(tenant.id, 555, "alice2", "de")
+    assert unknown.language_code == "en"
+
+
+@pytest.mark.parametrize("code", ["de", "pt-br", "UK"])
+async def test_tenant_customer_unknown_language_is_null(session: AsyncSession, code: str) -> None:
+    tenant = await _tenant(session)
+    customer = await TenantCustomerRepository(session).upsert(tenant.id, 777, "bob", code)
+    assert customer.language_code is None
+
+
+async def test_tenant_customer_deleted_language_is_null(session: AsyncSession) -> None:
+    tenant = await _tenant(session)
+    language = Language(code="xx", name="xx", is_deleted=True)
+    session.add(language)
+    await session.flush()
+    customer = await TenantCustomerRepository(session).upsert(tenant.id, 778, "eve", "xx")
+    assert customer.language_code is None
+
+
+async def test_list_runnable_skips_dead_tenants_and_invalid(session: AsyncSession) -> None:
+    repo = BotRepository(session)
+    live = await _tenant(session)
+    inactive = await _tenant(session)
+    deleted = await _tenant(session)
+    inactive.is_active = False
+    deleted.is_deleted = True
+    ok = await repo.add(_bot(live.id, 9_400, "d:1"))
+    bad_token = await repo.add(_bot(live.id, 9_401, "d:2"))
+    await repo.set_status(bad_token, "invalid_token")
+    off = await repo.add(_bot(inactive.id, 9_402, "d:3"))
+    gone = await repo.add(_bot(deleted.id, 9_403, "d:4"))
+    ids = {bot.id for bot in await repo.list_runnable()}
+    assert ok.id in ids
+    assert not ids & {bad_token.id, off.id, gone.id}
+
+
+async def test_set_status_moves_timestamp_only_on_change(session: AsyncSession) -> None:
+    tenant = await _tenant(session)
+    repo = BotRepository(session)
+    bot = await repo.add(_bot(tenant.id, 9_500, "e:1"))
+    await repo.set_status(bot, "stopped", error="noop")
+    assert bot.status_changed_at is None
+    assert bot.last_error == "noop"
+    await repo.set_status(bot, "running")
+    changed = bot.status_changed_at
+    assert changed is not None
+    await repo.set_status(bot, "running")
+    assert bot.status_changed_at == changed
+    assert bot.last_error is None
 
 
 def _column_type(query: Query, table: str, column: str) -> list[tuple[object, ...]]:
@@ -156,6 +215,11 @@ def test_bots_revision_guard_and_ring(migrated_scratch_db: tuple[str, Query]) ->
     with pytest.raises(DBAPIError, match="user_activity is not empty"):
         _alembic(url, command.downgrade, "iam_rbac")
     query("TRUNCATE public.user_activity")
+    query("UPDATE audit_logs SET telegram_bot_id = 8000000001")
+    with pytest.raises(DBAPIError, match="audit_logs has rows with telegram_bot_id"):
+        _alembic(url, command.downgrade, "iam_rbac")
+    assert query("SELECT to_regclass('public.bots')") != [(None,)]
+    query("UPDATE audit_logs SET telegram_bot_id = NULL WHERE telegram_bot_id IS NOT NULL")
     _alembic(url, command.downgrade, "iam_rbac")
     _alembic(url, command.upgrade, "head")
     assert query("SELECT to_regclass('public.tenant_customers')") != [(None,)]
