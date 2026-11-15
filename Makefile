@@ -255,7 +255,7 @@ su_check = $(strip \
 		$(error TG_USERNAME may contain only A-Z a-z 0-9 _ @))))
 
 # Not part of migrate.sh (Q10): run once on the started stack (after make agent-up).
-superuser: ## Superuser on the started stack: TG_ID=<id> [TG_USERNAME=<name>] [ACTION=create|revoke] [FORCE=1]
+superuser: ## Superuser: TG_ID=<id> [TG_USERNAME=<name>] [ACTION=create|revoke] [FORCE=1]; no rebuild (make agent-up first); rc 0/2, see error_code
 	@$(su_check)$(version_env); \
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update python -m app.entrypoints.cli.superuser \
 		$(SU_ACTION) --telegram-id '$(TG_ID)' \

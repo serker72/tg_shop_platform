@@ -127,7 +127,15 @@
    ```
 
    Собирает образ, поднимает основной стек и Alloy (профиль `observability`), подключает их к
-   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен. `make superuser` выполняется один раз: создаёт первого суперпользователя (без него вход в Master Bot невозможен; повтор безопасен). Команда работает в образе приложения: после обновления кода сначала `make agent-up` (пересобирает образ), затем `make superuser`.
+   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен. `make superuser` выполняется один раз: создаёт первого суперпользователя (без него вход в Master Bot невозможен; повтор безопасен).
+
+   `make superuser` образ не пересобирает: после обновления кода сначала `make agent-up` (или,
+   если боты поднимать не нужно, только сборка образа с версией, как в Makefile:
+   `eval "$(sh ops/scripts/version.sh --env)" && export APP_VERSION APP_COMMIT APP_BUILD_TIME && docker compose --env-file .env build db_update`),
+   иначе `ModuleNotFoundError`. Коды выхода CLI: 0 — успех, 1 — ошибка выполнения (например,
+   `last_superuser`), 2 — неверные аргументы или конфигурация. `make superuser` при любой ошибке
+   возвращает 2 (так делает GNU make), причина — в выводе (`error_code`); точный код даёт прямой вызов
+   `docker compose --env-file .env run --rm db_update python -m app.entrypoints.cli.superuser …`.
 
 8. **Проверка** — раздел [Проверка результата](#проверка-результата).
 
@@ -313,7 +321,7 @@ Caddy/CrowdSec (баны, смена ключа bouncer, проверка Caddyf
 | `make help` | список всех целей |
 | `make down` | остановить основной стек |
 | `make migrate` | применить миграции БД |
-| `make superuser TG_ID=… [TG_USERNAME=…] [ACTION=create\|revoke] [FORCE=1]` | создать/восстановить суперпользователя (`ACTION=revoke` снимает флаг, последнего — только с `FORCE=1`); на поднятом стеке, идемпотентно; после обновления кода сначала `make agent-up` |
+| `make superuser TG_ID=… [TG_USERNAME=…] [ACTION=create\|revoke] [FORCE=1]` | создать/восстановить суперпользователя (`ACTION=revoke` снимает флаг, последнего — только с `FORCE=1`); на поднятом стеке, идемпотентно; образ не пересобирает (сначала `make agent-up`); rc 0 или 2, причина в выводе |
 | `make env-test` | сгенерировать `.env.test` (изолированные данные, порты +20000) |
 | `make test-integration` | поднять тестовую инфраструктуру и прогнать интеграционные тесты |
 | `make check` | линтеры + проверка форматирования + unit-тесты |
