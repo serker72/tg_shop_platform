@@ -32,7 +32,12 @@ from app.modules.iam.admin_service import (
     validate_telegram_user_id,
     validate_tenant_settings,
 )
-from app.modules.iam.permissions import MODERATORS_MANAGE, USERS_VIEW
+from app.modules.iam.permissions import (
+    MODERATORS_MANAGE,
+    ROLES_MANAGE,
+    TENANTS_VIEW_ALL,
+    USERS_VIEW,
+)
 from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME, error_text, short
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
@@ -530,3 +535,71 @@ def test_service_validators_bigint_range() -> None:
     assert validate_tenant_settings({"news_chat_id": -1001234567890}) == {
         "news_chat_id": -1001234567890
     }
+
+
+# --- re-review F1/F3 -------------------------------------------------------------------
+
+
+@R4
+@pytest.mark.parametrize("superuser", [False, True], ids=["view_all", "superuser"])
+async def test_staff_card_hides_deleted_shops_without_settings_manage(superuser: bool) -> None:
+    """Tenant soft-delete keeps ``tenant_moderators``: the deleted shop needs settings.manage."""
+    live, gone = _tenant("Live", "live"), _tenant("Gone", "gone", deleted=True)
+    staff = _user(321)
+    snapshot = (
+        SUPER
+        if superuser
+        else PermissionSnapshot(
+            user_id=uuid4(),
+            role_permissions={
+                MODERATORS_MANAGE: frozenset({"senior"}),
+                TENANTS_VIEW_ALL: frozenset({"senior"}),
+            },
+        )
+    )
+    env = Env(snapshot, [live, gone], users=[staff])
+    env.moderated[staff.id] = [gone, live]
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press("— (321)")
+    assert "Live (live)" in env.text()
+    if superuser:
+        assert "Gone (gone) 🗑" in env.text()
+    else:
+        assert "Gone" not in env.text() and "gone" not in env.text()
+
+
+@R4
+async def test_forged_settings_and_language_of_foreign_tenant_show_nothing() -> None:
+    shop = _tenant("Shop A", "shop-a")
+    own = PermissionSnapshot(user_id=uuid4(), tenants=frozenset({shop.id}))
+    env = Env(own, [shop])
+    await env.start()
+    await env.press("Магазины")
+    await env.press("Shop A (shop-a)")
+    # The shop leaves the actor's scope while its card is still open.
+    env.snapshot = PermissionSnapshot(user_id=uuid4(), tenants=frozenset({uuid4()}))
+    await env.forge("t_card_back", "t_card_back", "t_settings")
+    assert "Магазин не найден" in env.text() and "Shop A" not in env.text()
+    assert not any("Магазин открыт" in b for b in env.buttons())
+    await env.forge("t_settings_back", "t_settings_back", "t_lang")
+    assert "Магазин не найден" in env.text() and "English" not in str(env.buttons())
+    assert not any(call[0] == "update_settings" for call in env.tenants.calls)
+
+
+@R4
+async def test_forged_staff_shops_without_moderators_manage_are_rejected() -> None:
+    shop = _tenant("Shop A", "shop-a")
+    staff = _user(321)
+    roles_admin = PermissionSnapshot(
+        user_id=uuid4(), role_permissions={ROLES_MANAGE: frozenset({"admin"})}
+    )
+    env = Env(roles_admin, [shop], users=[staff])
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press("— (321)")
+    assert "Магазины сотрудника" not in env.buttons()
+    await env.forge("u_card_back", "u_card_back", "u_tenants")
+    assert "Нет доступа" in env.text() and "Shop A" not in str(env.buttons())
+    await env.forge("u_t_back", "u_t_back", f"u_t_sel:{shop.id}")
+    assert env.access.calls == []

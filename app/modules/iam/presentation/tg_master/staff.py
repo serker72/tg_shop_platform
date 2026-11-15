@@ -26,7 +26,7 @@ from app.modules.iam.admin_service import (
     TenantAdminService,
     UserAdminService,
 )
-from app.modules.iam.permissions import MODERATORS_MANAGE, ROLES_MANAGE
+from app.modules.iam.permissions import MODERATORS_MANAGE, ROLES_MANAGE, SETTINGS_MANAGE
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
     actor_id,
@@ -141,7 +141,14 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         }
     snapshot = snapshot_of(dialog_manager)
     roles = await queries.user_roles(user.id)
-    shops = [t for t in await queries.user_tenants(user.id) if in_scope(snapshot, t.id)]
+    # Tenant soft-delete keeps ``tenant_moderators`` rows: deleted shops are shown only to
+    # ``settings.manage`` (the same rule as ``load_tenant``), live ones within the scope.
+    see_deleted = snapshot.decide(SETTINGS_MANAGE).allowed
+    shops = [
+        t
+        for t in await queries.user_tenants(user.id)
+        if (see_deleted if t.is_deleted else in_scope(snapshot, t.id))
+    ]
     lines = [
         _("Сотрудник: {label}").format(label=_user_label(user)),
         _("Статус: {status}").format(
@@ -153,7 +160,9 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     lines.append(_("Роли (только просмотр):"))
     lines.extend([f"• {role}" for role in roles] or ["—"])
     lines.append(_("Магазины:"))
-    lines.extend([f"• {t.name} ({t.slug})" for t in shops] or ["—"])
+    lines.extend(
+        [f"• {t.name} ({t.slug})" + (" 🗑" if t.is_deleted else "") for t in shops] or ["—"]
+    )
     is_self = user.telegram_user_id == actor_id(dialog_manager)
     mutable = not is_self and not user.is_superuser
     status = mutable and snapshot.decide(ROLES_MANAGE).allowed
@@ -169,7 +178,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
 
 
 async def tenants_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
-    if not _allowed(dialog_manager):
+    if not _allowed(dialog_manager) or not _can_moderate(dialog_manager):
         return _denied(dialog_manager, tenants=[])
     target = _target(dialog_manager)
     queries = await resolve(dialog_manager, IamAdminQueries)
@@ -282,6 +291,9 @@ async def on_tenant(
 ) -> None:
     target = await _target_or_back(callback, manager)
     if target is None:
+        return
+    if not _can_moderate(manager):
+        set_notice(manager, denied_text())
         return
     found = await load_tenant(manager, item)
     queries = await resolve(manager, IamAdminQueries)

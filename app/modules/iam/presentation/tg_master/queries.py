@@ -73,7 +73,8 @@ class IamAdminQueries:
         return list(rows)
 
     async def user_tenants(self, user_id: UUID) -> list[Tenant]:
-        """Shops the user moderates (``tenant_moderators``)."""
+        """Shops the user moderates (``tenant_moderators``), soft-deleted ones included:
+        tenant soft-delete keeps the assignment rows; callers filter by the viewer's rights."""
         rows = await self._session.scalars(
             select(Tenant)
             .join(TenantModerator, TenantModerator.tenant_id == Tenant.id)
