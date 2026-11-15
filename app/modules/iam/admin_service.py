@@ -342,7 +342,11 @@ def _jsonable(value: Any) -> Any:
 
 
 class _AdminService:
-    """Shared plumbing: authorization, audit, transaction, invalidation after commit."""
+    """Shared plumbing: authorization, audit, transaction, invalidation after commit.
+
+    An instance is NOT for concurrent use: it is bound to one request session (REQUEST
+    scope) and keeps per-call state (:attr:`cache_invalidated`); run calls sequentially.
+    """
 
     def __init__(
         self,
@@ -1092,7 +1096,7 @@ class AccessAdminService(_AdminService):
                 existing.reason,
             ) == (is_granted, expires_at, reason):
                 raise _NoChange
-            row = await self._repo.upsert_override(
+            row, inserted = await self._repo.upsert_override(
                 user_id=user.id,
                 permission_id=permission.id,
                 tenant_id=tenant_id,
@@ -1108,7 +1112,12 @@ class AccessAdminService(_AdminService):
                 entity_id=user.id,
                 tenant_id=tenant_id,
                 before=before,
-                after=_override_state(row, permission_slug),
+                after=(
+                    # A concurrent upsert filled the empty slot first: ``before`` is unknown.
+                    {**_override_state(row, permission_slug), "concurrent_update": True}
+                    if existing is None and not inserted
+                    else _override_state(row, permission_slug)
+                ),
             )
         if self._noop and existing is not None:
             return existing

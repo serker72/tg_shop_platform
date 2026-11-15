@@ -401,6 +401,20 @@ async def test_activation_requires_holding_target_rights(session: AsyncSession, 
     await ctx.s["user"].activate(ctx.admin, target.telegram_user_id)
 
 
+async def test_activation_ignores_deleted_shop_and_denied_role_rights(
+    session: AsyncSession, ctx: Ctx
+) -> None:
+    """R2: grants the target does not effectively hold are not required from the actor."""
+    limited = await _limited_actor(session)
+    s, a, t = ctx.s, ctx.admin, ctx.target
+    await s["access"].upsert_override(a, t, PRODUCTS_VIEW, is_granted=True, tenant_id=ctx.tenant)
+    await s["tenant"].soft_delete(a, ctx.tenant)  # (a) allow in a deleted shop
+    await s["access"].assign_role(a, t, ctx.role)
+    await s["access"].upsert_override(a, t, PRODUCTS_VIEW, is_granted=False)  # (b) global deny
+    await s["user"].deactivate(a, t)
+    await s["user"].activate(limited.telegram_user_id, t)
+
+
 async def test_inactive_role_permission_does_not_block_assignment(
     session: AsyncSession, ctx: Ctx
 ) -> None:

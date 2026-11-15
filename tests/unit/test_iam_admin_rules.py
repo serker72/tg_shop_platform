@@ -214,6 +214,7 @@ def test_override_upsert_targets_slot_constraint() -> None:
     assert f"ON CONFLICT ON CONSTRAINT {OVERRIDE_SLOT_CONSTRAINT} DO UPDATE" in sql
     for column in ("is_granted", "expires_at", "reason", "granted_by_id", "updated_at"):
         assert f"{column} = " in sql
+    assert "RETURNING" in sql and "(xmax = 0) AS inserted" in sql
 
 
 async def test_foreign_pending_changes_rejected() -> None:
