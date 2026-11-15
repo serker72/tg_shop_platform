@@ -1,6 +1,7 @@
 """Main menu skeleton (aiogram-dialog): section buttons visible by permissions.
 
-Section dialogs are built in tasks 05-09; here a button only answers "in progress".
+"Shops" and "Staff" open the IAM dialogs (task 05); the other sections are built in
+tasks 06-09 and their buttons only answer "in progress".
 """
 
 from __future__ import annotations
@@ -25,6 +26,12 @@ from app.modules.iam.permissions import (
     USERS_MANAGE,
     USERS_VIEW,
 )
+from app.modules.iam.presentation.tg_master import (
+    StaffSG,
+    TenantsSG,
+    staff_dialog,
+    tenants_dialog,
+)
 from app.modules.iam.snapshot import PermissionSnapshot
 
 __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_getter"]
@@ -40,6 +47,11 @@ SECTION_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
 }
 MENU_PERMISSIONS: Final = frozenset(s for slugs in SECTION_PERMISSIONS.values() for s in slugs)
 _SHOP_SECTIONS: Final = frozenset({"shops", "bots"})
+#: Sections that already have a dialog (the rest answer "in progress").
+_SECTION_DIALOGS: Final[dict[str, State]] = {
+    "shops": TenantsSG.list,
+    "staff": StaffSG.list,
+}
 
 
 class MainMenu(StatesGroup):
@@ -77,10 +89,13 @@ async def _section_soon(callback: CallbackQuery, button: Button, manager: Dialog
     await callback.answer(Texts.section_soon())
 
 
+async def _open_section(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    await manager.start(_SECTION_DIALOGS[str(button.widget_id)])
+
+
 def _button(section: str) -> Button:
-    return Button(
-        Format(f"{{btn_{section}}}"), id=section, on_click=_section_soon, when=f"can_{section}"
-    )
+    handler = _open_section if section in _SECTION_DIALOGS else _section_soon
+    return Button(Format(f"{{btn_{section}}}"), id=section, on_click=handler, when=f"can_{section}")
 
 
 def build_main_menu_dialog() -> Dialog:
@@ -102,4 +117,6 @@ def build_menu_router() -> Router:
     router = Router(name="master_bot.menu")
     router.message.register(_start, CommandStart())
     router.include_router(build_main_menu_dialog())
+    router.include_router(tenants_dialog())
+    router.include_router(staff_dialog())
     return router

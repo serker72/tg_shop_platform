@@ -17,6 +17,7 @@ from app.modules.iam.admin_service import (
     UserAdminService,
 )
 from app.modules.iam.cache import PermissionCache
+from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.service import PermissionService
 
 __all__ = ["IamProvider"]
@@ -60,3 +61,8 @@ class IamProvider(Provider):
         self, session: AsyncSession, permissions: PermissionService
     ) -> AccessAdminService:
         return AccessAdminService(session, permissions)
+
+    @provide(scope=Scope.REQUEST)
+    def provide_admin_queries(self, session: AsyncSession) -> IamAdminQueries:
+        """Read-only queries of the Master Bot IAM dialogs."""
+        return IamAdminQueries(session)

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-15 20:44+0300\n"
+"POT-Creation-Date: 2026-11-15 21:10+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,30 +17,273 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
+#, python-brace-format
+msgid "Slug: {slug}"
+msgstr ""
+
+msgid "« Назад"
+msgstr ""
+
+msgid "Активировать"
+msgstr ""
+
 msgid "Боты"
+msgstr ""
+
+msgid "Введите ID чата числом или «-», чтобы очистить"
+msgstr ""
+
+msgid ""
+"Введите Telegram ID сотрудника (число). Username подхватится при его "
+"первом /start."
+msgstr ""
+
+msgid "Введите slug: латиница в нижнем регистре, цифры и дефисы, до 64 символов"
+msgstr ""
+
+msgid "Введите название магазина"
+msgstr ""
+
+msgid "Введите новое название магазина"
+msgstr ""
+
+msgid "Восстановить"
+msgstr ""
+
+msgid "Выберите язык по умолчанию магазина"
+msgstr ""
+
+msgid "Глобальное право нельзя переопределить для магазина."
+msgstr ""
+
+msgid "Глобальный по умолчанию"
+msgstr ""
+
+msgid "Да"
+msgstr ""
+
+msgid "Данные изменились параллельно, повторите действие."
+msgstr ""
+
+msgid "Деактивировать"
+msgstr ""
+
+msgid "Деактивировать магазин?"
+msgstr ""
+
+msgid "Деактивировать сотрудника?"
+msgstr ""
+
+msgid "Добавить сотрудника"
 msgstr ""
 
 msgid "Идут технические работы. Попробуйте позже."
 msgstr ""
 
+msgid "Изменение сохранено, но кэш прав обновится с задержкой."
+msgstr ""
+
 msgid "Логи"
+msgstr ""
+
+msgid "Магазин не найден."
+msgstr ""
+
+msgid "Магазин открыт"
+msgstr ""
+
+#, python-brace-format
+msgid "Магазин: {name}"
 msgstr ""
 
 msgid "Магазины"
 msgstr ""
 
+msgid "Магазины сотрудника"
+msgstr ""
+
+msgid "Магазины:"
+msgstr ""
+
+#, python-brace-format
+msgid "Магазины: {count}"
+msgstr ""
+
+msgid "Нажмите на магазин, чтобы привязать или отвязать"
+msgstr ""
+
 msgid "Настройки"
+msgstr ""
+
+msgid "Настройки магазина"
+msgstr ""
+
+msgid "Не удалось выполнить действие, повторите попытку."
+msgstr ""
+
+msgid "Не удалось выполнить действие."
+msgstr ""
+
+msgid "Недостаточно прав для этого действия."
+msgstr ""
+
+msgid "Некорректное значение, попробуйте ещё раз."
+msgstr ""
+
+msgid "Некорректные данные."
+msgstr ""
+
+msgid "Некорректный срок действия."
+msgstr ""
+
+msgid "Нельзя выдать права, которых нет у вас самих."
+msgstr ""
+
+msgid "Нельзя изменять самого себя."
+msgstr ""
+
+msgid "Нет"
+msgstr ""
+
+msgid "Нужен положительный числовой Telegram ID."
 msgstr ""
 
 msgid "Панель управления платформой"
 msgstr ""
 
+msgid "Переименовать"
+msgstr ""
+
+msgid "Персональное право не найдено."
+msgstr ""
+
+msgid "Покупки включены"
+msgstr ""
+
+msgid "Пополнение баланса"
+msgstr ""
+
+msgid "Право не найдено."
+msgstr ""
+
 msgid "Раздел в разработке"
+msgstr ""
+
+msgid "Реферальная программа"
 msgstr ""
 
 msgid "Роли"
 msgstr ""
 
+msgid "Роли (только просмотр):"
+msgstr ""
+
+msgid "Роль не назначена."
+msgstr ""
+
+msgid "Роль не найдена."
+msgstr ""
+
+msgid "Роль уже назначена."
+msgstr ""
+
+msgid "Системную роль нельзя изменить."
+msgstr ""
+
+msgid "Создать магазин"
+msgstr ""
+
+msgid "Сотрудник не найден."
+msgstr ""
+
+msgid "Сотрудник не привязан к этому магазину."
+msgstr ""
+
+msgid "Сотрудник удалён — восстановите его из списка."
+msgstr ""
+
+msgid "Сотрудник уже привязан к этому магазину."
+msgstr ""
+
+#, python-brace-format
+msgid "Сотрудник: {label}"
+msgstr ""
+
 msgid "Сотрудники"
+msgstr ""
+
+#, python-brace-format
+msgid "Сотрудники: {count}"
+msgstr ""
+
+msgid "Срок действия должен быть в будущем."
+msgstr ""
+
+#, python-brace-format
+msgid "Статус: {status}"
+msgstr ""
+
+msgid "Суперпользователь"
+msgstr ""
+
+msgid "Суперпользователя нельзя изменить."
+msgstr ""
+
+msgid "Такой сотрудник уже есть."
+msgstr ""
+
+msgid "Уведомления"
+msgstr ""
+
+msgid "Удалить"
+msgstr ""
+
+msgid "Удалить магазин? Его можно будет восстановить."
+msgstr ""
+
+msgid "Удалить сотрудника? Его роли и привязки к магазинам будут сняты."
+msgstr ""
+
+msgid "Удалённые магазины"
+msgstr ""
+
+#, python-brace-format
+msgid "Удалённые магазины: {count}"
+msgstr ""
+
+msgid "Чат новостей"
+msgstr ""
+
+msgid "Чат поддержки"
+msgstr ""
+
+msgid "Этот slug роли уже занят."
+msgstr ""
+
+msgid "Этот slug уже занят (в том числе удалённым магазином)."
+msgstr ""
+
+msgid "Язык не найден или отключён."
+msgstr ""
+
+msgid "Язык по умолчанию"
+msgstr ""
+
+msgid "активен"
+msgstr ""
+
+msgid "глобальный"
+msgstr ""
+
+msgid "да"
+msgstr ""
+
+msgid "нет"
+msgstr ""
+
+msgid "отключён"
+msgstr ""
+
+msgid "удалён"
 msgstr ""
 

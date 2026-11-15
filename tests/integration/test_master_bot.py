@@ -6,21 +6,34 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from aiogram.types import Chat, Message, Update, User
 from dishka import AsyncContainer, make_async_container
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.core.config import Settings
 from app.entrypoints.master_bot.app import permission_loader, username_sync
-from app.entrypoints.master_bot.middlewares import TEXT_MARKER, ClickLogMiddleware
+from app.entrypoints.master_bot.middlewares import (
+    SNAPSHOT_KEY,
+    TEXT_MARKER,
+    ClickLogMiddleware,
+)
+from app.modules.iam.admin_service import TenantAdminService
 from app.modules.iam.ioc import IamProvider
+from app.modules.iam.models import Tenant, TenantSettings
 from app.modules.iam.models import User as IamUser
 from app.modules.iam.permissions import USERS_VIEW
+from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
+from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
+from app.modules.iam.presentation.tg_master.states import TenantsSG
+from app.modules.iam.presentation.tg_master.tenants import card_getter, on_slug
+from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.buffer import LogBuffer
 from app.modules.logging.files import DailyFileWriter
 from app.modules.logging.metrics import LogsDroppedCounter
@@ -138,3 +151,66 @@ async def test_click_log_reaches_db_and_files_without_text(
 
 def _read_files(root: Path) -> list[str]:
     return [path.read_text(encoding="utf-8") for path in root.rglob("*") if path.is_file()]
+
+
+def _manager(request: AsyncContainer, actor: int) -> Any:
+    """The part of ``DialogManager`` used by the IAM handlers/getters."""
+    return SimpleNamespace(
+        middleware_data={
+            CONTAINER_NAME: request,
+            SNAPSHOT_KEY: PermissionSnapshot(user_id=uuid4(), is_superuser=True),
+            "event_from_user": User(id=actor, is_bot=False, first_name="s"),
+        },
+        dialog_data={"new_name": "Dialog Shop"},
+        switch_to=AsyncMock(),
+    )
+
+
+@pytest.mark.req("R-II.4", "S-II.3")
+async def test_dialog_creates_tenant_real_db(
+    container: AsyncContainer, clean_db: AsyncEngine, redis_client: Any
+) -> None:
+    """Slug step handler -> real ``TenantAdminService`` (DI REQUEST scope) -> card."""
+    ids = await _create_users(clean_db)
+    slug = f"dialog-{uuid4().hex[:8]}"
+    async with container() as request:
+        manager = _manager(request, ids["superuser"])
+        await on_slug(AsyncMock(), None, manager, slug)
+        manager.switch_to.assert_awaited_once_with(TenantsSG.card)
+        card = await card_getter(manager)
+    assert "Dialog Shop" in card["text"] and slug in card["text"]
+    async with build_session_factory(clean_db)() as session:
+        tenant = await session.scalar(select(Tenant).where(Tenant.slug == slug))
+        assert tenant is not None and str(tenant.id) == manager.dialog_data["tenant_id"]
+        assert await session.scalar(
+            select(TenantSettings.id).where(TenantSettings.tenant_id == tenant.id)
+        )
+
+
+@pytest.mark.req("R-II.4")
+async def test_dialog_reads_leave_session_clean(
+    container: AsyncContainer, clean_db: AsyncEngine, redis_client: Any
+) -> None:
+    """Reads of ``IamAdminQueries`` before a mutation in the same request (on_flag/on_tenant)
+    leave no pending objects, so the service does not refuse with ``session_not_clean``."""
+    ids = await _create_users(clean_db)
+    async with container() as request:
+        service = await request.get(TenantAdminService)
+        tenant = await service.create(ids["superuser"], name="Shop", slug=f"s-{uuid4().hex[:8]}")
+        queries = await request.get(IamAdminQueries)
+        session = await request.get(AsyncSession)
+        found = await queries.tenant(tenant.id)
+        assert found is not None and found[1] is not None
+        user = await queries.user(ids["admin"])
+        assert user is not None
+        await queries.user_roles(user.id)
+        await queries.user_tenants(user.id)
+        await queries.users()
+        await queries.live_languages()
+        await queries.deleted_tenants()
+        assert not session.new and not session.dirty and not session.deleted
+        before = found[1].is_store_open
+        settings = await service.update_settings(
+            ids["superuser"], tenant.id, {"is_store_open": not before}
+        )
+        assert settings.is_store_open is (not before)
