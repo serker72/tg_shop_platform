@@ -181,7 +181,7 @@
 
    ```bash
    git clone <URL репозитория> && cd tg_shop_platform && git fetch --tags
-   install -m 600 ~/tg_shop_platform.env .env && rm ~/tg_shop_platform.env
+   install -m 600 ~/tg_shop_platform.env .env && shred -u ~/tg_shop_platform.env
    make env-role ROLE=app   # очищает секреты мониторинга
    make agent-config        # проверка .env и compose после очистки
    make init-dirs
@@ -196,7 +196,7 @@
    ```bash
    make env-role ROLE=obs
    make obs-config          # проверка .env и compose после очистки
-   grep -E '^(MASTER_BOT_TOKEN|ENCRYPTION_KEY|POSTGRES_PASSWORD)=.' .env .env.bak   # пусто
+   grep -E '^(MASTER_BOT_TOKEN|ENCRYPTION_KEY|POSTGRES_PASSWORD)=.' .env .env.bak 2>/dev/null   # пусто
    ```
 
 6. **Проверки** с обеих сторон — [Проверка результата](#проверка-результата).
@@ -204,7 +204,7 @@
 7. **Удалить бэкапы с секретами** (после успешных проверок, на VPS 1 и VPS 2):
 
    ```bash
-   shred -u .env.bak.*
+   for f in .env.bak.*; do [ -f "$f" ] && shred -u "$f"; done   # без ошибки, если бэкапов нет
    ```
 
 **Ошиблись ролью** (например, `ROLE=obs` на VPS 1): восстановите файл из бэкапа, который
@@ -216,13 +216,19 @@ make env-role ROLE=app
 ```
 
 **Изменение `SENTRY_DSN`**: если после повторного `make obs-up`/`make obs-bootstrap` на VPS 2
-изменился `SENTRY_DSN`, перенесите на VPS 1 **только эту строку** (весь файл копировать нельзя:
+изменился `SENTRY_DSN`, перенесите на VPS 1 **только его значение** (весь файл копировать нельзя:
 на VPS 2 после `env-role` секретов приложения нет, а на VPS 1 — секретов мониторинга):
 
 ```bash
-grep '^SENTRY_DSN=' .env                         # VPS 2: скопировать вывод
-sed -i 's|^SENTRY_DSN=.*|SENTRY_DSN=<значение с VPS 2>|' .env   # VPS 1 (или в редакторе)
-make agent-up                                    # VPS 1
+sed -n 's/^SENTRY_DSN=//p' .env      # VPS 2: печатает только значение (http://<key>@<VPN-IP VPS 2>:8081/1)
+```
+
+На VPS 1 вместо `<значение>` подставьте **только** напечатанное значение (без `SENTRY_DSN=`;
+символов `|`, `&`, `\` в DSN нет, поэтому `sed` безопасен) или замените строку в редакторе:
+
+```bash
+sed -i 's|^SENTRY_DSN=.*|SENTRY_DSN=<значение>|' .env
+make agent-up
 ```
 
 ### Режим `CADDY_MODE=domain`
@@ -275,8 +281,9 @@ urgentry — `https://<VPS_IP>/` (`ip`) или `https://<URGENTRY_DOMAIN>/` (`do
   `make agent-down` → `make down` → `make obs-down`. Если после этого осталась сеть
   `<PROJECT_NAME>_docker_api` — `docker network rm <PROJECT_NAME>_docker_api`. На двух хостах:
   VPS 1 — `make agent-down`, `make down`; VPS 2 — `make obs-down`.
-- **Обновление**: `git pull && git fetch --tags`, затем `make env-check` (новые ключи из
-  `.env.example` дописать вручную; новый секрет должен быть отнесён к роли в
+- **Обновление**: `git pull && git fetch --tags`, затем `make env-check TEST_ENV_FILE=.env`
+  (на боевом хосте нет `.env.test`, а без этого параметра цель проверяет и его; новые ключи
+  из `.env.example` дописать вручную; новый секрет должен быть отнесён к роли в
   `ops/scripts/env_role.sh`, на двух хостах — заполнить только на своём хосте), затем
   `make agent-up` (хост приложения; миграции применяет `db_update`) и `make obs-up` (хост
   мониторинга). `make env FORCE=1` после `env-role` не используйте: он сгенерирует заново **все**
