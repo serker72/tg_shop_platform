@@ -235,6 +235,15 @@ migrate: init-dirs ## Apply DB migrations (db_update service); creates bind-moun
 	@$(version_env); \
 	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update
 
+.PHONY: superuser
+# Not part of migrate.sh (Q10): run once on the started stack (after make agent-up).
+superuser: ## Create/restore superuser TELEGRAM_ID=<id> [USERNAME=<name>]; REVOKE=1 [FORCE=1] clears the flag
+	@test -n "$(TELEGRAM_ID)" || { echo "ERROR: TELEGRAM_ID is required: make superuser TELEGRAM_ID=<telegram user id>" >&2; exit 2; }
+	@$(version_env); \
+	$(COMPOSE) --env-file $(ENV_FILE) run --rm db_update python -m app.entrypoints.cli.superuser \
+		$(if $(REVOKE),revoke,create) --telegram-id "$(TELEGRAM_ID)" \
+		$(if $(REVOKE),$(if $(FORCE),--force),$(if $(USERNAME),--username "$(USERNAME)"))
+
 lint: ## Run ruff and mypy
 	uv run ruff check . && uv run mypy app tests
 

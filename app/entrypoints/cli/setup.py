@@ -16,24 +16,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import traceback
 from collections.abc import Sequence
-from typing import Any, Final
-
-import pydantic
-from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
+from app.entrypoints.cli._common import (
+    EXIT_CONFIG,
+    EXIT_ERROR,
+    EXIT_OK,
+    exit_code_for,
+    log_failure,
+)
 from app.modules.system.repository import SystemSettingsRepository
 from app.shared_kernel.domain.exceptions import ConfigurationError
 from app.shared_kernel.infrastructure.database import build_engine, build_session_factory
 
 __all__ = ["EXIT_CONFIG", "EXIT_ERROR", "EXIT_OK", "exit_code_for", "main", "run"]
-
-EXIT_OK: Final = 0
-EXIT_ERROR: Final = 1
-EXIT_CONFIG: Final = 2
 
 logger = get_logger(__name__)
 
@@ -57,20 +55,6 @@ async def run(settings: Settings) -> bool:
         await engine.dispose()
 
 
-def exit_code_for(error: BaseException) -> int:
-    """``2`` for configuration problems (:class:`ConfigurationError`, invalid settings),
-    ``1`` for anything else.
-    """
-    if isinstance(error, ConfigurationError | pydantic.ValidationError):
-        return EXIT_CONFIG
-    return EXIT_ERROR
-
-
-def _first_line(error: BaseException) -> str:
-    text = str(error).strip()
-    return text.splitlines()[0] if text else ""
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point; returns the exit code."""
     parser = argparse.ArgumentParser(
@@ -82,20 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         inserted = asyncio.run(run(get_settings()))
     except Exception as error:
-        code = exit_code_for(error)
-        details: dict[str, Any] = {}
-        if code == EXIT_ERROR and not isinstance(error, OperationalError):
-            # Not ``exc_info=True``: the shared ``dict_tracebacks`` processor renders frame
-            # locals, and connection frames hold the password. ``format_exception`` has none.
-            details["traceback"] = "".join(traceback.format_exception(error))
-        logger.error(
-            "platform_setup_failed",
-            error_type=type(error).__name__,
-            error=_first_line(error),
-            exit_code=code,
-            **details,
-        )
-        return code
+        return log_failure(logger, "platform_setup_failed", error)
     logger.info("platform_setup_done", inserted=inserted)
     return EXIT_OK
 
