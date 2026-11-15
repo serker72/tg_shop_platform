@@ -511,6 +511,27 @@ class ProxySettings(BaseSettings):
         return self
 
 
+class SchedulerSettings(BaseSettings):
+    """Background scheduler of ``bot_worker`` (``app/core/scheduler``), no env prefix.
+
+    ``SCHEDULER_ENABLED`` - tick loop on/off (task subscribers consume anyway);
+    ``SCHEDULER_TICK_SECONDS`` - tick period; ``PROXY_REHABILITATE_AT`` - ``HH:MM`` UTC.
+    """
+
+    model_config = _base_config("")
+
+    scheduler_enabled: bool = True
+    scheduler_tick_seconds: int = Field(default=30, ge=1)
+    proxy_rehabilitate_at: str = "03:00"
+
+    @field_validator("proxy_rehabilitate_at", mode="after")
+    @classmethod
+    def _hhmm(cls, value: str) -> str:
+        if re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value.strip()) is None:
+            raise ValueError("PROXY_REHABILITATE_AT must be HH:MM (UTC, 00:00-23:59)")
+        return value.strip()
+
+
 # ``Settings`` field name -> nested section class.
 _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "postgres": PostgresSettings,
@@ -523,6 +544,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "logs": LogsSettings,
     "observability": ObservabilitySettings,
     "proxy": ProxySettings,
+    "scheduler": SchedulerSettings,
 }
 
 
@@ -550,6 +572,7 @@ class Settings(BaseSettings):
     logs: LogsSettings = Field(default_factory=LogsSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     proxy: ProxySettings = Field(default_factory=ProxySettings)
+    scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.
