@@ -137,8 +137,9 @@
 защищены только адресом в VPN; связывает хосты одна строка `SENTRY_DSN`. VPS 2 публичный
 (Caddy на 80/443), поэтому на нём не должно оставаться `MASTER_BOT_TOKEN`, `ENCRYPTION_KEY`,
 паролей БД — а на VPS 1 не нужны пароли Grafana/urgentry/Caddy. Это делает
-`make env-role ROLE=app|obs`: очищает значения секретов чужого хоста (ключи остаются, бэкап
-`.env.bak.<ts>` с правами 600, `SENTRY_DSN` не трогается).
+`make env-role ROLE=app|obs`: очищает значения секретов чужого хоста в `.env` и в `.env.bak`
+(бэкап `make obs-up`); ключи остаются, `SENTRY_DSN` не трогается. Исходный файл сохраняется в
+`.env.bak.<ts>` (права 600) — он нужен для отката ошибочной роли и удаляется на шаге 7.
 
 0. **Оба хоста**: WireGuard, firewall, chrony, swap — [docs/ops/network.md](docs/ops/network.md).
    Ниже `<VPN-IP VPS 2>` — адрес VPS 2 в туннеле (в примерах `10.10.0.2`).
@@ -153,7 +154,8 @@
    Заполните `.env` для обоих хостов (полный список — [таблица](#переменные-env)):
    - для VPS 2: `OBS_INGEST_BIND_ADDRESS=<VPN-IP VPS 2>` (интерфейс `wg0` уже должен существовать,
      иначе контейнеры не опубликуют порты), `URGENTRY_INTERNAL_URL=http://<VPN-IP VPS 2>:8081`,
-     `CADDY_MODE` + `VPS_IP`/домены, `ALERT_TELEGRAM_*`, `APP_UID`/`APP_GID`;
+     `CADDY_MODE` + `VPS_IP`/домены ([предусловия режима `domain`](#режим-caddy_modedomain)),
+     `ALERT_TELEGRAM_*`, `APP_UID`/`APP_GID`;
    - для VPS 1: `ALLOY_SINGLE_HOST=0`, `OBS_LOKI_PUSH_URL`, `OBS_PROMETHEUS_REMOTE_WRITE_URL`,
      `OBS_TEMPO_OTLP_ENDPOINT` на `<VPN-IP VPS 2>`, `MASTER_BOT_TOKEN`, `PROJECT_ENVIRONMENT`,
      `ALLOY_HOST_LABEL`.
@@ -165,11 +167,15 @@
    make obs-up         # пишет SENTRY_DSN=http://<key>@<VPN-IP VPS 2>:8081/1 в .env
    ```
 
-3. **Скопировать `.env` на VPS 1** (с правами 600):
+3. **Скопировать `.env` на VPS 1** — с машины оператора, не давая VPS 2 SSH-доступа к VPS 1
+   (`scp -3` передаёт файл через машину оператора, локальной копии не остаётся):
 
    ```bash
-   scp -p .env <user>@<VPS 1>:~/tg_shop_platform.env    # с VPS 2
+   scp -3 -p <user>@<VPS 2>:tg_shop_platform/.env <user>@<VPS 1>:tg_shop_platform.env
+   ssh <user>@<VPS 1> chmod 600 tg_shop_platform.env
    ```
+
+   Если `scp -3` недоступен — два `scp` через локальный файл, затем `shred -u` локальной копии.
 
 4. **VPS 1: приложение:**
 
@@ -177,6 +183,7 @@
    git clone <URL репозитория> && cd tg_shop_platform && git fetch --tags
    install -m 600 ~/tg_shop_platform.env .env && rm ~/tg_shop_platform.env
    make env-role ROLE=app   # очищает секреты мониторинга
+   make agent-config        # проверка .env и compose после очистки
    make init-dirs
    make agent-up            # основной стек + Alloy + make ready
    ```
@@ -188,13 +195,41 @@
 
    ```bash
    make env-role ROLE=obs
+   make obs-config          # проверка .env и compose после очистки
+   grep -E '^(MASTER_BOT_TOKEN|ENCRYPTION_KEY|POSTGRES_PASSWORD)=.' .env .env.bak   # пусто
    ```
 
 6. **Проверки** с обеих сторон — [Проверка результата](#проверка-результата).
 
-Изменение `SENTRY_DSN`: если после повторного `make obs-up`/`make obs-bootstrap` на VPS 2
+7. **Удалить бэкапы с секретами** (после успешных проверок, на VPS 1 и VPS 2):
+
+   ```bash
+   shred -u .env.bak.*
+   ```
+
+**Ошиблись ролью** (например, `ROLE=obs` на VPS 1): восстановите файл из бэкапа, который
+напечатала команда, и повторите с верной ролью:
+
+```bash
+install -m 600 .env.bak.<YYYYmmddHHMMSS> .env
+make env-role ROLE=app
+```
+
+**Изменение `SENTRY_DSN`**: если после повторного `make obs-up`/`make obs-bootstrap` на VPS 2
 изменился `SENTRY_DSN`, перенесите на VPS 1 **только эту строку** (весь файл копировать нельзя:
-на VPS 2 после `env-role` секретов приложения уже нет) и выполните на VPS 1 `make agent-up`.
+на VPS 2 после `env-role` секретов приложения нет, а на VPS 1 — секретов мониторинга):
+
+```bash
+grep '^SENTRY_DSN=' .env                         # VPS 2: скопировать вывод
+sed -i 's|^SENTRY_DSN=.*|SENTRY_DSN=<значение с VPS 2>|' .env   # VPS 1 (или в редакторе)
+make agent-up                                    # VPS 1
+```
+
+### Режим `CADDY_MODE=domain`
+
+`GRAFANA_DOMAIN` и `URGENTRY_DOMAIN` должны иметь DNS A-записи на публичный IP хоста мониторинга
+(VPS 2 или единственного хоста) **до** `make obs-up`, а порт 80/tcp — быть открыт: Let's Encrypt
+проверяет домен по HTTP-01. Без своего домена подойдёт `grafana.<ip>.nip.io`.
 
 ### Переменные `.env`
 
@@ -221,12 +256,16 @@
 ```bash
 make ready      # хост приложения: /health/ready = 200 у master_bot и bot_worker
 make obs-ps     # хост мониторинга: все сервисы running/healthy
+# CADDY_MODE=ip (самоподписанный сертификат, поэтому -k)
 curl -k -u admin:<пароль Basic Auth> -o /dev/null -w '%{http_code}\n' https://<VPS_IP>/grafana/api/health   # 200
 curl -k -o /dev/null -w '%{http_code}\n' https://<VPS_IP>/grafana/api/health                                  # 401
+# CADDY_MODE=domain
+curl -u admin:<пароль Basic Auth> -o /dev/null -w '%{http_code}\n' https://<GRAFANA_DOMAIN>/api/health        # 200
+curl -o /dev/null -w '%{http_code}\n' https://<GRAFANA_DOMAIN>/api/health                                       # 401
 make otel-smoke # хост приложения: span → SQL → RabbitMQ → ошибка в urgentry, печатает TRACE_ID
 ```
 
-urgentry — `https://<VPS_IP>/` (Basic Auth, затем логин `URGENTRY_BOOTSTRAP_EMAIL` и пароль
+urgentry — `https://<VPS_IP>/` (`ip`) или `https://<URGENTRY_DOMAIN>/` (`domain`) (Basic Auth, затем логин `URGENTRY_BOOTSTRAP_EMAIL` и пароль
 `URGENTRY_BOOTSTRAP_PASSWORD` из `.env` хоста мониторинга); ошибка из `make otel-smoke` должна
 появиться в проекте, трейс — в Grafana (Tempo) по `TRACE_ID`.
 
@@ -236,8 +275,13 @@ urgentry — `https://<VPS_IP>/` (Basic Auth, затем логин `URGENTRY_BO
   `make agent-down` → `make down` → `make obs-down`. Если после этого осталась сеть
   `<PROJECT_NAME>_docker_api` — `docker network rm <PROJECT_NAME>_docker_api`. На двух хостах:
   VPS 1 — `make agent-down`, `make down`; VPS 2 — `make obs-down`.
-- **Обновление**: `git pull && git fetch --tags`, затем `make agent-up` (хост приложения; миграции
-  применяет `db_update`) и `make obs-up` (хост мониторинга).
+- **Обновление**: `git pull && git fetch --tags`, затем `make env-check` (новые ключи из
+  `.env.example` дописать вручную; новый секрет должен быть отнесён к роли в
+  `ops/scripts/env_role.sh`, на двух хостах — заполнить только на своём хосте), затем
+  `make agent-up` (хост приложения; миграции применяет `db_update`) и `make obs-up` (хост
+  мониторинга). `make env FORCE=1` после `env-role` не используйте: он сгенерирует заново **все**
+  секреты, в том числе чужого хоста (потребуется снова `make env-role`), а пароли БД и
+  `ENCRYPTION_KEY` разойдутся с данными.
 - **Откат**: `git checkout <предыдущий тег>` + `make agent-up`; миграции БД автоматически не
   откатываются — порядок восстановления в [docs/ops/recovery.md](docs/ops/recovery.md).
 
