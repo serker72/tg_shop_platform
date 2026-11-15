@@ -24,7 +24,7 @@ class SqlAuditLogger(AuditLogger):
             AuditLog(
                 created_at=event.created_at,
                 tenant_id=event.tenant_id,
-                bot_id=event.bot_id,
+                telegram_bot_id=event.telegram_bot_id,
                 actor_id=event.actor_id,
                 actor_type=event.actor_type,
                 action=event.action,

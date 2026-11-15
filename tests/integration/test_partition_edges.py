@@ -27,9 +27,10 @@ def _insert_sql(table: str, moment_sql: str) -> str:
     literal written next to it, so the string built here is not user data.
     """
     if table == "user_activity":
-        values = f"(gen_random_uuid(), {moment_sql}, gen_random_uuid(), 'click')"
+        values = f"(gen_random_uuid(), {moment_sql}, 1, 'click')"
         return (
-            f"INSERT INTO user_activity (id, created_at, bot_id, action_type) VALUES {values} "  # noqa: S608
+            "INSERT INTO user_activity (id, created_at, telegram_bot_id, action_type) "  # noqa: S608
+            f"VALUES {values} "
             "RETURNING tableoid::regclass::text"
         )
     values = f"(gen_random_uuid(), {moment_sql}, 'system', 'admin_action')"

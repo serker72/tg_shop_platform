@@ -21,12 +21,12 @@ from app.modules.logging.metrics import LogsDroppedCounter
 
 pytestmark = pytest.mark.req("R7")
 
-BOT = UUID("00000000-0000-0000-0000-000000000001")
+BOT = 7_000_000_001
 
 
 def ev(user: int = 1, action: str = "CLICK") -> ActivityEvent:
     return ActivityEvent(
-        bot_id=BOT,
+        telegram_bot_id=BOT,
         action_type=action,
         telegram_user_id=user,
         created_at=datetime(2026, 9, 14, 10, tzinfo=UTC),
@@ -91,7 +91,7 @@ def test_counter_by_reason() -> None:
 
 def test_event_to_row_maps_metadata() -> None:
     row = event_to_row(
-        ActivityEvent(bot_id=BOT, action_type="X", metadata={"k": 1})  # noqa: S106
+        ActivityEvent(telegram_bot_id=BOT, action_type="X", metadata={"k": 1})  # noqa: S106
     )
     assert row["metadata_"] == {"k": 1}
     assert "metadata" not in row

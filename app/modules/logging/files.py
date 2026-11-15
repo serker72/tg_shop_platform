@@ -3,7 +3,7 @@
 Layout under ``Settings.logs.dir`` (``/app/logs`` in the container, the TZ layout verbatim)::
 
     users/<YYYY-MM-DD>/user_<telegram_user_id>.log   - events with a Telegram user
-    bots/bot_<bot_id>/<YYYY-MM-DD>.log               - every event (``bot_id`` is NOT NULL)
+    bots/bot_<telegram_bot_id>/<YYYY-MM-DD>.log      - every event (``telegram_bot_id`` NOT NULL)
     system/<YYYY-MM-DD>.log                          - ``source == "system"`` or no user
 
 One event is written to several files on purpose: the TZ requires both a sequential log per
@@ -12,8 +12,8 @@ to merge files.
 
 Line format (TZ 47.3 example, ``|``-separated ``key=value``; empty fields omitted)::
 
-    2026-09-14 18:42:31 | bot=<uuid> | user=123456 | username=@example | action=OPEN_PRODUCT
-    | category=<uuid> | subcategory=<uuid> | product=<uuid> | result=success
+    2026-09-14 18:42:31 | bot=<telegram_bot_id> | user=123456 | username=@example
+    | action=OPEN_PRODUCT | category=<uuid> | subcategory=<uuid> | product=<uuid> | result=success
 
 Time is **UTC** (``YYYY-MM-DD HH:MM:SS``) like the DB (TZ 47.2); the date of the file is the
 UTC date of ``created_at``. ``metadata`` is appended last as compact JSON (``meta={...}``).
@@ -96,7 +96,7 @@ def format_line(event: ActivityEvent) -> str:
     username = event.username
     if username and not username.startswith("@"):
         username = f"@{username}"
-    add("bot", event.bot_id)
+    add("bot", event.telegram_bot_id)
     add("user", event.telegram_user_id)
     add("username", username)
     add("user_type", event.user_type)
@@ -135,7 +135,7 @@ def event_paths(event: ActivityEvent) -> list[Path]:
     paths: list[Path] = []
     if event.telegram_user_id is not None:
         paths.append(Path("users", day, f"user_{event.telegram_user_id}.log"))
-    paths.append(Path("bots", f"bot_{event.bot_id}", f"{day}.log"))
+    paths.append(Path("bots", f"bot_{event.telegram_bot_id}", f"{day}.log"))
     if is_system_event(event):
         paths.append(Path("system", f"{day}.log"))
     return paths

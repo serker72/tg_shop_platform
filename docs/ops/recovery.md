@@ -180,3 +180,23 @@ curl -fsS http://127.0.0.1:<порт сервиса>/health/ready   # PostgreSQL
 - [ ] `make migrate` успешно
 - [ ] `make up` / `make obs-up`, все сервисы healthy
 - [ ] `/health/ready` = ok, Grafana/Prometheus/Loki в порядке
+
+## Архив аудита: колонка бота (`bot_id` → `telegram_bot_id`)
+
+Ревизия `bots` переименовала колонку бота в журналах: `bot_id uuid` → `telegram_bot_id
+bigint` (Telegram ID бота, `getMe().id`). RENAME/TYPE на родителе распространяется на все
+присоединённые партиции и `_default`, а также применяется к template-таблицам pg_partman
+(`partman.template_public_*`). **Отсоединённые партиции в схеме `archive` не затрагиваются**:
+в них остаётся `bot_id uuid`.
+
+Следствия для архивации (`app/modules/logging/audit_archive.py`):
+
+* список колонок берётся из самой таблицы (`SELECT * … LIMIT 0`), не из модели, поэтому
+  выгрузка старых партиций не ломается: заголовок CSV и `columns` в `manifest.json` для
+  партиций до ревизии `bots` содержат `bot_id`, для новых — `telegram_bot_id`;
+* при восстановлении из архива ориентироваться на `manifest.json → columns`: CSV со
+  `bot_id` загружать в таблицу со старой схемой (`CREATE TABLE … (LIKE …)` + `bot_id uuid`)
+  или с явным списком колонок без `bot_id` (значение UUID в `telegram_bot_id` не
+  конвертируется — сопоставления внутренний UUID → Telegram ID нет);
+* на момент ревизии `archive` пуст на всех стендах (retention 24 мес.), поэтому
+  смешанные архивы появятся только для партиций, созданных до ревизии `bots`.

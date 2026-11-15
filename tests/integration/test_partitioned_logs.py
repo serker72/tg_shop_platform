@@ -34,11 +34,20 @@ INDEXES = {
     "user_activity": {
         "ix_user_activity_tenant_id_created_at",
         "ix_user_activity_telegram_user_id_created_at",
-        "ix_user_activity_bot_id_created_at",
+        "ix_user_activity_telegram_bot_id_created_at",
     },
     "audit_logs": {"ix_audit_logs_created_at", "ix_audit_logs_tenant_id_created_at"},
 }
 CHECK_VIOLATION = "23514"
+#: The ring below exercises the ``partition_logs`` revision with data in both tables, so it
+#: stops at the revision before ``bots``: ``bots`` refuses to convert a non-empty click-log
+#: (no uuid -> bigint cast). Column / index names of that schema state.
+RING_HEAD = "iam_rbac"
+LEGACY_BOT_COLUMN = "bot" + "_id"
+RING_INDEXES = {
+    table: {name.replace("telegram_bot_id", LEGACY_BOT_COLUMN) for name in names}
+    for table, names in INDEXES.items()
+}
 
 
 MONTH_SUFFIX_SQL = (
@@ -105,7 +114,9 @@ async def test_insert_routes_to_month_and_default(session: AsyncSession) -> None
     (current,) = await _month_suffixes(session, 0, 0)
     routed = []
     for moment in (last_moment, far):
-        row = UserActivity(bot_id=uuid.uuid4(), action_type="click", created_at=moment)
+        row = UserActivity(
+            telegram_bot_id=uuid.uuid4().int >> 66, action_type="click", created_at=moment
+        )
         session.add(row)
         await session.flush()
         routed.append(
@@ -121,7 +132,7 @@ async def test_insert_routes_to_month_and_default(session: AsyncSession) -> None
 
 async def test_orm_roundtrip_and_composite_pk(session: AsyncSession) -> None:
     activity = UserActivity(
-        bot_id=uuid.uuid4(),
+        telegram_bot_id=uuid.uuid4().int >> 66,
         action_type="open_product",
         callback_data="product:1",
         metadata_={"k": "v"},
@@ -291,7 +302,7 @@ def _seed(query: Query) -> None:
     )
     for moment in moments:
         query(
-            "INSERT INTO user_activity (id, created_at, bot_id, action_type) "
+            f"INSERT INTO user_activity (id, created_at, {LEGACY_BOT_COLUMN}, action_type) "
             f"VALUES (gen_random_uuid(), {moment}, gen_random_uuid(), 'click')"
         )
         query(
@@ -302,7 +313,7 @@ def _seed(query: Query) -> None:
 
 def test_upgrade_downgrade_ring(scratch_db: tuple[str, Query]) -> None:
     url, query = scratch_db
-    _alembic(url, command.upgrade, "head")
+    _alembic(url, command.upgrade, RING_HEAD)
     assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
     assert query("SELECT count(*) FROM pg_class WHERE relnamespace = 'archive'::regnamespace") == [
         (0,)
@@ -323,7 +334,7 @@ def test_upgrade_downgrade_ring(scratch_db: tuple[str, Query]) -> None:
         names = {
             r[0] for r in query(f"SELECT indexname FROM pg_indexes WHERE tablename = '{table}'")
         }
-        assert names == INDEXES[table] | {f"pk_{table}"}
+        assert names == RING_INDEXES[table] | {f"pk_{table}"}
         leftovers = query(
             "SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace "
             f"AND (relname LIKE '{table}\\_p%' OR relname LIKE '{table}\\_default' "
@@ -334,7 +345,7 @@ def test_upgrade_downgrade_ring(scratch_db: tuple[str, Query]) -> None:
     assert query("SELECT 1 FROM pg_extension WHERE extname = 'pg_partman'") == []
     assert query("SELECT 1 FROM pg_namespace WHERE nspname IN ('partman', 'archive')") == []
 
-    _alembic(url, command.upgrade, "head")
+    _alembic(url, command.upgrade, RING_HEAD)
     assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
     assert _counts(query) == {"user_activity": 4, "audit_logs": 4}
     assert query("SELECT count(*) FROM pg_trigger WHERE tgname = 'guard_audit_part_config'") == [
@@ -368,13 +379,13 @@ def test_upgrade_downgrade_ring(scratch_db: tuple[str, Query]) -> None:
         "(id uuid NOT NULL, created_at timestamptz NOT NULL, actor_type text, action text)"
     )
     with pytest.raises(DBAPIError, match="schema archive is not empty"):
-        _alembic(url, command.upgrade, "head")
+        _alembic(url, command.upgrade, RING_HEAD)
     # The guard is non-destructive: the operator decides what to do with the leftovers.
     assert query("SELECT to_regclass('archive.audit_logs_p20200101')") != [(None,)]
 
     # --- retention detaches partitions -> downgrade drops archive -> upgrade passes ----
     query("DROP SCHEMA archive CASCADE")
-    _alembic(url, command.upgrade, "head")
+    _alembic(url, command.upgrade, RING_HEAD)
     assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
     assert _counts(query) == {"user_activity": 3, "audit_logs": 4}
     # A row in a premade month partition, then retention with a short window: partman
@@ -402,7 +413,7 @@ def test_upgrade_downgrade_ring(scratch_db: tuple[str, Query]) -> None:
         assert query(f"SELECT to_regclass('archive.{name}')") == [(None,)]
     # Rows still attached to the parent survive the ring; only the archive is gone.
     assert _counts(query) == kept
-    _alembic(url, command.upgrade, "head")
+    _alembic(url, command.upgrade, RING_HEAD)
     assert _relkinds(query) == {"user_activity": "p", "audit_logs": "p"}
     assert _counts(query) == kept
 
@@ -423,9 +434,9 @@ def test_maintenance_premakes_without_recent_rows(
     for table in TABLES:
         if table == "user_activity":
             query(
-                "INSERT INTO user_activity (id, created_at, bot_id, action_type) VALUES "
+                "INSERT INTO user_activity (id, created_at, telegram_bot_id, action_type) VALUES "
                 "(gen_random_uuid(), date_trunc('month', now()) - interval '3 months', "
-                "gen_random_uuid(), 'click')"
+                "1, 'click')"
             )
         for suffix in suffixes[1:]:
             query(f"DROP TABLE public.{table}_p{suffix}")

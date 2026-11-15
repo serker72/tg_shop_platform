@@ -265,18 +265,18 @@ default_language_code (String), support_chat_id (bigint), news_chat_id (bigint),
 
 10. `user_activity`: Click-log / User Activity (ТЗ п. 47.1–47.2, 47.10). *Партиционирована RANGE(`created_at`), месячные партиции (pg_partman).*
 * Composite PK: `(id uuid, created_at TIMESTAMPTZ)`.
-* `tenant_id` (uuid), `bot_id` (uuid), `telegram_user_id` (BigInt), `username` (String, на момент события), `user_type`/`role` (String).
+* `tenant_id` (uuid), `telegram_bot_id` (BigInt, Telegram ID бота — `getMe().id`; внутренний `bots.id` в логах не хранится), `telegram_user_id` (BigInt), `username` (String, на момент события), `user_type`/`role` (String).
 * `source` (String): `callback` / `message` / `command` / `reply_keyboard` / `media` / `admin` — тип источника события. Обоснование: ТЗ п. 47.1 требует логировать действия через команды, текст, reply/inline keyboard и media; без этого поля невозможна фильтрация по типу источника (ТЗ п. 47.6).
 * `action_type` (String): Enum/String с валидацией против справочника — значения по ТЗ п. 47.1 (inline/reply-кнопки, переходы категория/подкатегория, открытие позиции, просмотр товара/профиля, заказ, покупка, отмена, предзаказ, отзыв, обращение, сообщения, ответы, возвраты, кнопки оплаты, пополнение, меню, «Назад», «Главное меню», подписка на уведомления, рефералы, действия модератора, админ-действия, ошибки flow).
 * `entity_type` (String), `entity_id` (uuid), `order_id`, `product_id`, `category_id`, `subcategory_id`, `case_id`, `preorder_id` (uuid, nullable).
 * `metadata` (JSONB, только безопасные данные без секретов/PII), `result` (String: `success` / `error` / `cancelled`).
-* Индексы: `(tenant_id, created_at)`, `(telegram_user_id, created_at)`, `(bot_id, created_at)`.
+* Индексы: `(tenant_id, created_at)`, `(telegram_user_id, created_at)`, `(telegram_bot_id, created_at)`.
 * FK на `id` не создаются — ссылки на другие сущности только логические через `entity_type`/`entity_id`.
 
 
 11. `audit_logs`: Audit Log — только критические действия (ТЗ п. 47.7, 47.9). *Партиционирована RANGE(`created_at`), месячные партиции (pg_partman).*
 * Composite PK: `(id uuid, created_at TIMESTAMPTZ)` — требование нативного партиционирования PostgreSQL (по остальным таблицам логов — аналогично).
-* `tenant_id` (uuid), `bot_id` (UUID, nullable — контекст бота в мульти-бот платформе, ТЗ п. 47.10), `actor_id` (uuid/BigInt, инициатор действия).
+* `tenant_id` (uuid), `telegram_bot_id` (BigInt, nullable — контекст бота в мульти-бот платформе, ТЗ п. 47.10), `actor_id` (uuid/BigInt, инициатор действия).
 * `action` (String), полный перечень значений по ТЗ п. 47.7: `write_off_moderator`, `write_off_client`, `product_issue`, `product_replace`, `refund`, `payout_approve`, `payout_reject`, `balance_change`, `permission_change`, `role_change`, `product_change`, `price_change`, `discount_change`, `settings_change`, `admin_action`.
 * `entity_type` (String), `entity_id` (uuid), `payload` (JSONB), `result` (String).
 * Индексы: `(created_at)`, `(tenant_id, created_at)`.
@@ -300,7 +300,7 @@ default_language_code (String), support_chat_id (bigint), news_chat_id (bigint),
 **Состав полей.** Полный перечень полей — см. таблицы 10–11 ER-модели (выше). Специфичные для партиционирования акценты:
 
 * Ключ партиционирования — `created_at` (`TIMESTAMPTZ`, NOT NULL) и входит в Composite PK `(id, created_at)`.
-* Обязательные дискриминаторы для фильтрации и изоляции тенантов: `tenant_id` и `bot_id` (`bot_id` — nullable только в `audit_logs`) — входят в индексы вместе с `created_at`.
+* Обязательные дискриминаторы для фильтрации и изоляции тенантов: `tenant_id` и `telegram_bot_id` (`telegram_bot_id` — nullable только в `audit_logs`) — входят в индексы вместе с `created_at`.
 
 **Составной первичный ключ (требование нативного партиционирования).**
 
@@ -336,7 +336,7 @@ command:
 
 * Модели `UserActivity` и `AuditLog` размещаются в инфраструктурном слое соответствующих модулей (`app/modules/<module>/infrastructure/models.py`). Модуль-владелец логов определяется при реализации: либо отдельный bounded context (`logging` / `audit`), либо размещение в `app/shared_kernel/infrastructure` (логи используются всеми модулями).
 * `__table_args__` моделей обязательно содержит `{"postgresql_partition_by": "RANGE (created_at)"}` плюс индексы:
-* `user_activity`: `(tenant_id, created_at)`, `(telegram_user_id, created_at)`, `(bot_id, created_at)`.
+* `user_activity`: `(tenant_id, created_at)`, `(telegram_user_id, created_at)`, `(telegram_bot_id, created_at)`.
 * `audit_logs`: `(created_at)`, `(tenant_id, created_at)`.
 * `created_at` — `DateTime(timezone=True)`, NOT NULL (ключ партиционирования и часть Composite PK).
 
@@ -384,7 +384,7 @@ ALTER TABLE public.<table>_undo RENAME TO <table>;
 ALTER TABLE public.<table> ADD CONSTRAINT <table>_pk PRIMARY KEY (id, created_at);
 CREATE INDEX ix_<table>_tenant_created        ON public.<table> (tenant_id, created_at);
 CREATE INDEX ix_<table>_telegram_user_created ON public.<table> (telegram_user_id, created_at); -- только user_activity
-CREATE INDEX ix_<table>_bot_created           ON public.<table> (bot_id, created_at);           -- только user_activity
+CREATE INDEX ix_<table>_bot_created           ON public.<table> (telegram_bot_id, created_at);           -- только user_activity
 CREATE INDEX ix_<table>_created_at            ON public.<table> (created_at);                    -- только audit_logs
 ```
 * **Почему PK и индексы перечислены явно.** `LIKE ... INCLUDING ALL` не переносит первичный ключ, индексы и `CHECK`-констрейнты самого родителя; `undo_partition` лишь переносит строки в целевую таблицу (ограничения, созданные на целевой таблице, при переносе не появляются автоматически). Поэтому PK и все индексы из `__table_args__` соответствующей модели восстанавливаются после `RENAME`.

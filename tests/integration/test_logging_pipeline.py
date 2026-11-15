@@ -34,13 +34,13 @@ async def test_buffer_writes_db_and_files(clean_db: AsyncEngine, tmp_path: Path)
         prune_interval_seconds=None,
         counter=counter,
     )
-    bot = uuid4()
+    bot = uuid4().int >> 66
     now = datetime.now(UTC)
     await buffer.start()
     for i in range(7):
         buffer.log(
             ActivityEvent(
-                bot_id=bot,
+                telegram_bot_id=bot,
                 action_type="CLICK",
                 telegram_user_id=100 + i % 2,
                 metadata={"i": i},
@@ -52,10 +52,12 @@ async def test_buffer_writes_db_and_files(clean_db: AsyncEngine, tmp_path: Path)
     assert counter.value == 0
     async with factory() as session:
         count = await session.scalar(
-            select(func.count()).select_from(UserActivity).where(UserActivity.bot_id == bot)
+            select(func.count())
+            .select_from(UserActivity)
+            .where(UserActivity.telegram_bot_id == bot)
         )
         meta = await session.scalar(
-            select(UserActivity.metadata_).where(UserActivity.bot_id == bot).limit(1)
+            select(UserActivity.metadata_).where(UserActivity.telegram_bot_id == bot).limit(1)
         )
         default_rows = await session.scalar(text("SELECT count(*) FROM user_activity_default"))
     assert count == 7
@@ -82,17 +84,17 @@ async def test_poison_row_loses_only_itself(
         prune_interval_seconds=None,
         counter=counter,
     )
-    bot = uuid4()
+    bot = uuid4().int >> 66
     await buffer.start()
     for i in range(5):
         action = cast(str, None) if i == 2 else f"OK_{i}"
-        buffer.log(ActivityEvent(bot_id=bot, action_type=action, telegram_user_id=i))
+        buffer.log(ActivityEvent(telegram_bot_id=bot, action_type=action, telegram_user_id=i))
     await buffer.stop(10)
 
     async with factory() as session:
         actions = (
             await session.scalars(
-                select(UserActivity.action_type).where(UserActivity.bot_id == bot)
+                select(UserActivity.action_type).where(UserActivity.telegram_bot_id == bot)
             )
         ).all()
     assert sorted(actions) == ["OK_0", "OK_1", "OK_3", "OK_4"]

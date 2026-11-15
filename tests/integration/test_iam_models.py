@@ -13,6 +13,7 @@ from sqlalchemy import MetaData, Table, create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.bot_manager.models import Bot, TenantCustomer
 from app.modules.iam.models import (
     SEED_LANGUAGES,
     Language,
@@ -54,6 +55,8 @@ IAM_TABLES = (
     "user_roles",
     "user_permission_overrides",
     "tenant_moderators",
+    "bots",
+    "tenant_customers",
 )
 IAM_MODELS = (
     Language,
@@ -66,6 +69,8 @@ IAM_MODELS = (
     UserRole,
     UserPermissionOverride,
     TenantModerator,
+    Bot,
+    TenantCustomer,
 )
 OVERRIDES_UNIQUE = "uq_user_permission_overrides_user_id_permission_id_tenant_id"
 
@@ -756,6 +761,7 @@ def test_models_match_migrations(migrated_scratch_db: tuple[str, Query]) -> None
     migrated_checks, migrated_indexes = catalog("public")
     model_checks, model_indexes = catalog(MODEL_CHECK_SCHEMA)
     assert set(migrated_checks) == {
+        "ck_bots_status",
         "ck_languages_code_format",
         "ck_languages_default_is_live",
         "ck_tenants_slug_format",

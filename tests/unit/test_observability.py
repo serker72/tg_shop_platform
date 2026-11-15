@@ -66,7 +66,6 @@ def test_logs_dropped_known_reasons_zero() -> None:
 
 @pytest.mark.req("S5")
 async def test_di_shares_dropped_counter_between_buffer_and_metrics(tmp_path: Any) -> None:
-    from uuid import uuid4
 
     from dishka import make_async_container
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -91,7 +90,7 @@ async def test_di_shares_dropped_counter_between_buffer_and_metrics(tmp_path: An
         counter.reset()
         # LogBuffer fed by the DI counter, never started: log() drops with not_running.
         buffer = LogBuffer(async_sessionmaker(), DailyFileWriter(tmp_path), counter=counter)
-        buffer.log(ActivityEvent(bot_id=uuid4(), action_type="CLICK"))
+        buffer.log(ActivityEvent(telegram_bot_id=1, action_type="CLICK"))
         text = render_metrics(metrics.registry).decode()
         assert 'logs_dropped_total{reason="not_running"} 1.0' in text
     finally:

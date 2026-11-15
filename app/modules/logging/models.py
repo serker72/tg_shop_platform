@@ -41,7 +41,7 @@ class UserActivity(Base):
         PrimaryKeyConstraint("id", "created_at"),
         Index("ix_user_activity_tenant_id_created_at", "tenant_id", "created_at"),
         Index("ix_user_activity_telegram_user_id_created_at", "telegram_user_id", "created_at"),
-        Index("ix_user_activity_bot_id_created_at", "bot_id", "created_at"),
+        Index("ix_user_activity_telegram_bot_id_created_at", "telegram_bot_id", "created_at"),
         {"postgresql_partition_by": PARTITION_BY},
     )
 
@@ -50,7 +50,7 @@ class UserActivity(Base):
         DateTime(timezone=True), nullable=False, default=utc_now
     )
     tenant_id: Mapped[UUID | None] = mapped_column(SAUuid, nullable=True)
-    bot_id: Mapped[UUID] = mapped_column(SAUuid, nullable=False)
+    telegram_bot_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     username: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_type: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -94,7 +94,7 @@ class AuditLog(Base):
         DateTime(timezone=True), nullable=False, default=utc_now
     )
     tenant_id: Mapped[UUID | None] = mapped_column(SAUuid, nullable=True)
-    bot_id: Mapped[UUID | None] = mapped_column(SAUuid, nullable=True)
+    telegram_bot_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     actor_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     actor_type: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)

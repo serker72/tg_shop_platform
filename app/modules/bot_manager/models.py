@@ -1,0 +1,122 @@
+"""Bot manager models: shop bots and the customers of a shop.
+
+* ``bots`` holds **shop bots only**; the Master Bot is configured through settings and is
+  never stored here (decisions.md, 2026-11-15). ``id`` (UUID) is the internal key used by
+  commands, leases and foreign keys; ``telegram_bot_id`` is the Telegram ID of the bot
+  (``getMe().id``) and is unique across all rows, soft-deleted included: adding the same bot
+  again means ``restore``, never a second row. Logs reference bots by ``telegram_bot_id``
+  (``user_activity`` / ``audit_logs``, no FK: the log tables are partitioned).
+* ``tenant_customers`` - a Telegram user known to a tenant (shop), one row per pair.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any, Final
+
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.shared_kernel.domain.base_entity import BaseEntity, BusinessEntity
+from app.shared_kernel.infrastructure.database import Base
+from app.shared_kernel.infrastructure.encrypted_string import EncryptedString
+
+__all__ = [
+    "BOT_STATUSES",
+    "BOT_STATUS_ERROR",
+    "BOT_STATUS_INVALID_TOKEN",
+    "BOT_STATUS_RUNNING",
+    "BOT_STATUS_STARTING",
+    "BOT_STATUS_STOPPED",
+    "Bot",
+    "TenantCustomer",
+]
+
+BOT_STATUS_STOPPED: Final = "stopped"
+BOT_STATUS_STARTING: Final = "starting"
+BOT_STATUS_RUNNING: Final = "running"
+BOT_STATUS_INVALID_TOKEN: Final = "invalid_token"  # noqa: S105 - status name, not a secret
+BOT_STATUS_ERROR: Final = "error"
+#: Allowed ``bots.status`` values (DB CHECK ``ck_bots_status``).
+BOT_STATUSES: tuple[str, ...] = (
+    BOT_STATUS_STOPPED,
+    BOT_STATUS_STARTING,
+    BOT_STATUS_RUNNING,
+    BOT_STATUS_INVALID_TOKEN,
+    BOT_STATUS_ERROR,
+)
+
+
+class Bot(BusinessEntity, Base):
+    """Telegram bot of a shop (tenant). The token is stored only encrypted."""
+
+    __tablename__ = "bots"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{value}'" for value in BOT_STATUSES) + ")",
+            name="status",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    telegram_bot_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_token: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=BOT_STATUS_STOPPED, index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    configuration: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+    def __repr__(self) -> str:
+        # Never include ``encrypted_token`` / ``token_hash``: reprs end up in logs.
+        return (
+            f"Bot(id={self.id!s}, tenant_id={self.tenant_id!s}, "
+            f"telegram_bot_id={self.telegram_bot_id!r}, username={self.username!r}, "
+            f"status={self.status!r})"
+        )
+
+
+class TenantCustomer(BaseEntity, Base):
+    """Telegram user of a shop; ``first_bot_id`` - the bot the user came through first."""
+
+    __tablename__ = "tenant_customers"
+    __table_args__ = (UniqueConstraint("tenant_id", "telegram_user_id"),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language_code: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("languages.code", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    first_bot_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("bots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"TenantCustomer(id={self.id!s}, tenant_id={self.tenant_id!s}, "
+            f"telegram_user_id={self.telegram_user_id!r})"
+        )

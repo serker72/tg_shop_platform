@@ -34,7 +34,7 @@ class ActivityEvent:
     additionally written to ``logs/system/<date>.log``).
     """
 
-    bot_id: UUID
+    telegram_bot_id: int
     action_type: str
     tenant_id: UUID | None = None
     telegram_user_id: int | None = None
@@ -70,7 +70,7 @@ class AuditEvent:
     actor_type: ActorType
     action: str
     tenant_id: UUID | None = None
-    bot_id: UUID | None = None
+    telegram_bot_id: int | None = None
     actor_id: int | None = None
     entity_type: str | None = None
     entity_id: UUID | None = None

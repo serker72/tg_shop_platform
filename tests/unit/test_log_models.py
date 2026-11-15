@@ -15,7 +15,7 @@ TABLES = {
     "user_activity": {
         "ix_user_activity_tenant_id_created_at",
         "ix_user_activity_telegram_user_id_created_at",
-        "ix_user_activity_bot_id_created_at",
+        "ix_user_activity_telegram_bot_id_created_at",
     },
     "audit_logs": {"ix_audit_logs_created_at", "ix_audit_logs_tenant_id_created_at"},
 }
@@ -58,7 +58,7 @@ def test_tz_47_2_columns_and_nullability() -> None:
     table = _table("user_activity")
     for column in ("button", "callback_data", "screen_from", "screen_current", "screen_to"):
         assert table.c[column].nullable
-    assert not table.c.bot_id.nullable
+    assert not table.c.telegram_bot_id.nullable
     assert not table.c.action_type.nullable
 
 
@@ -66,7 +66,7 @@ def test_audit_log_actor_columns() -> None:
     table = _table("audit_logs")
     assert table.c.actor_id.type.__class__.__name__ == "BigInteger"
     assert not table.c.actor_type.nullable
-    assert table.c.bot_id.nullable
+    assert table.c.telegram_bot_id.nullable
     checks = {c.name for c in table.constraints if c.__class__.__name__ == "CheckConstraint"}
     assert checks == {"ck_audit_logs_actor_type"}
     assert AuditLog.__tablename__ == "audit_logs"

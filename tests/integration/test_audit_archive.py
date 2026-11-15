@@ -125,6 +125,23 @@ def test_archive_roundtrip_and_rerun_is_noop(setup: tuple[Settings, Query, str])
     assert _keys(settings, bucket) == keys_before
 
 
+def test_manifest_columns_come_from_archived_table(setup: tuple[Settings, Query, str]) -> None:
+    """A partition detached before the ``bots`` revision keeps ``bot_id uuid``; the manifest
+    and the CSV header follow the table itself, not the current ``AuditLog`` model."""
+    settings, query, bucket = setup
+    table = _non_empty(query)
+    query(f"ALTER TABLE archive.{table} RENAME COLUMN telegram_bot_id TO bot_id")  # noqa: S608
+    query(f"ALTER TABLE archive.{table} ALTER COLUMN bot_id TYPE uuid USING NULL")  # noqa: S608
+
+    assert _run(settings) == aa.EXIT_OK
+
+    manifest = json.loads(_get(settings, bucket, aa.manifest_key(table)))
+    header = gzip.decompress(_get(settings, bucket, aa.data_key(table))).decode().splitlines()[0]
+    assert "bot_id" in manifest["columns"]
+    assert "telegram_bot_id" not in manifest["columns"]
+    assert header.split(",") == manifest["columns"]
+
+
 def test_crash_between_upload_and_drop_resumes(
     setup: tuple[Settings, Query, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

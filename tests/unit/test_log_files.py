@@ -16,7 +16,7 @@ from app.modules.logging.files import DailyFileWriter, event_paths, format_line,
 
 pytestmark = pytest.mark.req("R7")
 
-BOT = UUID("00000000-0000-0000-0000-000000000017")
+BOT = 7_000_000_017
 PRODUCT = UUID("00000000-0000-0000-0000-000000000384")
 CATEGORY = UUID("00000000-0000-0000-0000-000000000005")
 TS = datetime(2026, 9, 14, 18, 42, 31, tzinfo=UTC)
@@ -24,7 +24,7 @@ TS = datetime(2026, 9, 14, 18, 42, 31, tzinfo=UTC)
 
 def make_event(**overrides: object) -> ActivityEvent:
     data: dict[str, object] = {
-        "bot_id": BOT,
+        "telegram_bot_id": BOT,
         "action_type": "OPEN_PRODUCT",
         "telegram_user_id": 123456,
         "username": "example",
