@@ -61,7 +61,7 @@ addopts = ["--strict-markers"]
 xfail_strict = true
 markers = [
     "integration: tests requiring running infrastructure (PostgreSQL, Redis, RabbitMQ, MinIO)",
-    "req(*ids): milestone I requirement/scenario codes (R1-R8, S1-S6, SEC1), see tests/traceability.py",
+    "req(*ids): requirement/scenario codes of milestones I and II (R1-R8, S1-S6, SEC1, R-II.*, S-II.*), see tests/traceability.py",
 ]
 
 [dependency-groups]
