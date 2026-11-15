@@ -105,6 +105,21 @@ async def test_component_identifies_bot_and_polls(monkeypatch: pytest.MonkeyPatc
     assert ctx.supervisor.failed == []
 
 
+async def test_identify_caches_get_me(monkeypatch: pytest.MonkeyPatch) -> None:
+    get_me = AsyncMock(return_value=ME)
+    monkeypatch.setattr(Bot, "get_me", get_me)
+    bot = Bot(TOKEN)
+    try:
+        runner = master_app.MasterBotRunner(
+            bot, build=AsyncMock(), readiness=MagicMock(), proxy=None
+        )
+        assert await runner.identify() == ME
+        assert await bot.me() == ME  # start_polling calls bot.me(): no second request
+        assert get_me.await_count == 1
+    finally:
+        await bot.session.close()
+
+
 async def test_get_me_retried_with_backoff_without_secrets_in_logs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

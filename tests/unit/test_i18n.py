@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gettext as stdlib_gettext
 import importlib
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ pytestmark = pytest.mark.req("R-II.3")
 
 APP_DIR = Path(__file__).resolve().parents[2] / "app"
 RU_PO = LOCALES_DIR / "ru" / "LC_MESSAGES" / "messages.po"
+RU_MO = RU_PO.with_suffix(".mo")
 
 
 def test_missing_locales_dir_gives_none(tmp_path: Path) -> None:
@@ -23,6 +25,23 @@ def test_missing_locales_dir_gives_none(tmp_path: Path) -> None:
 def test_ru_catalog_compiled_and_loaded() -> None:
     i18n = build_i18n()
     assert i18n is not None and "ru" in i18n.available_locales
+
+
+def test_ru_mo_matches_po() -> None:
+    """The committed ``.mo`` is compiled from the current ``.po`` (make i18n-compile)."""
+    pofile: Any = importlib.import_module("babel.messages.pofile")
+    with RU_PO.open("rb") as handle:
+        catalog = pofile.read_po(handle)
+    with RU_MO.open("rb") as handle:
+        compiled = stdlib_gettext.GNUTranslations(handle)
+    entries = [message for message in catalog if message.id]
+    assert entries
+    for message in entries:
+        # Empty msgstr is not compiled: gettext falls back to the msgid itself.
+        expected = message.string or message.id
+        assert compiled.gettext(message.id) == expected, message.id
+    compiled_ids = {key for key in compiled._catalog if key}  # type: ignore[attr-defined]
+    assert compiled_ids <= {message.id for message in entries}
 
 
 def test_gettext_outside_update_returns_msgid() -> None:

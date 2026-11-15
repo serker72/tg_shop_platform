@@ -163,7 +163,8 @@ class MasterBotRunner:
         while True:
             attempt += 1
             try:
-                return await self.bot.get_me()
+                # Cached alias of getMe: ``start_polling`` reuses ``_me`` (no extra request).
+                return await self.bot.me()
             except TelegramUnauthorizedError:
                 _log.critical("master_bot_token_rejected", proxy=self._proxy)
                 raise RuntimeError("Master Bot token rejected by Telegram (401)") from None
@@ -180,6 +181,12 @@ class MasterBotRunner:
             delay = min(delay * 2, GET_ME_BACKOFF_MAX)
 
     async def run(self) -> None:
+        """getMe (retries, readiness not-ready) -> Dispatcher -> ready -> polling.
+
+        Readiness is checked only up to the first successful getMe: if Telegram becomes
+        unreachable later, ``telegram`` stays ready and aiogram polling retries the
+        ``getUpdates`` requests itself.
+        """
         me = await self.identify()
         _log.info(
             "master_bot_identified", telegram_bot_id=me.id, username=me.username, proxy=self._proxy
