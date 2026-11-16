@@ -1,9 +1,9 @@
 """Staff dialog: list, add by telegram_user_id (Q3), card (read-only roles), status, shops.
 
-Reading the section needs ``moderators.manage`` or ``roles.manage`` (global): checked in
-every getter and handler, because hidden buttons and forged item ids still reach them.
-Shops on a card are intersected with the viewer's scope. Mutations are authorized by the
-admin services.
+Reading the section needs the global ``users.view``: checked in every getter and handler,
+because hidden buttons and forged item ids still reach them. "Add" and status buttons are
+shown by ``users.manage``, shop assignment by ``moderators.manage``. Shops on a card are
+intersected with the viewer's scope. Mutations are authorized by the admin services.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from app.modules.iam.admin_service import (
     TenantAdminService,
     UserAdminService,
 )
-from app.modules.iam.permissions import MODERATORS_MANAGE, ROLES_MANAGE, SETTINGS_MANAGE
+from app.modules.iam.permissions import MODERATORS_MANAGE, SETTINGS_MANAGE, USERS_MANAGE
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
     actor_id,
@@ -113,7 +113,7 @@ async def list_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     return {
         "text": compose(dialog_manager, _("Сотрудники: {count}").format(count=len(users))),
         "users": [(str(u.telegram_user_id), _user_label(u)) for u in users],
-        "can_add": snapshot_of(dialog_manager).decide(MODERATORS_MANAGE).allowed,
+        "can_add": snapshot_of(dialog_manager).decide(USERS_MANAGE).allowed,
         "btn_add": _("Добавить сотрудника"),
         **nav_texts(),
     }
@@ -165,7 +165,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     )
     is_self = user.telegram_user_id == actor_id(dialog_manager)
     mutable = not is_self and not user.is_superuser
-    status = mutable and snapshot.decide(ROLES_MANAGE).allowed
+    status = mutable and snapshot.decide(USERS_MANAGE).allowed
     data.update(
         text=compose(dialog_manager, *lines),
         is_active=status and user.is_active and not user.is_deleted,

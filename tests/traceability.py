@@ -224,7 +224,7 @@ _ITEMS: tuple[Requirement, ...] = (
         "Боты магазинов и покупатели магазина",
         "Боты магазина хранятся с зашифрованным токеном и статусом; в журналах действий бот "
         "указывается его Telegram ID; покупатели магазина учитываются по Telegram ID.",
-        "Веха II: таблицы bots / tenant_customers, telegram_bot_id в логах (задача 03).",
+        "Веха II: таблицы bots / customers, telegram_bot_id в логах (задача 03).",
     ),
     Requirement(
         "R-II.14",

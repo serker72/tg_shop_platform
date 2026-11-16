@@ -15,11 +15,11 @@ from app.modules.bot_manager.models import (
     BOT_STATUS_INVALID_TOKEN,
     BOT_STATUSES,
     Bot,
-    TenantCustomer,
+    Customer,
 )
 from app.modules.iam.models import Language, Tenant
 
-__all__ = ["BotRepository", "TenantCustomerRepository"]
+__all__ = ["BotRepository", "CustomerRepository"]
 
 
 def _locked[S: Select[Any]](stmt: S) -> S:
@@ -109,8 +109,8 @@ class BotRepository:
         return bot
 
 
-class TenantCustomerRepository:
-    """Data access for :class:`TenantCustomer`."""
+class CustomerRepository:
+    """Data access for :class:`Customer`."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -123,7 +123,7 @@ class TenantCustomerRepository:
         language_code: str | None = None,
         *,
         first_bot_id: UUID | None = None,
-    ) -> TenantCustomer:
+    ) -> Customer:
         """Insert or refresh the customer row of ``(tenant_id, telegram_user_id)``.
 
         ``username`` is overwritten; ``first_bot_id`` is set once and never changed.
@@ -144,7 +144,7 @@ class TenantCustomerRepository:
             if code
             else None
         )
-        stmt = pg_insert(TenantCustomer).values(
+        stmt = pg_insert(Customer).values(
             tenant_id=tenant_id,
             telegram_user_id=telegram_user_id,
             username=username,
@@ -152,19 +152,15 @@ class TenantCustomerRepository:
             first_bot_id=first_bot_id,
         )
         stmt = stmt.on_conflict_do_update(
-            index_elements=[TenantCustomer.tenant_id, TenantCustomer.telegram_user_id],
+            index_elements=[Customer.tenant_id, Customer.telegram_user_id],
             set_={
                 "username": stmt.excluded.username,
-                "language_code": func.coalesce(
-                    stmt.excluded.language_code, TenantCustomer.language_code
-                ),
-                "first_bot_id": func.coalesce(
-                    TenantCustomer.first_bot_id, stmt.excluded.first_bot_id
-                ),
+                "language_code": func.coalesce(stmt.excluded.language_code, Customer.language_code),
+                "first_bot_id": func.coalesce(Customer.first_bot_id, stmt.excluded.first_bot_id),
                 "updated_at": func.now(),
             },
         )
         result = await self._session.scalars(
-            stmt.returning(TenantCustomer), execution_options={"populate_existing": True}
+            stmt.returning(Customer), execution_options={"populate_existing": True}
         )
         return result.one()

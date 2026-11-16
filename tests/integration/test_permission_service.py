@@ -198,7 +198,7 @@ async def test_dead_rows_are_ignored(session: AsyncSession, service: PermissionS
     await moderate(session, user, dead_shop)
     past = datetime.now(UTC) - timedelta(minutes=1)
     await override(session, user, "roles.manage", granted=True, expires_at=past)
-    await override(session, user, "users.manage", granted=True, tenant=dead_shop)
+    await override(session, user, "accounting.view", granted=True, tenant=dead_shop)
     (await permission(session, ORDERS_VIEW)).is_deleted = True
     dead_shop.is_deleted = True
     await session.flush()

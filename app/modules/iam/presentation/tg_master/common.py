@@ -19,7 +19,7 @@ from dishka.integrations.aiogram import CONTAINER_NAME
 
 from app.core.i18n import gettext as _
 from app.modules.iam.models import Tenant, TenantSettings
-from app.modules.iam.permissions import MODERATORS_MANAGE, ROLES_MANAGE, SETTINGS_MANAGE
+from app.modules.iam.permissions import SETTINGS_MANAGE, USERS_VIEW
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
@@ -48,8 +48,9 @@ NOTICE_KEY: Final = "notice"
 BIGINT_MAX: Final = 2**63
 #: Max length of a button caption (longer names are cut with "…").
 LABEL_LIMIT: Final = 60
-#: Global permissions that open the "Staff" section (list and cards of staff users).
-STAFF_VIEW_PERMISSIONS: Final = (MODERATORS_MANAGE, ROLES_MANAGE)
+#: Global permissions that open the "Staff" section (list and cards of staff users);
+#: the superuser passes every check of the snapshot.
+STAFF_VIEW_PERMISSIONS: Final = (USERS_VIEW,)
 
 _log = structlog.get_logger(__name__)
 

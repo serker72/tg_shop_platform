@@ -18,11 +18,11 @@ from aiogram_dialog.widgets.text import Format
 
 from app.entrypoints.master_bot.texts import Texts
 from app.modules.iam.permissions import (
+    LOGS_VIEW,
     PROXIES_MANAGE,
     ROLES_MANAGE,
     SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
-    USERS_VIEW,
 )
 from app.modules.iam.presentation.tg_master import (
     StaffSG,
@@ -38,12 +38,11 @@ __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_gette
 #: Section -> permissions any of which shows its button (shops/bots: also own shops).
 SECTION_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     "shops": (TENANTS_VIEW_ALL,),
-    # Staff users are read with the IAM management rights (``users.*`` are shop customers);
-    # single source with the server-side check of the staff dialog.
+    # ``users.view``: single source with the server-side check of the staff dialog.
     "staff": STAFF_VIEW_PERMISSIONS,
     "roles": (ROLES_MANAGE,),
     "settings": (SETTINGS_MANAGE,),
-    "logs": (USERS_VIEW,),
+    "logs": (LOGS_VIEW,),
     "bots": (TENANTS_VIEW_ALL, PROXIES_MANAGE),
 }
 MENU_PERMISSIONS: Final = frozenset(s for slugs in SECTION_PERMISSIONS.values() for s in slugs)

@@ -6,7 +6,7 @@
   (``getMe().id``) and is unique across all rows, soft-deleted included: adding the same bot
   again means ``restore``, never a second row. Logs reference bots by ``telegram_bot_id``
   (``user_activity`` / ``audit_logs``, no FK: the log tables are partitioned).
-* ``tenant_customers`` - a Telegram user known to a tenant (shop), one row per pair.
+* ``customers`` - a Telegram user known to a tenant (shop), one row per pair.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ __all__ = [
     "PROXY_STATUS_QUARANTINE",
     "Bot",
     "Proxy",
-    "TenantCustomer",
+    "Customer",
 ]
 
 BOT_STATUS_STOPPED: Final = "stopped"
@@ -154,10 +154,10 @@ class Proxy(BusinessEntity, Base):
         )
 
 
-class TenantCustomer(BaseEntity, Base):
+class Customer(BaseEntity, Base):
     """Telegram user of a shop; ``first_bot_id`` - the bot the user came through first."""
 
-    __tablename__ = "tenant_customers"
+    __tablename__ = "customers"
     __table_args__ = (UniqueConstraint("tenant_id", "telegram_user_id"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -174,6 +174,6 @@ class TenantCustomer(BaseEntity, Base):
 
     def __repr__(self) -> str:
         return (
-            f"TenantCustomer(id={self.id!s}, tenant_id={self.tenant_id!s}, "
+            f"Customer(id={self.id!s}, tenant_id={self.tenant_id!s}, "
             f"telegram_user_id={self.telegram_user_id!r})"
         )

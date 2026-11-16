@@ -65,6 +65,7 @@ from app.modules.iam.permissions import (
     ROLES_MANAGE,
     SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
+    USERS_MANAGE,
 )
 from app.modules.iam.service import PERMISSION_DENIED, PermissionService
 from app.modules.logging.audit import SqlAuditLogger
@@ -694,14 +695,17 @@ class TenantAdminService(_AdminService):
 
 
 class UserAdminService(_AdminService):
-    """Staff users. Adding needs ``moderators.manage``; status changes need ``roles.manage``."""
+    """Staff users (``users`` holds staff only; shop customers have no permissions).
+
+    Adding, (de)activation, deletion and restore need the global ``users.manage``.
+    """
 
     async def add_by_telegram_id(
         self, actor_telegram_id: int, telegram_user_id: int, username: str | None = None
     ) -> User:
         """New staff user without rights (Q3); ``is_superuser`` stays ``False``."""
         async with self._transaction():
-            await self._authorize(actor_telegram_id, MODERATORS_MANAGE)
+            await self._authorize(actor_telegram_id, USERS_MANAGE)
             validate_telegram_user_id(telegram_user_id)
             existing = await self._repo.get_user_by_telegram_id(
                 telegram_user_id, include_deleted=True
@@ -765,7 +769,7 @@ class UserAdminService(_AdminService):
         self, actor_telegram_id: int, telegram_user_id: int, *, active: bool
     ) -> User:
         async with self._transaction():
-            actor = await self._authorize(actor_telegram_id, ROLES_MANAGE)
+            actor = await self._authorize(actor_telegram_id, USERS_MANAGE)
             user = await self._target_user(telegram_user_id)
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)
@@ -796,7 +800,7 @@ class UserAdminService(_AdminService):
     async def soft_delete(self, actor_telegram_id: int, telegram_user_id: int) -> None:
         """Soft-delete and physically remove roles, overrides and shop assignments."""
         async with self._transaction():
-            actor = await self._authorize(actor_telegram_id, ROLES_MANAGE)
+            actor = await self._authorize(actor_telegram_id, USERS_MANAGE)
             user = await self._target_user(telegram_user_id)
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)
@@ -816,7 +820,7 @@ class UserAdminService(_AdminService):
     async def restore(self, actor_telegram_id: int, telegram_user_id: int) -> User:
         """Bring the row back; rights are NOT restored (they were removed on delete)."""
         async with self._transaction():
-            actor = await self._authorize(actor_telegram_id, ROLES_MANAGE)
+            actor = await self._authorize(actor_telegram_id, USERS_MANAGE)
             user = await self._target_user(telegram_user_id, include_deleted=True)
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)

@@ -13,7 +13,7 @@ from sqlalchemy import MetaData, Table, create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.bot_manager.models import Bot, Proxy, TenantCustomer
+from app.modules.bot_manager.models import Bot, Customer, Proxy
 from app.modules.iam.models import (
     SEED_LANGUAGES,
     Language,
@@ -56,7 +56,7 @@ IAM_TABLES = (
     "user_permission_overrides",
     "tenant_moderators",
     "bots",
-    "tenant_customers",
+    "customers",
 )
 IAM_MODELS = (
     Language,
@@ -71,7 +71,7 @@ IAM_MODELS = (
     TenantModerator,
     Proxy,
     Bot,
-    TenantCustomer,
+    Customer,
 )
 OVERRIDES_UNIQUE = "uq_user_permission_overrides_user_id_permission_id_tenant_id"
 

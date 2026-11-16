@@ -1,4 +1,4 @@
-"""Bots / tenant_customers against the migrated test database; ``bots`` revision."""
+"""Bots / customers against the migrated test database; ``bots`` revision."""
 
 # ruff: noqa: S608
 
@@ -13,7 +13,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.bot_manager.models import Bot
-from app.modules.bot_manager.repository import BotRepository, TenantCustomerRepository
+from app.modules.bot_manager.repository import BotRepository, CustomerRepository
 from app.modules.bot_manager.security import token_hash
 from app.modules.iam.models import Language
 from tests.integration.conftest import Query
@@ -87,7 +87,7 @@ async def test_bot_status_check_and_tenant_not_null(session: AsyncSession) -> No
 async def test_tenant_customer_upsert(session: AsyncSession) -> None:
     tenant = await _tenant(session)
     bot = await BotRepository(session).add(_bot(tenant.id, 9_300, "c:1"))
-    repo = TenantCustomerRepository(session)
+    repo = CustomerRepository(session)
     first = await repo.upsert(tenant.id, 555, "alice", "ru", first_bot_id=bot.id)
     again = await repo.upsert(tenant.id, 555, "alice2", None, first_bot_id=None)
     assert again.id == first.id
@@ -101,7 +101,7 @@ async def test_tenant_customer_upsert(session: AsyncSession) -> None:
 @pytest.mark.parametrize("code", ["de", "pt-br", "UK"])
 async def test_tenant_customer_unknown_language_is_null(session: AsyncSession, code: str) -> None:
     tenant = await _tenant(session)
-    customer = await TenantCustomerRepository(session).upsert(tenant.id, 777, "bob", code)
+    customer = await CustomerRepository(session).upsert(tenant.id, 777, "bob", code)
     assert customer.language_code is None
 
 
@@ -110,7 +110,7 @@ async def test_tenant_customer_deleted_language_is_null(session: AsyncSession) -
     language = Language(code="xx", name="xx", is_deleted=True)
     session.add(language)
     await session.flush()
-    customer = await TenantCustomerRepository(session).upsert(tenant.id, 778, "eve", "xx")
+    customer = await CustomerRepository(session).upsert(tenant.id, 778, "eve", "xx")
     assert customer.language_code is None
 
 
@@ -222,4 +222,4 @@ def test_bots_revision_guard_and_ring(migrated_scratch_db: tuple[str, Query]) ->
     query("UPDATE audit_logs SET telegram_bot_id = NULL WHERE telegram_bot_id IS NOT NULL")
     _alembic(url, command.downgrade, "iam_rbac")
     _alembic(url, command.upgrade, "head")
-    assert query("SELECT to_regclass('public.tenant_customers')") != [(None,)]
+    assert query("SELECT to_regclass('public.customers')") != [(None,)]

@@ -27,7 +27,9 @@ from app.modules.iam.permissions import (
     PRODUCTS_VIEW,
     ROLE_ADMIN,
     ROLE_MODERATOR,
+    ROLE_SENIOR_MODERATOR,
     ROLES_MANAGE,
+    USERS_MANAGE,
 )
 from app.modules.iam.service import PermissionService
 from app.modules.logging.models import AuditLog
@@ -373,9 +375,10 @@ async def test_error_codes(session: AsyncSession, ctx: Ctx) -> None:
 
 
 async def _limited_actor(session: AsyncSession) -> Any:
-    """Holds only ``roles.manage`` (allow-override)."""
+    """Holds only ``roles.manage`` and ``users.manage`` (allow-overrides)."""
     limited = await make_user(session)
     await direct_override(session, limited.id, ROLES_MANAGE, granted=True)
+    await direct_override(session, limited.id, USERS_MANAGE, granted=True)
     return limited
 
 
@@ -451,3 +454,37 @@ async def test_foreign_pending_changes_rejected(session: AsyncSession, ctx: Ctx)
         await ctx.s["role"].rename(ctx.admin, ctx.role, "X")
     assert info.value.code == svc.SESSION_NOT_CLEAN
     await session.rollback()
+
+
+def _staff_calls(user: Any, actor: int, target: int) -> list[Awaitable[Any]]:
+    """Fresh coroutines of every ``users.manage`` mutation (fresh actor binding per call)."""
+    return [
+        user.add_by_telegram_id(actor, tg_id()),
+        user.deactivate(actor, target),
+        user.soft_delete(actor, target),
+        user.restore(actor, target),
+    ]
+
+
+@pytest.mark.parametrize("granted", [ROLES_MANAGE, "moderators.manage"])
+async def test_staff_mutations_need_users_manage(
+    session: AsyncSession, ctx: Ctx, granted: str
+) -> None:
+    """Add / (de)activate / delete / restore of staff: ``users.manage`` only."""
+    actor = await make_user(session)
+    await direct_override(session, actor.id, granted, granted=True)
+    senior = await make_user(session, role=ROLE_SENIOR_MODERATOR)
+    a, t, user = actor.telegram_user_id, ctx.target, ctx.s["user"]
+    for actor_id in (a, senior.telegram_user_id):
+        for call in _staff_calls(user, actor_id, t):
+            with pytest.raises(PermissionDeniedError):
+                await call
+    # A direct DB override bypasses cache invalidation: a fresh actor gets it before any check.
+    manager = await make_user(session)
+    await direct_override(session, manager.id, USERS_MANAGE, granted=True)
+    m = manager.telegram_user_id
+    await user.deactivate(m, t)
+    await user.activate(m, t)
+    await user.soft_delete(m, t)
+    await user.restore(m, t)
+    assert await user.add_by_telegram_id(m, tg_id()) is not None

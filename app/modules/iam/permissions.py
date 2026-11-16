@@ -4,6 +4,10 @@ Permission slugs follow ``{module}.{action}`` (TZ 46.7 names lower-cased, the fi
 ``_`` turned into ``.``). The ``iam_rbac`` revision freezes the very same rows as literals;
 ``tests`` verify that the migration seed equals these constants.
 
+``users`` are staff only (shop customers live in ``customers`` and have no permissions):
+``users.view`` opens the "Staff" section, ``users.manage`` adds / (de)activates / deletes /
+restores staff (``admin`` only), ``logs.view`` opens the "Logs" section (``admin`` only).
+
 Roles are global. ``admin`` holds every permission. ``senior_moderator`` and
 ``moderator`` have the same permissions except ``tenants.view_all``: the senior works
 with all shops, the moderator only with the shops assigned in ``tenant_moderators``
@@ -26,6 +30,7 @@ __all__ = [
     "GLOBAL_PERMISSIONS",
     "IAM_RBAC_PERMISSIONS",
     "LATER_PERMISSIONS",
+    "LOGS_VIEW",
     "MODERATORS_MANAGE",
     "ORDERS_MANAGE",
     "ORDERS_VIEW",
@@ -88,6 +93,8 @@ SETTINGS_MANAGE = "settings.manage"
 TENANTS_VIEW_ALL = "tenants.view_all"
 #: Proxy pool of the bots (add / ban / activate); added by the ``proxy_pool`` revision.
 PROXIES_MANAGE = "proxies.manage"
+#: "Logs" section of the Master Bot (click log / audit); added by ``staff_permissions``.
+LOGS_VIEW = "logs.view"
 
 #: ``(slug, name)`` rows seeded by the ``iam_rbac`` revision.
 IAM_RBAC_PERMISSIONS: tuple[tuple[str, str], ...] = (
@@ -123,6 +130,7 @@ IAM_RBAC_PERMISSIONS: tuple[tuple[str, str], ...] = (
 #: ``(slug, name)`` rows added by later revisions (each one also grants them to ``admin``).
 LATER_PERMISSIONS: tuple[tuple[str, str], ...] = (
     (PROXIES_MANAGE, "Управление прокси"),  # revision proxy_pool
+    (LOGS_VIEW, "Просмотр логов"),  # revision staff_permissions
 )
 #: The whole permission catalogue at ``head``.
 SEED_PERMISSIONS: tuple[tuple[str, str], ...] = IAM_RBAC_PERMISSIONS + LATER_PERMISSIONS
@@ -131,7 +139,17 @@ SEED_PERMISSION_SLUGS: frozenset[str] = frozenset(slug for slug, _ in SEED_PERMI
 #: Platform-wide permissions that make no sense per shop: a tenant-scoped override
 #: (``user_permission_overrides.tenant_id IS NOT NULL``) of these is forbidden by the service.
 GLOBAL_PERMISSIONS: frozenset[str] = frozenset(
-    {ROLES_MANAGE, SETTINGS_MANAGE, TENANTS_VIEW_ALL, MODERATORS_MANAGE, PROXIES_MANAGE}
+    {
+        ROLES_MANAGE,
+        SETTINGS_MANAGE,
+        TENANTS_VIEW_ALL,
+        MODERATORS_MANAGE,
+        PROXIES_MANAGE,
+        # Staff and logs sections are not bound to a shop.
+        USERS_VIEW,
+        USERS_MANAGE,
+        LOGS_VIEW,
+    }
 )
 
 ROLE_ADMIN = "admin"
@@ -167,7 +185,6 @@ _SENIOR_MODERATOR_PERMISSIONS: frozenset[str] = frozenset(
         CASES_CLOSE,
         REVIEWS_MANAGE,
         PREORDERS_MANAGE,
-        USERS_MANAGE,
         MODERATORS_MANAGE,
     }
 )

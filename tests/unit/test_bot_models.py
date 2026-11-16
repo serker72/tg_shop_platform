@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 from sqlalchemy import CheckConstraint, ForeignKeyConstraint, Table, UniqueConstraint
 
-from app.modules.bot_manager.models import BOT_STATUSES, Bot, TenantCustomer
+from app.modules.bot_manager.models import BOT_STATUSES, Bot, Customer
 from app.modules.bot_manager.security import token_hash
 from app.modules.logging.events import ActivityEvent, AuditEvent
 from app.modules.logging.files import event_paths
@@ -71,7 +71,7 @@ def test_bot_table_contract() -> None:
 
 
 def test_tenant_customer_contract() -> None:
-    table = cast(Table, TenantCustomer.__table__)
+    table = cast(Table, Customer.__table__)
     ondelete = {
         next(iter(c.columns)).name: c.ondelete
         for c in table.constraints
@@ -83,7 +83,7 @@ def test_tenant_customer_contract() -> None:
         "first_bot_id": "SET NULL",
     }
     assert table.c.language_code.nullable
-    assert "uq_tenant_customers_tenant_id_telegram_user_id" in {
+    assert "uq_customers_tenant_id_telegram_user_id" in {
         c.name for c in table.constraints if isinstance(c, UniqueConstraint)
     }
 

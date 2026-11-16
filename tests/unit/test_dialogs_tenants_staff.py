@@ -33,9 +33,11 @@ from app.modules.iam.admin_service import (
     validate_tenant_settings,
 )
 from app.modules.iam.permissions import (
+    LOGS_VIEW,
     MODERATORS_MANAGE,
     ROLES_MANAGE,
     TENANTS_VIEW_ALL,
+    USERS_MANAGE,
     USERS_VIEW,
 )
 from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME, error_text, short
@@ -50,7 +52,12 @@ SCENARIO = pytest.mark.req("R-II.4", "S-II.3")
 
 ACTOR = 501
 SUPER = PermissionSnapshot(user_id=uuid4(), is_superuser=True)
-VIEWER = PermissionSnapshot(user_id=uuid4(), role_permissions={USERS_VIEW: frozenset({"r"})})
+#: Holds only logs.view: no shops, no staff.
+VIEWER = PermissionSnapshot(user_id=uuid4(), role_permissions={LOGS_VIEW: frozenset({"r"})})
+#: Reads staff (users.view) but can not manage them.
+STAFF_READER = PermissionSnapshot(
+    user_id=uuid4(), role_permissions={USERS_VIEW: frozenset({"senior"})}
+)
 
 
 def _tenant(name: str, slug: str, *, deleted: bool = False) -> SimpleNamespace:
@@ -472,7 +479,10 @@ async def test_staff_card_shops_limited_to_viewer_scope() -> None:
     staff = _user(321)
     snapshot = PermissionSnapshot(
         user_id=uuid4(),
-        role_permissions={MODERATORS_MANAGE: frozenset({"senior"})},
+        role_permissions={
+            USERS_VIEW: frozenset({"senior"}),
+            MODERATORS_MANAGE: frozenset({"senior"}),
+        },
         tenants=frozenset({own.id}),
     )
     env = Env(snapshot, [own, foreign], visible=[own], users=[staff])
@@ -552,6 +562,7 @@ async def test_staff_card_hides_deleted_shops_without_settings_manage(superuser:
         else PermissionSnapshot(
             user_id=uuid4(),
             role_permissions={
+                USERS_VIEW: frozenset({"senior"}),
                 MODERATORS_MANAGE: frozenset({"senior"}),
                 TENANTS_VIEW_ALL: frozenset({"senior"}),
             },
@@ -592,7 +603,8 @@ async def test_forged_staff_shops_without_moderators_manage_are_rejected() -> No
     shop = _tenant("Shop A", "shop-a")
     staff = _user(321)
     roles_admin = PermissionSnapshot(
-        user_id=uuid4(), role_permissions={ROLES_MANAGE: frozenset({"admin"})}
+        user_id=uuid4(),
+        role_permissions={USERS_VIEW: frozenset({"a"}), USERS_MANAGE: frozenset({"a"})},
     )
     env = Env(roles_admin, [shop], users=[staff])
     await env.start()
@@ -603,3 +615,34 @@ async def test_forged_staff_shops_without_moderators_manage_are_rejected() -> No
     assert "Нет доступа" in env.text() and "Shop A" not in str(env.buttons())
     await env.forge("u_t_back", "u_t_back", f"u_t_sel:{shop.id}")
     assert env.access.calls == []
+
+
+@R4
+async def test_staff_reader_sees_cards_without_manage_buttons() -> None:
+    """users.view only: list and card are readable, add/status/shop buttons are hidden."""
+    staff = _user(321)
+    env = Env(STAFF_READER, users=[staff])
+    await env.start()
+    assert "Сотрудники" in env.buttons() and "Логи" not in env.buttons()
+    await env.press("Сотрудники")
+    assert "Добавить сотрудника" not in env.buttons()
+    await env.press("— (321)")
+    assert "(321)" in env.text()
+    assert not ({"Деактивировать", "Удалить", "Магазины сотрудника"} & set(env.buttons()))
+
+
+@R4
+async def test_roles_manage_alone_does_not_open_staff() -> None:
+    """roles.manage / moderators.manage no longer open the staff section (users.view does)."""
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        role_permissions={
+            ROLES_MANAGE: frozenset({"r"}),
+            MODERATORS_MANAGE: frozenset({"r"}),
+        },
+    )
+    env = Env(snapshot, users=[_user(42)])
+    await env.start()
+    assert "Сотрудники" not in env.buttons()
+    await env.forge("roles", "roles", "staff")
+    assert "users" not in env.queries.calls

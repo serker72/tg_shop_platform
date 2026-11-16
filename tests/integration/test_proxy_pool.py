@@ -429,7 +429,7 @@ _ADMIN_SLUGS = (
 async def test_head_permission_catalogue_matches_seed(session: AsyncSession) -> None:
     slugs = set((await session.scalars(text("SELECT slug FROM permissions"))).all())
     assert slugs == SEED_PERMISSION_SLUGS
-    assert len(slugs) == 29
+    assert len(slugs) == 30
     assert set((await session.scalars(text(_ADMIN_SLUGS))).all()) == SEED_PERMISSION_SLUGS
     # The superuser installer refuses to run on an incomplete catalogue: head is complete.
     await SuperuserInstaller(session, cast(Any, None))._ensure_seed()
@@ -454,3 +454,62 @@ def test_proxy_pool_revision_ring(migrated_scratch_db: tuple[str, Query]) -> Non
         ("ix_bots_proxy_id",)
     ]
     assert {r[0] for r in query(_ADMIN_SLUGS)} == SEED_PERMISSION_SLUGS
+
+
+_ROLE_LINKS = (
+    "SELECT r.slug, p.slug FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
+    "JOIN permissions p ON p.id = rp.permission_id WHERE r.slug IN ({roles}) "
+    "AND p.slug IN ('users.manage', 'logs.view') ORDER BY 1, 2"
+)
+_CUSTOMER_NAMES = (
+    "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('public.{t}') "
+    "UNION SELECT indexname FROM pg_indexes WHERE tablename = '{t}' ORDER BY 1"
+)
+
+
+def _customer_names(table: str) -> list[str]:
+    return sorted(
+        name.format(t=table)
+        for name in (
+            "pk_{t}",
+            "fk_{t}_tenant_id_tenants",
+            "fk_{t}_language_code_languages",
+            "fk_{t}_first_bot_id_bots",
+            "uq_{t}_tenant_id_telegram_user_id",
+            "ix_{t}_first_bot_id",
+            "ix_{t}_language_code",
+        )
+    )
+
+
+@pytest.mark.req("R-II.2", "R-II.4")
+def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query]) -> None:
+    """``staff_permissions``: logs.view for admin, users.manage only for admin, customers."""
+    url, query = migrated_scratch_db
+    roles = "'admin', 'senior_moderator', 'moderator'"
+
+    def check_head() -> None:
+        assert [tuple(r) for r in query(_ROLE_LINKS.format(roles=roles))] == [
+            ("admin", "logs.view"),
+            ("admin", "users.manage"),
+        ]
+        assert {r[0] for r in query(_ADMIN_SLUGS)} == SEED_PERMISSION_SLUGS
+        assert query("SELECT to_regclass('public.tenant_customers')") == [(None,)]
+        assert [r[0] for r in query(_CUSTOMER_NAMES.format(t="customers"))] == _customer_names(
+            "customers"
+        )
+
+    check_head()
+    _alembic(url, command.downgrade, "proxy_pool")
+    assert query("SELECT count(*) FROM permissions WHERE slug = 'logs.view'") == [(0,)]
+    assert [tuple(r) for r in query(_ROLE_LINKS.format(roles=roles))] == [
+        ("admin", "users.manage"),
+        ("moderator", "users.manage"),
+        ("senior_moderator", "users.manage"),
+    ]
+    assert query("SELECT to_regclass('public.customers')") == [(None,)]
+    assert [r[0] for r in query(_CUSTOMER_NAMES.format(t="tenant_customers"))] == (
+        _customer_names("tenant_customers")
+    )
+    _alembic(url, command.upgrade, "head")
+    check_head()
