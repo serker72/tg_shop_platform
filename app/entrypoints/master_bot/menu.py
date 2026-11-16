@@ -28,6 +28,7 @@ from app.modules.iam.presentation.tg_master import (
     RolesSG,
     StaffSG,
     TenantsSG,
+    overrides_dialog,
     roles_dialog,
     staff_dialog,
     tenants_dialog,
@@ -131,4 +132,5 @@ def build_menu_router() -> Router:
     router.include_router(tenants_dialog())
     router.include_router(staff_dialog())
     router.include_router(roles_dialog())
+    router.include_router(overrides_dialog())
     return router

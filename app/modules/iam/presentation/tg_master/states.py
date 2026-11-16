@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram.fsm.state import State, StatesGroup
 
-__all__ = ["RolesSG", "StaffSG", "TenantsSG"]
+__all__ = ["OverridesSG", "RolesSG", "StaffSG", "TenantsSG"]
 
 
 class TenantsSG(StatesGroup):
@@ -25,6 +25,7 @@ class StaffSG(StatesGroup):
     add = State()
     card = State()
     tenants = State()
+    roles = State()
     confirm = State()
 
 
@@ -36,3 +37,16 @@ class RolesSG(StatesGroup):
     rename = State()
     permissions = State()
     confirm = State()
+
+
+class OverridesSG(StatesGroup):
+    list = State()
+    item = State()
+    module = State()
+    permission = State()
+    effect = State()
+    scope = State()
+    expires = State()
+    reason = State()
+    confirm = State()
+    delete = State()

@@ -1,4 +1,4 @@
-"""Staff dialog: list, add by telegram_user_id (Q3), card (read-only roles), status, shops.
+"""Staff dialog: list, add by telegram_user_id (Q3), card, status, shops, roles, overrides.
 
 Reading the section needs the global ``users.view``: checked in every getter and handler,
 because hidden buttons and forged item ids still reach them. "Add" and status buttons are
@@ -28,12 +28,14 @@ from app.modules.iam.admin_service import (
 )
 from app.modules.iam.permissions import (
     MODERATORS_MANAGE,
+    ROLES_MANAGE,
     TENANTS_MANAGE,
     USERS_MANAGE,
 )
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
     actor_id,
+    add_notice,
     can_view_staff,
     compose,
     denied_text,
@@ -43,6 +45,7 @@ from app.modules.iam.presentation.tg_master.common import (
     mark,
     mutate,
     nav_texts,
+    parse_uuid,
     resolve,
     set_notice,
     short,
@@ -50,7 +53,7 @@ from app.modules.iam.presentation.tg_master.common import (
     status_text,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
-from app.modules.iam.presentation.tg_master.states import StaffSG
+from app.modules.iam.presentation.tg_master.states import OverridesSG, StaffSG
 
 __all__ = ["parse_telegram_id", "staff_dialog"]
 
@@ -86,6 +89,10 @@ async def _has_global_access(manager: DialogManager, user: Any) -> bool:
     """Superuser / global ``tenants.view_all``: never assigned to shops (the service checks)."""
     queries = await resolve(manager, IamAdminQueries)
     return await queries.has_global_access(user)
+
+
+def _can_roles(manager: DialogManager) -> bool:
+    return snapshot_of(manager).decide(ROLES_MANAGE).allowed
 
 
 def _user_label(user: Any) -> str:
@@ -136,7 +143,10 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         "is_live": False,
         "is_deleted": False,
         "can_moderate": False,
+        "can_roles": False,
         "btn_tenants": _("Магазины сотрудника"),
+        "btn_roles": _("Роли сотрудника"),
+        "btn_overrides": _("Персональные права"),
     }
     if not _allowed(dialog_manager):
         return _denied(dialog_manager, **data)
@@ -167,7 +177,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     ]
     if user.is_superuser:
         lines.append(_("Суперпользователь"))
-    lines.append(_("Роли (только просмотр):"))
+    lines.append(_("Роли:"))
     lines.extend([f"• {role}" for role in roles] or ["—"])
     lines.append(_("Магазины:"))
     lines.extend(
@@ -182,6 +192,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         is_inactive=status and not user.is_active and not user.is_deleted,
         is_live=status and not user.is_deleted,
         is_deleted=status and user.is_deleted,
+        can_roles=mutable and _can_roles(dialog_manager) and not user.is_deleted,
         can_moderate=mutable
         and _can_moderate(dialog_manager)
         and not user.is_deleted
@@ -216,6 +227,30 @@ async def tenants_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
         "text": compose(dialog_manager, _("Нажмите на магазин, чтобы привязать или отвязать")),
         "tenants": [
             (str(t.id), short(f"{mark(t.id in assigned)} {t.name} ({t.slug})")) for t in tenants
+        ],
+        **nav_texts(),
+    }
+
+
+async def roles_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    if not _allowed(dialog_manager) or not _can_roles(dialog_manager):
+        return _denied(dialog_manager, roles=[])
+    target = _target(dialog_manager)
+    queries = await resolve(dialog_manager, IamAdminQueries)
+    user = await queries.user(target) if target is not None else None
+    if user is None:
+        return {
+            "text": compose(dialog_manager, error_text("user_not_found")),
+            "roles": [],
+            **nav_texts(),
+        }
+    assigned = await queries.user_role_ids(user.id)
+    roles = [r for r in await queries.roles() if r.is_active or r.id in assigned]
+    prompt = _("Роли сотрудника {id}. Нажмите на роль, чтобы назначить или снять её.")
+    return {
+        "text": compose(dialog_manager, prompt.format(id=user.telegram_user_id)),
+        "roles": [
+            (str(r.id), short(f"{mark(r.id in assigned)} {r.name} ({r.slug})")) for r in roles
         ],
         **nav_texts(),
     }
@@ -336,6 +371,44 @@ async def on_tenant(
         )
 
 
+async def on_role(callback: CallbackQuery, widget: Any, manager: DialogManager, item: str) -> None:
+    target = await _target_or_back(callback, manager)
+    if target is None:
+        return
+    if not _can_roles(manager):
+        set_notice(manager, denied_text())
+        return
+    role_id = parse_uuid(item)
+    queries = await resolve(manager, IamAdminQueries)
+    user = await queries.user(target)
+    role = await queries.role(role_id) if role_id is not None else None
+    if user is None or role is None:
+        set_notice(manager, error_text("role_not_found" if user else "user_not_found"))
+        return
+    actor, picked = actor_id(manager), role.id
+    if picked in await queries.user_role_ids(user.id):
+        await mutate(manager, AccessAdminService, lambda s: s.revoke_role(actor, target, picked))
+        return
+    # The service drops shop assignments when the role brings tenants.view_all.
+    before = {t.id for t in await queries.user_tenants(user.id)}
+    outcome = await mutate(
+        manager, AccessAdminService, lambda s: s.assign_role(actor, target, picked)
+    )
+    after = {t.id for t in await queries.user_tenants(user.id)}
+    if outcome.ok and before - after:
+        add_notice(manager, _("Привязки к магазинам сняты: у роли доступ ко всем магазинам."))
+
+
+async def on_overrides(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    target = await _target_or_back(callback, manager)
+    if target is None:
+        return
+    if not _can_roles(manager):
+        await callback.answer(denied_text())
+        return
+    await manager.start(OverridesSG.list, data={"user_id": str(target)})
+
+
 # --- dialog ----------------------------------------------------------------------------
 
 
@@ -389,6 +462,12 @@ def staff_dialog() -> Dialog:
                     state=StaffSG.tenants,
                     when="can_moderate",
                 ),
+                SwitchTo(
+                    Format("{btn_roles}"), id="u_roles", state=StaffSG.roles, when="can_roles"
+                ),
+                Button(
+                    Format("{btn_overrides}"), id="u_ovr", on_click=on_overrides, when="can_roles"
+                ),
                 Button(
                     Format("{btn_deactivate}"), id="deactivate", on_click=on_ask, when="is_active"
                 ),
@@ -419,6 +498,19 @@ def staff_dialog() -> Dialog:
             _back(StaffSG.card, "u_t_back"),
             state=StaffSG.tenants,
             getter=tenants_getter,
+        ),
+        Window(
+            text,
+            ScrollingGroup(
+                _select("u_r_sel", "roles", on_role),
+                id="u_r_scroll",
+                width=1,
+                height=PAGE_SIZE,
+                hide_on_single_page=True,
+            ),
+            _back(StaffSG.card, "u_r_back"),
+            state=StaffSG.roles,
+            getter=roles_getter,
         ),
         Window(
             text,

@@ -143,6 +143,14 @@ class FakeQueries:
         role = self.env.role_store.get(role_id)
         return None if role is None or role.is_deleted else role
 
+    async def user_role_ids(self, user_id: UUID) -> frozenset[UUID]:
+        self.calls.append("user_role_ids")
+        return frozenset(self.env.user_roles.get(user_id, set()))
+
+    async def user_overrides(self, user_id: UUID) -> list[Any]:
+        self.calls.append("user_overrides")
+        return list(self.env.overrides.get(user_id, []))
+
     async def role_permission_slugs(self, role_id: UUID) -> frozenset[str]:
         self.calls.append("role_permission_slugs")
         return self.env.role_perms.get(role_id, frozenset())
@@ -193,6 +201,8 @@ class Env:
         self.user_service = Recorder(add_by_telegram_id=self._add_user)
         self.access = Recorder()
         self.role_store: dict[UUID, SimpleNamespace] = {r.id: r for r in roles or []}
+        self.user_roles: dict[UUID, set[UUID]] = {}
+        self.overrides: dict[UUID, list[Any]] = {}
         self.role_perms: dict[UUID, frozenset[str]] = {r.id: frozenset() for r in roles or []}
         self.roles = Recorder(
             create=self._create_role,

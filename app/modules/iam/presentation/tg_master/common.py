@@ -30,6 +30,7 @@ __all__ = [
     "LABEL_LIMIT",
     "Outcome",
     "actor_id",
+    "add_notice",
     "can_view_staff",
     "compose",
     "denied_text",
@@ -179,6 +180,12 @@ def short(text: str, limit: int = LABEL_LIMIT) -> str:
 
 def set_notice(manager: DialogManager, text: str) -> None:
     manager.dialog_data[NOTICE_KEY] = text
+
+
+def add_notice(manager: DialogManager, text: str) -> None:
+    """Append a line to the pending notice (e.g. after the result of :func:`mutate`)."""
+    current = manager.dialog_data.get(NOTICE_KEY) or ""
+    manager.dialog_data[NOTICE_KEY] = f"{current}\n{text}" if current else text
 
 
 def compose(manager: DialogManager, *lines: str) -> str:

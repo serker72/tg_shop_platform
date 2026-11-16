@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-16 15:18+0300\n"
+"POT-Creation-Date: 2026-11-16 15:25+0300\n"
 "PO-Revision-Date: 2026-11-15 20:44+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -30,6 +30,9 @@ msgid "Активировать"
 msgstr ""
 
 msgid "Без изменений."
+msgstr ""
+
+msgid "Бессрочно"
 msgstr ""
 
 msgid "Боты"
@@ -68,13 +71,31 @@ msgstr ""
 msgid "Введите новое название роли."
 msgstr ""
 
+msgid "Введите причину (до 500 символов) или нажмите «Пропустить»."
+msgstr ""
+
 msgid "Восстановить"
+msgstr ""
+
+msgid "Все магазины"
+msgstr ""
+
+msgid "Выберите модуль."
+msgstr ""
+
+msgid "Выберите последний день действия (до 23:59:59 UTC) или «Бессрочно»."
+msgstr ""
+
+msgid "Выберите право."
 msgstr ""
 
 msgid "Выберите язык по умолчанию магазина"
 msgstr ""
 
 msgid "Выплаты"
+msgstr ""
+
+msgid "Где действует право: во всех магазинах или в одном?"
 msgstr ""
 
 msgid "Глобальное право нельзя переопределить для магазина."
@@ -104,16 +125,39 @@ msgstr ""
 msgid "Деактивировать сотрудника?"
 msgstr ""
 
+#, python-brace-format
+msgid "Действие: {effect}"
+msgstr ""
+
+msgid "Действующие:"
+msgstr ""
+
+msgid "Добавить персональное право"
+msgstr ""
+
 msgid "Добавить сотрудника"
 msgstr ""
 
+#, python-brace-format
+msgid "Ещё в магазинах вне вашей области: {count}"
+msgstr ""
+
 msgid "Заказы"
+msgstr ""
+
+msgid "Запретить"
 msgstr ""
 
 msgid "Идут технические работы. Попробуйте позже."
 msgstr ""
 
 msgid "Изменение сохранено, но кэш прав обновится с задержкой."
+msgstr ""
+
+msgid "Изменить"
+msgstr ""
+
+msgid "Истёкшие:"
 msgstr ""
 
 msgid "Логи"
@@ -219,6 +263,10 @@ msgstr ""
 msgid "Нужен положительный числовой Telegram ID (до 19 цифр)."
 msgstr ""
 
+#, python-brace-format
+msgid "Область: {scope}"
+msgstr ""
+
 msgid "Обращения"
 msgstr ""
 
@@ -232,6 +280,13 @@ msgid "Переименовать"
 msgstr ""
 
 msgid "Персональное право не найдено."
+msgstr ""
+
+msgid "Персональные права"
+msgstr ""
+
+#, python-brace-format
+msgid "Персональные права сотрудника {id}"
 msgstr ""
 
 msgid "Покупки включены"
@@ -261,13 +316,37 @@ msgstr ""
 msgid "Право не найдено."
 msgstr ""
 
+#, python-brace-format
+msgid "Право: {name}"
+msgstr ""
+
 msgid "Предзаказы"
+msgstr ""
+
+msgid "Привязки к магазинам сняты: у роли доступ ко всем магазинам."
+msgstr ""
+
+#, python-brace-format
+msgid "Причина: {reason}"
+msgstr ""
+
+#, python-brace-format
+msgid "Причина: от 1 до {max} символов."
 msgstr ""
 
 msgid "Прокси"
 msgstr ""
 
+msgid "Пропустить"
+msgstr ""
+
 msgid "Раздел в разработке"
+msgstr ""
+
+msgid "Разрешить"
+msgstr ""
+
+msgid "Разрешить или запретить это право?"
 msgstr ""
 
 msgid "Рефералы"
@@ -279,7 +358,14 @@ msgstr ""
 msgid "Роли"
 msgstr ""
 
-msgid "Роли (только просмотр):"
+msgid "Роли сотрудника"
+msgstr ""
+
+#, python-brace-format
+msgid "Роли сотрудника {id}. Нажмите на роль, чтобы назначить или снять её."
+msgstr ""
+
+msgid "Роли:"
 msgstr ""
 
 #, python-brace-format
@@ -340,7 +426,14 @@ msgstr ""
 msgid "Сохранить"
 msgstr ""
 
+msgid "Сохранить персональное право?"
+msgstr ""
+
 msgid "Срок действия должен быть в будущем."
+msgstr ""
+
+#, python-brace-format
+msgid "Срок: {when}"
 msgstr ""
 
 msgid "Статистика"
@@ -369,6 +462,9 @@ msgid "Удалить"
 msgstr ""
 
 msgid "Удалить магазин? Его можно будет восстановить."
+msgstr ""
+
+msgid "Удалить персональное право?"
 msgstr ""
 
 msgid "Удалить роль? Она будет снята со всех сотрудников."
@@ -408,6 +504,16 @@ msgstr ""
 msgid "активна"
 msgstr ""
 
+msgid "бессрочно"
+msgstr ""
+
+msgid "все магазины"
+msgstr ""
+
+#, python-brace-format
+msgid "выдал: {who}"
+msgstr ""
+
 msgid "глобальный"
 msgstr ""
 
@@ -417,10 +523,30 @@ msgstr ""
 msgid "деактивирована"
 msgstr ""
 
+msgid "действует"
+msgstr ""
+
+#, python-brace-format
+msgid "до {when}"
+msgstr ""
+
+msgid "запрещено"
+msgstr ""
+
+msgid "истекло"
+msgstr ""
+
 msgid "нет"
 msgstr ""
 
 msgid "отключён"
+msgstr ""
+
+#, python-brace-format
+msgid "причина: {reason}"
+msgstr ""
+
+msgid "разрешено"
 msgstr ""
 
 msgid "удалён"
@@ -442,5 +568,8 @@ msgstr ""
 #~ msgstr ""
 
 #~ msgid "Сотрудник удалён — восстановите его из списка."
+#~ msgstr ""
+
+#~ msgid "Роли (только просмотр):"
 #~ msgstr ""
 

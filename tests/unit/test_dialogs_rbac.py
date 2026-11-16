@@ -6,9 +6,13 @@ and staff dialogs: :mod:`tests.unit._master_bot_env`.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from aiogram_dialog.widgets.kbd.calendar_kbd import raw_from_date
 
 from app.modules.iam.permissions import (
     LOGS_VIEW,
@@ -16,8 +20,11 @@ from app.modules.iam.permissions import (
     PRODUCTS_VIEW,
     ROLES_MANAGE,
     SEED_PERMISSIONS,
+    USERS_VIEW,
 )
 from app.modules.iam.presentation.tg_master.common import error_text
+from app.modules.iam.presentation.tg_master.overrides import end_of_day, parse_reason
+from app.modules.iam.presentation.tg_master.queries import OverrideRow
 from app.modules.iam.presentation.tg_master.roles import (
     MODULES,
     PERMISSION_NAMES,
@@ -27,7 +34,18 @@ from app.modules.iam.presentation.tg_master.roles import (
 )
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
-from tests.unit._master_bot_env import ACTOR, R4, SCENARIO, SUPER, VIEWER, Env, make_role
+from tests.unit._master_bot_env import (
+    ACTOR,
+    R4,
+    SCENARIO,
+    STAFF_READER,
+    SUPER,
+    VIEWER,
+    Env,
+    _tenant,
+    _user,
+    make_role,
+)
 
 #: Holds roles.manage only (enough for the whole roles section).
 ROLES_ADMIN = PermissionSnapshot(
@@ -238,3 +256,227 @@ async def test_forged_role_card_and_save_without_right_show_nothing() -> None:
     assert "Secret role" not in env.text()
     assert not {"role", "role_permission_slugs", "roles"} & set(env.queries.calls)
     assert env.roles.calls == []
+
+
+# --- staff roles (part 2) ------------------------------------------------------------------
+
+STAFF = 321
+
+
+async def _staff_card(env: Env) -> None:
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press(f"— \\({STAFF}\\)", regex=True)
+
+
+@SCENARIO
+async def test_assign_and_revoke_staff_role() -> None:
+    staff, role = _user(STAFF), make_role("Custom", "custom")
+    env = Env(SUPER, users=[staff], roles=[role])
+    env.access.handlers["assign_role"] = lambda *a: env.user_roles.setdefault(staff.id, {role.id})
+    env.access.handlers["revoke_role"] = lambda *a: env.user_roles.pop(staff.id)
+    await _staff_card(env)
+    await env.press("Роли сотрудника")
+    await env.press("▫️ Custom (custom)")
+    assert ("assign_role", ACTOR, STAFF, role.id) in env.access.calls
+    assert "Готово." in env.text() and "✅ Custom (custom)" in env.buttons()
+    await env.press("✅ Custom (custom)")
+    assert ("revoke_role", ACTOR, STAFF, role.id) in env.access.calls
+    assert "▫️ Custom (custom)" in env.buttons()
+
+
+@SCENARIO
+async def test_assign_global_role_reports_dropped_shops() -> None:
+    staff, role, shop = _user(STAFF), make_role("Senior", "senior"), _tenant("Shop A", "shop-a")
+    env = Env(SUPER, [shop], users=[staff], roles=[role])
+    env.moderated[staff.id] = [shop]
+    env.access.handlers["assign_role"] = lambda *a: env.moderated.update({staff.id: []})
+    await _staff_card(env)
+    await env.press("Роли сотрудника")
+    await env.press("▫️ Senior (senior)")
+    assert "Готово." in env.text()
+    assert "Привязки к магазинам сняты" in env.text()
+
+
+@R4
+async def test_own_card_has_no_roles_and_overrides_buttons() -> None:
+    env = Env(SUPER, users=[_user(ACTOR)])
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press(f"— \\({ACTOR}\\)", regex=True)
+    assert not {"Роли сотрудника", "Персональные права"} & set(env.buttons())
+
+
+@R4
+async def test_forged_staff_roles_and_overrides_without_roles_manage() -> None:
+    env = Env(STAFF_READER, users=[_user(STAFF)], roles=[make_role("Custom", "custom")])
+    await _staff_card(env)
+    assert not {"Роли сотрудника", "Персональные права"} & set(env.buttons())
+    env.queries.calls.clear()
+    await env.forge("u_card_back", "u_card_back", "u_ovr")
+    assert "user_overrides" not in env.queries.calls
+    await env.forge("u_card_back", "u_card_back", "u_roles")
+    assert "Нет доступа" in env.text() and "Custom" not in env.text()
+    assert "user_role_ids" not in env.queries.calls
+    assert env.access.calls == []
+
+
+# --- personal overrides (part 2) ---------------------------------------------------------
+
+
+def _row(slug: str, *, granted: bool, expired: bool = False, tenant: Any = None) -> OverrideRow:
+    when = datetime.now(UTC) + timedelta(days=-1 if expired else 3)
+    override = SimpleNamespace(
+        tenant_id=tenant, is_granted=granted, expires_at=when, reason="аудит"
+    )
+    return OverrideRow(
+        override=cast(Any, override),
+        permission_slug=slug,
+        granted_by_telegram_id=777,
+        granted_by_username="boss",
+        is_expired=expired,
+    )
+
+
+async def _overrides(env: Env) -> None:
+    await _staff_card(env)
+    await env.press("Персональные права")
+
+
+async def _global_override(env: Env) -> None:
+    await _overrides(env)
+    await env.press("Добавить персональное право")
+    await env.press("Роли")
+    await env.press("Управление ролями")
+    await env.press("Разрешить")
+
+
+@SCENARIO
+async def test_global_override_skips_shop_and_permanent() -> None:
+    env = Env(SUPER, [_tenant("Shop A", "shop-a")], users=[_user(STAFF)])
+    await _global_override(env)
+    assert "Выберите последний день" in env.text()
+    assert "Все магазины" not in env.buttons() and "Shop A (shop-a)" not in env.buttons()
+    await env.press("Бессрочно")
+    await env.press("Пропустить")
+    await env.press("Сохранить")
+    assert env.access.calls == [
+        ("upsert_override", ACTOR, STAFF, ROLES_MANAGE, True, None, None, None)
+    ]
+    assert "Готово." in env.text() and "Действующие:" in env.text()
+
+
+@SCENARIO
+async def test_tenant_override_in_scope_with_date_and_reason() -> None:
+    own, foreign = _tenant("Shop A", "shop-a"), _tenant("Shop B", "shop-b")
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        role_permissions={ROLES_MANAGE: frozenset({"r"}), USERS_VIEW: frozenset({"r"})},
+        tenants=frozenset({own.id}),
+    )
+    env = Env(snapshot, [own, foreign], visible=[own], users=[_user(STAFF)])
+    await _overrides(env)
+    await env.press("Добавить персональное право")
+    await env.press("Товары")
+    await env.press("Просмотр товаров")
+    await env.press("Запретить")
+    assert "Все магазины" in env.buttons() and "Shop A (shop-a)" in env.buttons()
+    assert "Shop B (shop-b)" not in env.buttons()
+    await env.forge(str(own.id), str(own.id), str(foreign.id))
+    assert error_text("tenant_not_found") in env.text()
+    await env.press("Shop A (shop-a)")
+    today = datetime.now(UTC).date()
+    yesterday = today - timedelta(days=1)
+    assert str(raw_from_date(yesterday)) not in str(env.messages.last_message().reply_markup)
+    raw = str(raw_from_date(today))
+    await env.forge(raw, raw, str(raw_from_date(yesterday)))
+    assert error_text("expires_at_not_in_future") in env.text()
+    assert env.access.calls == []
+    await env.forge(raw, raw, raw)
+    await env.send("временный запрет")
+    await env.press("Сохранить")
+    assert env.access.calls == [
+        (
+            "upsert_override",
+            ACTOR,
+            STAFF,
+            PRODUCTS_VIEW,
+            False,
+            own.id,
+            end_of_day(today),
+            "временный запрет",
+        )
+    ]
+
+
+@SCENARIO
+async def test_overrides_list_split_edit_and_delete() -> None:
+    staff = _user(STAFF)
+    env = Env(SUPER, users=[staff])
+    env.overrides[staff.id] = [
+        _row(ROLES_MANAGE, granted=True),
+        _row(PRODUCTS_VIEW, granted=False, expired=True),
+    ]
+    await _overrides(env)
+    text = env.text()
+    active, expired = text.index("Действующие:"), text.index("Истёкшие:")
+    assert active < text.index("Управление ролями") < expired < text.index("Просмотр товаров")
+    assert "@boss (777)" in text and "аудит" in text
+    await env.press("Управление ролями · все магазины")
+    await env.press("Изменить")
+    await env.press("Запретить")
+    assert "Все магазины" not in env.buttons()  # the slot is fixed
+    await env.press("Бессрочно")
+    await env.press("Пропустить")
+    await env.press("Сохранить")
+    assert ("upsert_override", ACTOR, STAFF, ROLES_MANAGE, False, None, None, None) in (
+        env.access.calls
+    )
+    await env.press("⌛ Просмотр товаров · все магазины")
+    await env.press("Удалить")
+    await env.press("Да")
+    assert ("remove_override", ACTOR, STAFF, PRODUCTS_VIEW, None) in env.access.calls
+
+
+@R4
+@pytest.mark.parametrize(
+    "code",
+    [
+        "self_modification_forbidden",
+        "privilege_escalation",
+        "global_permission_tenant_override",
+        "expires_at_not_in_future",
+    ],
+)
+async def test_override_service_error_is_localized(code: str) -> None:
+    env = Env(SUPER, users=[_user(STAFF)])
+    env.access.errors["upsert_override"] = DomainError("no", code=code)
+    await _global_override(env)
+    await env.press("Бессрочно")
+    await env.press("Пропустить")
+    await env.press("Сохранить")
+    assert error_text(code) in env.text()
+
+
+@R4
+@pytest.mark.parametrize("button", ["ov_sel", "ov_add"])
+async def test_forged_override_callbacks_without_roles_manage(button: str) -> None:
+    staff = _user(STAFF)
+    env = Env(SUPER, users=[staff])
+    env.overrides[staff.id] = [_row(ROLES_MANAGE, granted=True)]
+    await _overrides(env)
+    env.snapshot = STAFF_READER
+    env.queries.calls.clear()
+    await env.forge(button, button, button)
+    assert "user_overrides" not in env.queries.calls
+    assert "аудит" not in env.text()
+    assert env.access.calls == []
+
+
+def test_override_helpers() -> None:
+    day = datetime(2030, 5, 17, tzinfo=UTC).date()
+    assert end_of_day(day) == datetime(2030, 5, 17, 23, 59, 59, tzinfo=UTC)
+    assert parse_reason("  ok ") == "ok"
+    for bad in ("", "   ", "x" * 501):
+        with pytest.raises(ValueError):
+            parse_reason(bad)
