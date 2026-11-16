@@ -5,7 +5,7 @@ Final staff role model (one revision for every permission change of milestone II
 * new permissions: ``logs.view`` (admin), ``tenants.manage`` (global, admin: shops and their
   settings; ``settings.manage`` keeps system parameters only), ``bots.manage`` (per shop:
   admin, senior_moderator, moderator);
-* ``users.manage`` and ``moderators.manage`` are taken from ``senior_moderator`` and
+* ``users.view``, ``users.manage`` and ``moderators.manage`` are taken from ``senior_moderator`` and
   ``moderator`` (by slug; personal overrides stay);
 * tenant-scoped overrides of ``users.view`` / ``users.manage`` (they become global) stop the
   upgrade - resolve them by hand;
@@ -42,10 +42,10 @@ NEW_PERMISSIONS = (
 )
 NEW_SLUGS = "('logs.view', 'tenants.manage', 'bots.manage')"
 #: Taken from the moderator roles by the upgrade.
-REVOKED_SLUGS = "('users.manage', 'moderators.manage')"
+REVOKED_SLUGS = "('users.view', 'users.manage', 'moderators.manage')"
 MODERATOR_ROLES = "('senior_moderator', 'moderator')"
 #: Expected number of permissions of the system roles after the upgrade.
-EXPECTED_LINKS = {"admin": 32, "senior_moderator": 21, "moderator": 20}
+EXPECTED_LINKS = {"admin": 32, "senior_moderator": 20, "moderator": 19}
 #: ... and after the downgrade (state of ``proxy_pool``).
 DOWNGRADE_LINKS = {"admin": 29, "senior_moderator": 22, "moderator": 21}
 

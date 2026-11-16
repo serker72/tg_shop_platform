@@ -5,17 +5,19 @@ Permission slugs follow ``{module}.{action}`` (TZ 46.7 names lower-cased, the fi
 ``tests`` verify that the migration seed equals these constants.
 
 ``users`` are staff only (shop customers live in ``customers`` and have no permissions):
-``users.view`` opens the "Staff" section, ``users.manage`` adds / (de)activates / deletes /
-restores staff (``admin`` only), ``logs.view`` opens the "Logs" section (``admin`` only).
-``settings.manage`` is system parameters only (maintenance, retention, permission cache TTL);
-``tenants.manage`` (global, ``admin`` only) creates / renames / disables / deletes / restores
-shops and edits their settings; ``moderators.manage`` (``admin`` only) assigns moderators
-to shops; ``bots.manage`` (per shop) manages the shop bots.
+``users.view`` opens the "Staff" section (``admin`` only), ``users.manage`` adds /
+(de)activates / deletes / restores staff (``admin`` only), ``logs.view`` opens the "Logs"
+section (``admin`` only). ``settings.manage`` is system parameters only (maintenance,
+retention, permission cache TTL); ``tenants.manage`` (global, ``admin`` only) creates /
+renames / disables / deletes / restores shops and edits their settings;
+``moderators.manage`` (``admin`` only) assigns moderators to shops; ``bots.manage``
+(per shop) manages the shop bots.
 
-Roles are global. ``admin`` holds every permission. ``senior_moderator`` and
-``moderator`` have the same permissions except ``tenants.view_all``: the senior works
-with all shops, the moderator only with the shops assigned in ``tenant_moderators``
-(``moderator`` is derived as ``senior_moderator - {tenants.view_all}``). A staff user with a
+Roles are global. ``admin`` holds every permission (the only one with ``users.*``).
+``senior_moderator`` and ``moderator`` have the same permissions except
+``tenants.view_all``: the senior works with all shops, the moderator only with the shops
+assigned in ``tenant_moderators`` (``moderator`` is derived as
+``senior_moderator - {tenants.view_all}``). A staff user with a
 global ``tenants.view_all`` (or a superuser) is never assigned to shops.
 
 "All permissions" of ``admin`` is fixed only by the seed: every permission added by a
@@ -183,7 +185,6 @@ _SENIOR_MODERATOR_PERMISSIONS: frozenset[str] = frozenset(
         PRODUCTS_VIEW,
         ORDERS_VIEW,
         CASES_VIEW,
-        USERS_VIEW,
         REFERRALS_VIEW,
         REVIEWS_VIEW,
         PREORDERS_VIEW,

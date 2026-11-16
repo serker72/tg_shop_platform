@@ -458,6 +458,7 @@ def test_seed_roles() -> None:
             "accounting.manage",
             "payouts.request",
             "payouts.approve",
+            "users.view",
             "users.manage",
             "logs.view",
             "tenants.manage",
@@ -468,12 +469,13 @@ def test_seed_roles() -> None:
     views = {s for s in SEED_PERMISSION_SLUGS if s.endswith(".view")} - {
         "accounting.view",
         "logs.view",
+        "users.view",
     }
     assert views <= senior
-    assert len(senior) == 21
+    assert len(senior) == 20
     moderator = SEED_ROLE_PERMISSIONS[ROLE_MODERATOR]
     assert TENANTS_VIEW_ALL not in moderator
     assert moderator == senior - {TENANTS_VIEW_ALL}
-    assert len(moderator) == 20
+    assert len(moderator) == 19
     assert len(SEED_ROLE_PERMISSIONS[ROLE_ADMIN]) == 32
     assert "proxies.manage" not in senior

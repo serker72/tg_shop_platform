@@ -460,8 +460,8 @@ def test_proxy_pool_revision_ring(migrated_scratch_db: tuple[str, Query]) -> Non
 _ROLE_LINKS = (
     "SELECT r.slug, p.slug FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
     "JOIN permissions p ON p.id = rp.permission_id WHERE r.slug IN ({roles}) "
-    "AND p.slug IN ('users.manage', 'logs.view', 'moderators.manage', 'tenants.manage', "
-    "'bots.manage') ORDER BY 1, 2"
+    "AND p.slug IN ('users.view', 'users.manage', 'logs.view', 'moderators.manage', "
+    "'tenants.manage', 'bots.manage') ORDER BY 1, 2"
 )
 _ROLE_COUNTS = (
     "SELECT r.slug, count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
@@ -490,7 +490,7 @@ def _customer_names(table: str) -> list[str]:
 
 @pytest.mark.req("R-II.2", "R-II.4")
 def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query]) -> None:
-    """``staff_permissions``: logs.view for admin, users.manage only for admin, customers."""
+    """``staff_permissions``: logs.view for admin, users.view/manage only for admin, customers."""
     url, query = migrated_scratch_db
     roles = "'admin', 'senior_moderator', 'moderator'"
 
@@ -501,13 +501,14 @@ def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query])
             ("admin", "moderators.manage"),
             ("admin", "tenants.manage"),
             ("admin", "users.manage"),
+            ("admin", "users.view"),
             ("moderator", "bots.manage"),
             ("senior_moderator", "bots.manage"),
         ]
         assert [tuple(r) for r in query(_ROLE_COUNTS)] == [
             ("admin", 32),
-            ("moderator", 20),
-            ("senior_moderator", 21),
+            ("moderator", 19),
+            ("senior_moderator", 20),
         ]
         assert {r[0] for r in query(_ADMIN_SLUGS)} == SEED_PERMISSION_SLUGS
         assert query("SELECT to_regclass('public.tenant_customers')") == [(None,)]
@@ -524,10 +525,13 @@ def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query])
     assert [tuple(r) for r in query(_ROLE_LINKS.format(roles=roles))] == [
         ("admin", "moderators.manage"),
         ("admin", "users.manage"),
+        ("admin", "users.view"),
         ("moderator", "moderators.manage"),
         ("moderator", "users.manage"),
+        ("moderator", "users.view"),
         ("senior_moderator", "moderators.manage"),
         ("senior_moderator", "users.manage"),
+        ("senior_moderator", "users.view"),
     ]
     assert [tuple(r) for r in query(_ROLE_COUNTS)] == [
         ("admin", 29),
