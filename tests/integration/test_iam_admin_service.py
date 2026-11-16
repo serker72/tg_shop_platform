@@ -41,9 +41,10 @@ from app.modules.iam.permissions import (
     SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
 )
-from app.modules.iam.service import PermissionService
+from app.modules.iam.service import PERMISSION_DENIED, PermissionService
 from app.modules.logging.models import AuditLog
 from app.shared_kernel.domain.exceptions import (
+    DomainError,
     EntityAlreadyExistsError,
     PermissionDeniedError,
     ValidationError,
@@ -367,7 +368,12 @@ async def test_moderator_assignment_requires_moderators_manage(
         await services["access"].assign_moderator(
             nobody.telegram_user_id, target.telegram_user_id, tenant.id
         )
-    senior = await make_user(session, role=ROLE_SENIOR_MODERATOR)
+    senior = await make_user(session, role=ROLE_SENIOR_MODERATOR)  # no moderators.manage
+    with pytest.raises(PermissionDeniedError):
+        await services["access"].assign_moderator(
+            senior.telegram_user_id, target.telegram_user_id, tenant.id
+        )
+    senior = await make_user(session, role=ROLE_ADMIN)
     await services["access"].assign_moderator(
         senior.telegram_user_id, target.telegram_user_id, tenant.id
     )
@@ -392,3 +398,137 @@ async def test_superuser_target_protected_and_username_update(
     user = await services["user"].update_username(admin.telegram_user_id, "@new_name")
     assert user is not None and user.telegram_user_name == "new_name"
     assert await services["user"].update_username(tg_id(), "ghost") is None
+
+
+# --- final role model: tenants.manage, global access is never assigned to shops ---------
+
+
+async def _unassign_audits(session: AsyncSession, user_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = await session.scalars(
+        select(AuditLog.payload).where(
+            AuditLog.action == "iam.moderator.unassign", AuditLog.entity_id == user_id
+        )
+    )
+    # Service audit payload: {"before": {...}, "after": None}.
+    return [dict((r or {}).get("before") or {}) for r in rows.all()]
+
+
+async def _assignments(session: AsyncSession, user_id: uuid.UUID) -> int:
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(TenantModerator)
+            .where(TenantModerator.user_id == user_id)
+        )
+        or 0
+    )
+
+
+async def _shop(services: dict[str, Any], admin: Ref) -> Ref:
+    row = await services["tenant"].create(
+        admin.telegram_user_id, name="S", slug=f"ga-{uuid.uuid4().hex[:8]}"
+    )
+    return Ref(row.id, slug=row.slug)
+
+
+async def test_settings_manage_alone_does_not_manage_tenants(
+    session: AsyncSession, services: dict[str, Any]
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    shop = await _shop(services, admin)
+    system = await make_user(session)
+    await services["access"].upsert_override(
+        admin.telegram_user_id, system.telegram_user_id, SETTINGS_MANAGE, is_granted=True
+    )
+    tg = system.telegram_user_id
+    for call in (
+        services["tenant"].create(tg, name="S", slug=f"no-{uuid.uuid4().hex[:8]}"),
+        services["tenant"].update_settings(tg, shop.id, {"default_language_code": None}),
+        services["tenant"].soft_delete(tg, shop.id),
+    ):
+        with pytest.raises(PermissionDeniedError) as info:
+            await call
+        assert info.value.code == PERMISSION_DENIED
+
+
+@pytest.mark.parametrize("kind", ["senior", "superuser"])
+async def test_global_access_is_never_assigned_to_shops(
+    session: AsyncSession, services: dict[str, Any], kind: str
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    shop = await _shop(services, admin)
+    target = await (
+        make_user(session, role=ROLE_SENIOR_MODERATOR)
+        if kind == "senior"
+        else make_user(session, superuser=True)
+    )
+    with pytest.raises(DomainError) as info:
+        await services["access"].assign_moderator(
+            admin.telegram_user_id, target.telegram_user_id, shop.id
+        )
+    assert info.value.code in {svc.MODERATOR_HAS_GLOBAL_ACCESS, svc.SUPERUSER_PROTECTED}
+    if kind == "senior":
+        assert info.value.code == svc.MODERATOR_HAS_GLOBAL_ACCESS
+    assert await _assignments(session, target.id) == 0
+
+
+async def test_senior_role_drops_assignments_with_audit(
+    session: AsyncSession, services: dict[str, Any]
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    shop = await _shop(services, admin)
+    target = await make_user(session, role=ROLE_MODERATOR)
+    await services["access"].assign_moderator(
+        admin.telegram_user_id, target.telegram_user_id, shop.id
+    )
+    await services["access"].assign_role(
+        admin.telegram_user_id,
+        target.telegram_user_id,
+        await role_id(session, ROLE_SENIOR_MODERATOR),
+    )
+    assert await _assignments(session, target.id) == 0
+    audits = await _unassign_audits(session, target.id)
+    assert [(a["reason"], a["tenant_id"]) for a in audits] == [("global_access", str(shop.id))]
+
+
+async def test_global_view_all_override_drops_assignments(
+    session: AsyncSession, services: dict[str, Any]
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    shop = await _shop(services, admin)
+    target = await make_user(session, role=ROLE_MODERATOR)
+    await services["access"].assign_moderator(
+        admin.telegram_user_id, target.telegram_user_id, shop.id
+    )
+    await services["access"].upsert_override(
+        admin.telegram_user_id, target.telegram_user_id, TENANTS_VIEW_ALL, is_granted=True
+    )
+    assert await _assignments(session, target.id) == 0
+    assert [a["reason"] for a in await _unassign_audits(session, target.id)] == ["global_access"]
+    with pytest.raises(ValidationError) as info:
+        await services["access"].assign_moderator(
+            admin.telegram_user_id, target.telegram_user_id, shop.id
+        )
+    assert info.value.code == svc.MODERATOR_HAS_GLOBAL_ACCESS
+
+
+async def test_superuser_grant_drops_assignments(
+    session: AsyncSession, services: dict[str, Any], perms: PermissionService
+) -> None:
+    from app.modules.iam.superuser import SuperuserInstaller
+
+    admin = await make_user(session, role=ROLE_ADMIN)
+    shop = await _shop(services, admin)
+    target = await make_user(session, role=ROLE_MODERATOR)
+    await services["access"].assign_moderator(
+        admin.telegram_user_id, target.telegram_user_id, shop.id
+    )
+    result = await SuperuserInstaller(session, perms).grant(target.telegram_user_id)
+    assert result.changed
+    assert await _assignments(session, target.id) == 0
+    actors = await session.scalars(
+        select(AuditLog.actor_type).where(
+            AuditLog.action == "iam.moderator.unassign", AuditLog.entity_id == target.id
+        )
+    )
+    assert actors.all() == ["system"]

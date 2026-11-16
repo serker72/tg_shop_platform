@@ -20,7 +20,7 @@ from aiogram_dialog.widgets.text import Format
 from app.core.i18n import gettext as _
 from app.modules.iam.admin_service import TENANT_SETTINGS_FIELDS, TenantAdminService
 from app.modules.iam.models import TENANT_SLUG_MAX_LENGTH, TENANT_SLUG_PATTERN
-from app.modules.iam.permissions import SETTINGS_MANAGE
+from app.modules.iam.permissions import TENANTS_MANAGE
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
     actor_id,
@@ -96,7 +96,7 @@ def _fields(kind: str) -> list[str]:
 
 
 def _can_manage(manager: DialogManager) -> bool:
-    return snapshot_of(manager).decide(SETTINGS_MANAGE).allowed
+    return snapshot_of(manager).decide(TENANTS_MANAGE).allowed
 
 
 async def _current(manager: DialogManager) -> Any:

@@ -36,6 +36,7 @@ from app.modules.iam.permissions import (
     LOGS_VIEW,
     MODERATORS_MANAGE,
     ROLES_MANAGE,
+    SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
     USERS_MANAGE,
     USERS_VIEW,
@@ -44,6 +45,7 @@ from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME, error_
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
 from app.modules.iam.presentation.tg_master.tenants import parse_chat_id, parse_name, parse_slug
+from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError, ValidationError
 
@@ -131,6 +133,16 @@ class FakeQueries:
         return list(self.env.moderated.get(user_id, []))
 
 
+class FakePermissions:
+    """Snapshots of the TARGET staff users (card hints); unknown -> no permissions."""
+
+    def __init__(self) -> None:
+        self.snapshots: dict[int, PermissionSnapshot] = {}
+
+    async def get_snapshot(self, telegram_user_id: int) -> PermissionSnapshot:
+        return self.snapshots.get(telegram_user_id, PermissionSnapshot(user_id=uuid4()))
+
+
 class FakeContainer:
     def __init__(self, deps: dict[type, Any]) -> None:
         self.deps = deps
@@ -175,8 +187,10 @@ class Env:
         self.user_service = Recorder(add_by_telegram_id=self._add_user)
         self.access = Recorder()
         self.queries = FakeQueries(self)
+        self.permissions = FakePermissions()
         container = FakeContainer(
             {
+                PermissionService: self.permissions,
                 TenantAdminService: self.tenants,
                 UserAdminService: self.user_service,
                 AccessAdminService: self.access,
@@ -394,7 +408,7 @@ async def test_tenant_list_is_scoped_by_service() -> None:
     assert ("list_tenants", ACTOR) in env.tenants.calls
     buttons = env.buttons()
     assert "Shop 0 (shop-0)" in buttons and "Shop 11 (shop-11)" not in buttons  # page of 10
-    assert "Создать магазин" not in buttons  # no settings.manage
+    assert "Создать магазин" not in buttons  # no tenants.manage
 
 
 @R4
@@ -552,8 +566,8 @@ def test_service_validators_bigint_range() -> None:
 
 @R4
 @pytest.mark.parametrize("superuser", [False, True], ids=["view_all", "superuser"])
-async def test_staff_card_hides_deleted_shops_without_settings_manage(superuser: bool) -> None:
-    """Tenant soft-delete keeps ``tenant_moderators``: the deleted shop needs settings.manage."""
+async def test_staff_card_hides_deleted_shops_without_tenants_manage(superuser: bool) -> None:
+    """Tenant soft-delete keeps ``tenant_moderators``: the deleted shop needs tenants.manage."""
     live, gone = _tenant("Live", "live"), _tenant("Gone", "gone", deleted=True)
     staff = _user(321)
     snapshot = (
@@ -646,3 +660,41 @@ async def test_roles_manage_alone_does_not_open_staff() -> None:
     assert "Сотрудники" not in env.buttons()
     await env.forge("roles", "roles", "staff")
     assert "users" not in env.queries.calls
+
+
+@R4
+async def test_settings_manage_alone_does_not_manage_tenants() -> None:
+    """settings.manage is system parameters only: no create, deleted shops are hidden."""
+    own, gone = _tenant("Own", "own"), _tenant("Gone", "gone", deleted=True)
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        role_permissions={
+            SETTINGS_MANAGE: frozenset({"r"}),
+            TENANTS_VIEW_ALL: frozenset({"r"}),
+        },
+    )
+    env = Env(snapshot, [own, gone], visible=[own])
+    await env.start()
+    await env.press("Магазины")
+    assert "Создать магазин" not in env.buttons()
+    await env.forge("t_sel", f"t_sel:{own.id}", "t_deleted")
+    assert "Gone" not in env.text()
+    assert "deleted_tenants" not in env.queries.calls
+
+
+@R4
+@pytest.mark.parametrize("kind", ["moderator", "senior", "superuser"])
+async def test_staff_shops_button_hidden_for_global_access(kind: str) -> None:
+    """Global tenants.view_all / superuser is never assigned to shops: no button."""
+    staff = _user(321)
+    if kind == "superuser":
+        staff.is_superuser = True
+    env = Env(SUPER, [_tenant("Shop A", "shop-a")], users=[staff])
+    if kind == "senior":
+        env.permissions.snapshots[321] = PermissionSnapshot(
+            user_id=staff.id, role_permissions={TENANTS_VIEW_ALL: frozenset({"senior"})}
+        )
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press("— (321)")
+    assert ("Магазины сотрудника" in env.buttons()) is (kind == "moderator")

@@ -45,6 +45,7 @@ from app.shared_kernel.domain.exceptions import EntityNotFoundError, ValidationE
 __all__ = [
     "ACTION_GRANT",
     "ACTION_REVOKE",
+    "ACTION_UNASSIGN",
     "LAST_SUPERUSER",
     "SEED_PERMISSIONS_MISSING",
     "SuperuserInstaller",
@@ -55,6 +56,7 @@ SEED_PERMISSIONS_MISSING: Final = "seed_permissions_missing"
 LAST_SUPERUSER: Final = "last_superuser"
 ACTION_GRANT: Final = "iam.superuser.grant"
 ACTION_REVOKE: Final = "iam.superuser.revoke"
+ACTION_UNASSIGN: Final = "iam.moderator.unassign"
 
 _log = structlog.get_logger(__name__)
 
@@ -111,6 +113,9 @@ class SuperuserInstaller:
             if changed:
                 await self._session.flush()
                 await self._audit(ACTION_GRANT, user, before, created=created)
+            # A superuser sees every shop: shop assignments are dropped (with audit).
+            if await self._drop_assignments(user):
+                changed = True
         return await self._result(user, changed=changed, created=created)
 
     async def revoke(self, telegram_user_id: int, *, force: bool = False) -> SuperuserResult:
@@ -167,6 +172,29 @@ class SuperuserInstaller:
         if name is not None and user.telegram_user_name != name:
             user.telegram_user_name = name
         return user, before, False
+
+    async def _drop_assignments(self, user: User) -> bool:
+        rows = await self._repo.tenant_moderators_of(user.id)
+        for row in rows:
+            await self._session.delete(row)
+            await self._session.flush()
+            await self._audit_logger.record(
+                self._session,
+                AuditEvent(
+                    actor_type="system",
+                    action=ACTION_UNASSIGN,
+                    entity_type="user",
+                    entity_id=user.id,
+                    tenant_id=row.tenant_id,
+                    payload={
+                        "user_id": str(user.id),
+                        "tenant_id": str(row.tenant_id),
+                        "reason": "global_access",
+                    },
+                    result="success",
+                ),
+            )
+        return bool(rows)
 
     async def _ensure_seed(self) -> None:
         stmt = select(Permission.slug).where(Permission.slug.in_(SEED_PERMISSION_SLUGS))

@@ -430,7 +430,7 @@ _ADMIN_SLUGS = (
 async def test_head_permission_catalogue_matches_seed(session: AsyncSession) -> None:
     slugs = set((await session.scalars(text("SELECT slug FROM permissions"))).all())
     assert slugs == SEED_PERMISSION_SLUGS
-    assert len(slugs) == 30
+    assert len(slugs) == 32
     assert set((await session.scalars(text(_ADMIN_SLUGS))).all()) == SEED_PERMISSION_SLUGS
     # The superuser installer refuses to run on an incomplete catalogue: head is complete.
     await SuperuserInstaller(session, cast(Any, None))._ensure_seed()
@@ -460,7 +460,12 @@ def test_proxy_pool_revision_ring(migrated_scratch_db: tuple[str, Query]) -> Non
 _ROLE_LINKS = (
     "SELECT r.slug, p.slug FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
     "JOIN permissions p ON p.id = rp.permission_id WHERE r.slug IN ({roles}) "
-    "AND p.slug IN ('users.manage', 'logs.view') ORDER BY 1, 2"
+    "AND p.slug IN ('users.manage', 'logs.view', 'moderators.manage', 'tenants.manage', "
+    "'bots.manage') ORDER BY 1, 2"
+)
+_ROLE_COUNTS = (
+    "SELECT r.slug, count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id "
+    "WHERE r.slug IN ('admin', 'senior_moderator', 'moderator') GROUP BY 1 ORDER BY 1"
 )
 _CUSTOMER_NAMES = (
     "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('public.{t}') "
@@ -491,8 +496,18 @@ def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query])
 
     def check_head() -> None:
         assert [tuple(r) for r in query(_ROLE_LINKS.format(roles=roles))] == [
+            ("admin", "bots.manage"),
             ("admin", "logs.view"),
+            ("admin", "moderators.manage"),
+            ("admin", "tenants.manage"),
             ("admin", "users.manage"),
+            ("moderator", "bots.manage"),
+            ("senior_moderator", "bots.manage"),
+        ]
+        assert [tuple(r) for r in query(_ROLE_COUNTS)] == [
+            ("admin", 32),
+            ("moderator", 20),
+            ("senior_moderator", 21),
         ]
         assert {r[0] for r in query(_ADMIN_SLUGS)} == SEED_PERMISSION_SLUGS
         assert query("SELECT to_regclass('public.tenant_customers')") == [(None,)]
@@ -502,11 +517,22 @@ def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query])
 
     check_head()
     _alembic(url, command.downgrade, "proxy_pool")
-    assert query("SELECT count(*) FROM permissions WHERE slug = 'logs.view'") == [(0,)]
+    assert query(
+        "SELECT count(*) FROM permissions WHERE slug IN ('logs.view', 'tenants.manage', "
+        "'bots.manage')"
+    ) == [(0,)]
     assert [tuple(r) for r in query(_ROLE_LINKS.format(roles=roles))] == [
+        ("admin", "moderators.manage"),
         ("admin", "users.manage"),
+        ("moderator", "moderators.manage"),
         ("moderator", "users.manage"),
+        ("senior_moderator", "moderators.manage"),
         ("senior_moderator", "users.manage"),
+    ]
+    assert [tuple(r) for r in query(_ROLE_COUNTS)] == [
+        ("admin", 29),
+        ("moderator", 21),
+        ("senior_moderator", 22),
     ]
     assert query("SELECT to_regclass('public.customers')") == [(None,)]
     assert [r[0] for r in query(_CUSTOMER_NAMES.format(t="tenant_customers"))] == (
@@ -544,3 +570,43 @@ def test_staff_permissions_guard_blocks_tenant_overrides(
     query("UPDATE user_permission_overrides SET tenant_id = NULL")  # make it global
     _alembic(url, command.upgrade, "head")
     assert query("SELECT count(*) FROM permissions WHERE slug = 'logs.view'") == [(1,)]
+
+
+@pytest.mark.req("R-II.2")
+def test_staff_permissions_drops_global_access_assignments(
+    migrated_scratch_db: tuple[str, Query],
+) -> None:
+    """Superusers / holders of tenants.view_all lose shop assignments, each audited."""
+    url, query = migrated_scratch_db
+    _alembic(url, command.downgrade, "proxy_pool")
+    shop = "00000000-0000-0000-0000-0000000000a2"
+    query(f"INSERT INTO tenants (id, slug, name) VALUES ('{shop}', 'ga-shop', 'GA')")
+    users = {
+        "super": ("00000000-0000-0000-0000-0000000000c1", 990000011, True, None),
+        "senior": ("00000000-0000-0000-0000-0000000000c2", 990000012, False, "senior_moderator"),
+        "mod": ("00000000-0000-0000-0000-0000000000c3", 990000013, False, "moderator"),
+    }
+    for uid, tg, superuser, role in users.values():
+        query(
+            "INSERT INTO users (id, telegram_user_id, is_superuser) "
+            f"VALUES ('{uid}', {tg}, {str(superuser).lower()})"
+        )
+        if role:
+            query(
+                "INSERT INTO user_roles (id, user_id, role_id) "
+                f"SELECT gen_random_uuid(), '{uid}', id FROM roles WHERE slug = '{role}'"
+            )
+        query(
+            "INSERT INTO tenant_moderators (id, user_id, tenant_id) "
+            f"VALUES (gen_random_uuid(), '{uid}', '{shop}')"
+        )
+    _alembic(url, command.upgrade, "head")
+    assert query("SELECT user_id::text FROM tenant_moderators") == [(users["mod"][0],)]
+    audits = query(
+        "SELECT entity_id::text, actor_type, payload->>'reason', tenant_id::text "
+        "FROM audit_logs WHERE action = 'iam.moderator.unassign' ORDER BY 1"
+    )
+    assert [tuple(r) for r in audits] == [
+        (users["super"][0], "system", "global_access", shop),
+        (users["senior"][0], "system", "global_access", shop),
+    ]

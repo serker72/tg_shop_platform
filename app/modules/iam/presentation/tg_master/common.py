@@ -19,7 +19,7 @@ from dishka.integrations.aiogram import CONTAINER_NAME
 
 from app.core.i18n import gettext as _
 from app.modules.iam.models import Tenant, TenantSettings
-from app.modules.iam.permissions import SETTINGS_MANAGE, USERS_VIEW
+from app.modules.iam.permissions import TENANTS_MANAGE, USERS_VIEW
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
@@ -95,7 +95,7 @@ def parse_uuid(value: Any) -> UUID | None:
 async def load_tenant(
     manager: DialogManager, tenant_id: Any
 ) -> tuple[Tenant, TenantSettings | None] | None:
-    """Tenant + settings if the actor may read it (deleted ones: ``settings.manage`` only)."""
+    """Tenant + settings if the actor may read it (deleted ones: ``tenants.manage`` only)."""
     parsed = parse_uuid(tenant_id)
     if parsed is None:
         return None
@@ -104,7 +104,7 @@ async def load_tenant(
         return None
     snapshot = snapshot_of(manager)
     if found[0].is_deleted:
-        return found if snapshot.decide(SETTINGS_MANAGE).allowed else None
+        return found if snapshot.decide(TENANTS_MANAGE).allowed else None
     return found if in_scope(snapshot, parsed) else None
 
 
@@ -120,6 +120,9 @@ def _error_messages() -> dict[str, str]:
         "system_role_protected": _("Системную роль нельзя изменить."),
         "global_permission_tenant_override": _(
             "Глобальное право нельзя переопределить для магазина."
+        ),
+        "moderator_has_global_access": _(
+            "Сотрудник с доступом ко всем магазинам не привязывается к магазинам."
         ),
         "expires_at_not_in_future": _("Срок действия должен быть в будущем."),
         "invalid_expires_at": _("Некорректный срок действия."),

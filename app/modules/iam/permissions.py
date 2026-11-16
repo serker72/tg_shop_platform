@@ -7,11 +7,16 @@ Permission slugs follow ``{module}.{action}`` (TZ 46.7 names lower-cased, the fi
 ``users`` are staff only (shop customers live in ``customers`` and have no permissions):
 ``users.view`` opens the "Staff" section, ``users.manage`` adds / (de)activates / deletes /
 restores staff (``admin`` only), ``logs.view`` opens the "Logs" section (``admin`` only).
+``settings.manage`` is system parameters only (maintenance, retention, permission cache TTL);
+``tenants.manage`` (global, ``admin`` only) creates / renames / disables / deletes / restores
+shops and edits their settings; ``moderators.manage`` (``admin`` only) assigns moderators
+to shops; ``bots.manage`` (per shop) manages the shop bots.
 
 Roles are global. ``admin`` holds every permission. ``senior_moderator`` and
 ``moderator`` have the same permissions except ``tenants.view_all``: the senior works
 with all shops, the moderator only with the shops assigned in ``tenant_moderators``
-(``moderator`` is derived as ``senior_moderator - {tenants.view_all}``).
+(``moderator`` is derived as ``senior_moderator - {tenants.view_all}``). A staff user with a
+global ``tenants.view_all`` (or a superuser) is never assigned to shops.
 
 "All permissions" of ``admin`` is fixed only by the seed: every permission added by a
 future migration must be granted to ``admin`` explicitly in that migration.
@@ -22,6 +27,7 @@ from __future__ import annotations
 __all__ = [
     "ACCOUNTING_MANAGE",
     "ACCOUNTING_VIEW",
+    "BOTS_MANAGE",
     "CASES_CLOSE",
     "CASES_REFUND",
     "CASES_REPLACE",
@@ -57,6 +63,7 @@ __all__ = [
     "SEED_ROLE_PERMISSIONS",
     "SETTINGS_MANAGE",
     "STATISTICS_VIEW",
+    "TENANTS_MANAGE",
     "TENANTS_VIEW_ALL",
     "USERS_MANAGE",
     "USERS_VIEW",
@@ -95,6 +102,10 @@ TENANTS_VIEW_ALL = "tenants.view_all"
 PROXIES_MANAGE = "proxies.manage"
 #: "Logs" section of the Master Bot (click log / audit); added by ``staff_permissions``.
 LOGS_VIEW = "logs.view"
+#: Shops: create / rename / disable / delete / restore and their settings (global).
+TENANTS_MANAGE = "tenants.manage"
+#: Bots of a shop: add / start / stop / restart / replace token / delete (per shop).
+BOTS_MANAGE = "bots.manage"
 
 #: ``(slug, name)`` rows seeded by the ``iam_rbac`` revision.
 IAM_RBAC_PERMISSIONS: tuple[tuple[str, str], ...] = (
@@ -131,6 +142,8 @@ IAM_RBAC_PERMISSIONS: tuple[tuple[str, str], ...] = (
 LATER_PERMISSIONS: tuple[tuple[str, str], ...] = (
     (PROXIES_MANAGE, "Управление прокси"),  # revision proxy_pool
     (LOGS_VIEW, "Просмотр логов"),  # revision staff_permissions
+    (TENANTS_MANAGE, "Управление магазинами"),  # revision staff_permissions
+    (BOTS_MANAGE, "Управление ботами"),  # revision staff_permissions
 )
 #: The whole permission catalogue at ``head``.
 SEED_PERMISSIONS: tuple[tuple[str, str], ...] = IAM_RBAC_PERMISSIONS + LATER_PERMISSIONS
@@ -142,6 +155,7 @@ GLOBAL_PERMISSIONS: frozenset[str] = frozenset(
     {
         ROLES_MANAGE,
         SETTINGS_MANAGE,
+        TENANTS_MANAGE,
         TENANTS_VIEW_ALL,
         MODERATORS_MANAGE,
         PROXIES_MANAGE,
@@ -185,7 +199,7 @@ _SENIOR_MODERATOR_PERMISSIONS: frozenset[str] = frozenset(
         CASES_CLOSE,
         REVIEWS_MANAGE,
         PREORDERS_MANAGE,
-        MODERATORS_MANAGE,
+        BOTS_MANAGE,
     }
 )
 

@@ -1,10 +1,21 @@
 """staff_permissions
 
-Staff permissions model: ``users.*`` are about staff only. Adds ``logs.view`` granted to
-``admin``; takes ``users.manage`` away from ``senior_moderator`` and ``moderator`` (by slug;
-personal overrides are left as they are; tenant-scoped overrides of ``users.view`` /
-``users.manage``, which become global, stop the upgrade); renames ``tenant_customers`` -> ``customers``
-with every constraint / index following ``NAMING_CONVENTION``.
+Final staff role model (one revision for every permission change of milestone II):
+
+* new permissions: ``logs.view`` (admin), ``tenants.manage`` (global, admin: shops and their
+  settings; ``settings.manage`` keeps system parameters only), ``bots.manage`` (per shop:
+  admin, senior_moderator, moderator);
+* ``users.manage`` and ``moderators.manage`` are taken from ``senior_moderator`` and
+  ``moderator`` (by slug; personal overrides stay);
+* tenant-scoped overrides of ``users.view`` / ``users.manage`` (they become global) stop the
+  upgrade - resolve them by hand;
+* shop assignments (``tenant_moderators``) of superusers and of staff holding a global
+  ``tenants.view_all`` (live role or global allow) are deleted, each with an ``audit_logs``
+  record (``actor_type='system'``, ``iam.moderator.unassign``, reason ``global_access``);
+* ``tenant_customers`` -> ``customers`` with every constraint / index (``NAMING_CONVENTION``).
+
+Downgrade is symmetric except the deleted shop assignments: they are NOT restored (the audit
+records keep them).
 
 Revision ID: staff_permissions
 Revises: proxy_pool
@@ -24,12 +35,19 @@ down_revision: str | None = "proxy_pool"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-LOGS_SLUG = "logs.view"
-LOGS_NAME = "Просмотр логов"
-USERS_MANAGE = "users.manage"
+NEW_PERMISSIONS = (
+    ("logs.view", "Просмотр логов", "('admin')"),
+    ("tenants.manage", "Управление магазинами", "('admin')"),
+    ("bots.manage", "Управление ботами", "('admin', 'senior_moderator', 'moderator')"),
+)
+NEW_SLUGS = "('logs.view', 'tenants.manage', 'bots.manage')"
+#: Taken from the moderator roles by the upgrade.
+REVOKED_SLUGS = "('users.manage', 'moderators.manage')"
 MODERATOR_ROLES = "('senior_moderator', 'moderator')"
 #: Expected number of permissions of the system roles after the upgrade.
-EXPECTED_LINKS = {"senior_moderator": 21, "moderator": 20}
+EXPECTED_LINKS = {"admin": 32, "senior_moderator": 21, "moderator": 20}
+#: ... and after the downgrade (state of ``proxy_pool``).
+DOWNGRADE_LINKS = {"admin": 29, "senior_moderator": 22, "moderator": 21}
 
 OLD_TABLE, NEW_TABLE = "tenant_customers", "customers"
 #: Constraint suffixes (pk, fk x3, uq) and index suffixes (ix x2) of the table.
@@ -66,6 +84,24 @@ def _guard_links(stage: str, expected: dict[str, int]) -> None:
         )
 
 
+_GLOBAL_ASSIGNMENTS = (
+    "SELECT tm.id, tm.user_id, tm.tenant_id FROM tenant_moderators tm "
+    "JOIN users u ON u.id = tm.user_id WHERE u.is_superuser OR (EXISTS ("
+    "SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+    "JOIN role_permissions rp ON rp.role_id = r.id JOIN permissions p ON p.id = rp.permission_id "
+    "WHERE ur.user_id = u.id AND r.is_active AND NOT r.is_deleted AND p.is_active "
+    "AND NOT p.is_deleted AND p.slug = 'tenants.view_all') OR EXISTS ("
+    "SELECT 1 FROM user_permission_overrides o JOIN permissions p ON p.id = o.permission_id "
+    "WHERE o.user_id = u.id AND o.tenant_id IS NULL AND o.is_granted AND p.is_active "
+    "AND NOT p.is_deleted AND p.slug = 'tenants.view_all' "
+    "AND (o.expires_at IS NULL OR o.expires_at > now()))) AND NOT EXISTS ("
+    "SELECT 1 FROM user_permission_overrides d JOIN permissions p ON p.id = d.permission_id "
+    "WHERE d.user_id = u.id AND d.tenant_id IS NULL AND NOT d.is_granted "
+    "AND p.slug = 'tenants.view_all' AND (d.expires_at IS NULL OR d.expires_at > now()) "
+    "AND NOT u.is_superuser)"
+)
+
+
 def upgrade() -> None:
     # users.view / users.manage become global: a tenant-scoped override of them would be
     # silently ignored by the resolver, so refuse to migrate until it is resolved by hand.
@@ -79,19 +115,20 @@ def upgrade() -> None:
         "replace with global overrides (tenant_id IS NULL) before upgrading', n; "
         "END IF; END $$"
     )
-    op.execute(
-        "INSERT INTO permissions (id, slug, name) "
-        f"VALUES (gen_random_uuid(), '{LOGS_SLUG}', '{LOGS_NAME}')"
-    )
-    op.execute(
-        "INSERT INTO role_permissions (role_id, permission_id) "
-        "SELECT r.id, p.id FROM roles r JOIN permissions p "
-        f"ON p.slug = '{LOGS_SLUG}' WHERE r.slug = 'admin'"
-    )
+    for slug, name, roles in NEW_PERMISSIONS:
+        op.execute(
+            "INSERT INTO permissions (id, slug, name) "
+            f"VALUES (gen_random_uuid(), '{slug}', '{name}')"
+        )
+        op.execute(
+            "INSERT INTO role_permissions (role_id, permission_id) "
+            "SELECT r.id, p.id FROM roles r JOIN permissions p "
+            f"ON p.slug = '{slug}' WHERE r.slug IN {roles}"
+        )
     op.execute(
         "DELETE FROM role_permissions rp USING roles r, permissions p "
         "WHERE r.id = rp.role_id AND p.id = rp.permission_id "
-        f"AND p.slug = '{USERS_MANAGE}' AND r.slug IN {MODERATOR_ROLES}"
+        f"AND p.slug IN {REVOKED_SLUGS} AND r.slug IN {MODERATOR_ROLES}"
     )
     # admin holds every permission (permissions.py): fail loudly otherwise.
     op.execute(
@@ -104,6 +141,16 @@ def upgrade() -> None:
         "END IF; END $$"
     )
     _guard_links("upgrade", EXPECTED_LINKS)
+    # Staff with global access sees every shop: drop its assignments, with audit.
+    op.execute(
+        f"WITH gone AS (DELETE FROM tenant_moderators WHERE id IN (SELECT id FROM "
+        f"({_GLOBAL_ASSIGNMENTS}) g) RETURNING user_id, tenant_id) "
+        "INSERT INTO audit_logs (id, created_at, tenant_id, actor_type, action, entity_type, "
+        "entity_id, payload, result) SELECT gen_random_uuid(), now(), tenant_id, 'system', "
+        "'iam.moderator.unassign', 'user', user_id, jsonb_build_object('user_id', user_id, "
+        "'tenant_id', tenant_id, 'reason', 'global_access', 'revision', 'staff_permissions'), "
+        "'success' FROM gone"
+    )
     _rename_table(OLD_TABLE, NEW_TABLE)
 
 
@@ -112,16 +159,13 @@ def downgrade() -> None:
     op.execute(
         "INSERT INTO role_permissions (role_id, permission_id) "
         "SELECT r.id, p.id FROM roles r JOIN permissions p "
-        f"ON p.slug = '{USERS_MANAGE}' WHERE r.slug IN {MODERATOR_ROLES} "
+        f"ON p.slug IN {REVOKED_SLUGS} WHERE r.slug IN {MODERATOR_ROLES} "
         "ON CONFLICT DO NOTHING"
     )
-    op.execute(
-        "DELETE FROM user_permission_overrides WHERE permission_id IN "
-        f"(SELECT id FROM permissions WHERE slug = '{LOGS_SLUG}')"
-    )
-    op.execute(
-        "DELETE FROM role_permissions WHERE permission_id IN "
-        f"(SELECT id FROM permissions WHERE slug = '{LOGS_SLUG}')"
-    )
-    op.execute(f"DELETE FROM permissions WHERE slug = '{LOGS_SLUG}'")
-    _guard_links("downgrade", {role: n + 1 for role, n in EXPECTED_LINKS.items()})
+    for table in ("user_permission_overrides", "role_permissions"):
+        op.execute(
+            f"DELETE FROM {table} WHERE permission_id IN "
+            f"(SELECT id FROM permissions WHERE slug IN {NEW_SLUGS})"
+        )
+    op.execute(f"DELETE FROM permissions WHERE slug IN {NEW_SLUGS}")
+    _guard_links("downgrade", DOWNGRADE_LINKS)

@@ -303,6 +303,23 @@ class IamAdminRepository:
         row, inserted = result.one()
         return row, bool(inserted)
 
+    async def tenant_moderators_of(self, user_id: UUID) -> list[TenantModerator]:
+        """Every shop assignment of the user, locked ``FOR UPDATE``."""
+        stmt = (
+            select(TenantModerator)
+            .where(TenantModerator.user_id == user_id)
+            .order_by(TenantModerator.tenant_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._session.scalars(stmt)).all())
+
+    async def holds_global_view_all(self, user_id: UUID, *, now: datetime) -> bool:
+        """The user holds ``tenants.view_all`` globally (live role or global allow)."""
+        from app.modules.iam.permissions import TENANTS_VIEW_ALL
+
+        return (TENANTS_VIEW_ALL, None) in await self.user_granted_permissions(user_id, now=now)
+
     async def get_tenant_moderator(self, user_id: UUID, tenant_id: UUID) -> TenantModerator | None:
         stmt = select(TenantModerator).where(
             TenantModerator.user_id == user_id, TenantModerator.tenant_id == tenant_id

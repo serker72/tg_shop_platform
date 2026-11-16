@@ -26,7 +26,12 @@ from app.modules.iam.admin_service import (
     TenantAdminService,
     UserAdminService,
 )
-from app.modules.iam.permissions import MODERATORS_MANAGE, SETTINGS_MANAGE, USERS_MANAGE
+from app.modules.iam.permissions import (
+    MODERATORS_MANAGE,
+    TENANTS_MANAGE,
+    TENANTS_VIEW_ALL,
+    USERS_MANAGE,
+)
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
     actor_id,
@@ -47,6 +52,7 @@ from app.modules.iam.presentation.tg_master.common import (
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import StaffSG
+from app.modules.iam.service import PermissionService
 
 __all__ = ["parse_telegram_id", "staff_dialog"]
 
@@ -76,6 +82,18 @@ def _can_moderate(manager: DialogManager) -> bool:
     if snapshot.decide(MODERATORS_MANAGE).allowed:
         return True
     return any(snapshot.decide(MODERATORS_MANAGE, t).allowed for t in snapshot.tenants)
+
+
+async def _has_global_access(manager: DialogManager, user: Any) -> bool:
+    """Superuser / global ``tenants.view_all``: never assigned to shops (the service checks)."""
+    if user.is_superuser:
+        return True
+    try:
+        service = await resolve(manager, PermissionService)
+        snapshot = await service.get_snapshot(user.telegram_user_id)
+    except Exception:  # noqa: BLE001 - display hint only, the service enforces the rule
+        return False
+    return bool(snapshot.decide(TENANTS_VIEW_ALL).allowed)
 
 
 def _user_label(user: Any) -> str:
@@ -142,8 +160,8 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     snapshot = snapshot_of(dialog_manager)
     roles = await queries.user_roles(user.id)
     # Tenant soft-delete keeps ``tenant_moderators`` rows: deleted shops are shown only to
-    # ``settings.manage`` (the same rule as ``load_tenant``), live ones within the scope.
-    see_deleted = snapshot.decide(SETTINGS_MANAGE).allowed
+    # ``tenants.manage`` (the same rule as ``load_tenant``), live ones within the scope.
+    see_deleted = snapshot.decide(TENANTS_MANAGE).allowed
     shops = [
         t
         for t in await queries.user_tenants(user.id)
@@ -172,7 +190,10 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         is_inactive=status and not user.is_active and not user.is_deleted,
         is_live=status and not user.is_deleted,
         is_deleted=status and user.is_deleted,
-        can_moderate=mutable and _can_moderate(dialog_manager) and not user.is_deleted,
+        can_moderate=mutable
+        and _can_moderate(dialog_manager)
+        and not user.is_deleted
+        and not await _has_global_access(dialog_manager, user),
     )
     return {**data, **nav_texts()}
 

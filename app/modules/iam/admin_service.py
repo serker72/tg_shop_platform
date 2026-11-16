@@ -63,7 +63,7 @@ from app.modules.iam.permissions import (
     GLOBAL_PERMISSIONS,
     MODERATORS_MANAGE,
     ROLES_MANAGE,
-    SETTINGS_MANAGE,
+    TENANTS_MANAGE,
     TENANTS_VIEW_ALL,
     USERS_MANAGE,
 )
@@ -92,6 +92,7 @@ __all__ = [
     "INVALID_TENANT_SLUG",
     "LANGUAGE_NOT_FOUND",
     "MODERATOR_ALREADY_ASSIGNED",
+    "MODERATOR_HAS_GLOBAL_ACCESS",
     "MODERATOR_NOT_FOUND",
     "OVERRIDE_NOT_FOUND",
     "PERMISSION_NOT_FOUND",
@@ -133,6 +134,7 @@ __all__ = [
 CONFLICT: Final = "conflict"
 EXPIRES_AT_NOT_IN_FUTURE: Final = "expires_at_not_in_future"
 GLOBAL_PERMISSION_TENANT_OVERRIDE: Final = "global_permission_tenant_override"
+MODERATOR_HAS_GLOBAL_ACCESS: Final = "moderator_has_global_access"
 INVALID_EXPIRES_AT: Final = "invalid_expires_at"
 INVALID_NAME: Final = "invalid_name"
 INVALID_ROLE_SLUG: Final = "invalid_role_slug"
@@ -538,12 +540,12 @@ def _override_state(row: UserPermissionOverride, slug: str) -> dict[str, Any]:
 
 
 class TenantAdminService(_AdminService):
-    """Shops and their settings; every mutation requires ``settings.manage``."""
+    """Shops and their settings; every mutation requires ``tenants.manage``."""
 
     async def create(self, actor_telegram_id: int, *, name: str, slug: str) -> Tenant:
         """Create a tenant together with its ``TenantSettings`` (one transaction)."""
         async with self._transaction():
-            await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
+            await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             name = validate_name(name)
             validate_tenant_slug(slug)
             if await self._repo.tenant_slug_taken(slug):
@@ -566,7 +568,7 @@ class TenantAdminService(_AdminService):
     async def update(self, actor_telegram_id: int, tenant_id: UUID, *, name: str) -> Tenant:
         """Rename a live tenant (the slug is immutable: it is never reused)."""
         async with self._transaction():
-            await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
+            await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             tenant = await self._live_tenant(tenant_id, for_update=True)
             new_name = validate_name(name)
             if tenant.name == new_name:
@@ -593,7 +595,7 @@ class TenantAdminService(_AdminService):
 
     async def _set_active(self, actor_telegram_id: int, tenant_id: UUID, *, active: bool) -> Tenant:
         async with self._transaction():
-            await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
+            await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             tenant = await self._live_tenant(tenant_id, for_update=True)
             if tenant.is_active == active:
                 raise _NoChange
@@ -614,7 +616,7 @@ class TenantAdminService(_AdminService):
 
     async def soft_delete(self, actor_telegram_id: int, tenant_id: UUID) -> None:
         async with self._transaction():
-            await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
+            await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             tenant = await self._live_tenant(tenant_id, for_update=True)
             before = _tenant_state(tenant)
             await BaseRepository(self._session, Tenant).soft_delete(tenant)
@@ -631,7 +633,7 @@ class TenantAdminService(_AdminService):
 
     async def restore(self, actor_telegram_id: int, tenant_id: UUID) -> Tenant:
         async with self._transaction():
-            await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
+            await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             tenant = await self._repo.get_tenant(tenant_id, include_deleted=True, for_update=True)
             if tenant is None:
                 raise EntityNotFoundError("Tenant not found", code=TENANT_NOT_FOUND)
@@ -656,7 +658,7 @@ class TenantAdminService(_AdminService):
     ) -> TenantSettings:
         """Flags, ``default_language_code`` (live language or ``None``) and chat ids."""
         async with self._transaction():
-            await self._authorize(actor_telegram_id, SETTINGS_MANAGE)
+            await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             values = validate_tenant_settings(changes)
             await self._live_tenant(tenant_id)
             settings = await self._repo.get_tenant_settings(tenant_id, for_update=True)
@@ -1032,9 +1034,12 @@ class AccessAdminService(_AdminService):
             )
             if await self._repo.get_user_role(user.id, role.id) is not None:
                 raise EntityAlreadyExistsError("Role already assigned", code=ROLE_ALREADY_ASSIGNED)
+            granted = await self._repo.role_permission_slugs(role.id, live_only=True)
             link = UserRole(user_id=user.id, role_id=role.id, granted_by_id=actor.id)
             self._session.add(link)
             await self._session.flush()
+            if TENANTS_VIEW_ALL in granted:
+                await self._drop_assignments(actor_telegram_id, user)
             await self._audit(
                 actor_telegram_id,
                 "iam.user_role.assign",
@@ -1134,6 +1139,8 @@ class AccessAdminService(_AdminService):
                     else _override_state(row, permission_slug)
                 ),
             )
+            if is_granted and tenant_id is None and permission_slug == TENANTS_VIEW_ALL:
+                await self._drop_assignments(actor_telegram_id, user)
         if self._noop and existing is not None:
             return existing
         await self._invalidate([telegram_user_id])
@@ -1187,6 +1194,7 @@ class AccessAdminService(_AdminService):
             ensure_not_self(actor, user)
             ensure_superuser_protected(actor, user)
             await self._live_tenant(tenant_id)
+            await self._ensure_not_global(user)
             if await self._repo.get_tenant_moderator(user.id, tenant_id) is not None:
                 raise EntityAlreadyExistsError(
                     "Moderator already assigned", code=MODERATOR_ALREADY_ASSIGNED
@@ -1204,6 +1212,33 @@ class AccessAdminService(_AdminService):
             )
         await self._invalidate([telegram_user_id])
         return row
+
+    async def _ensure_not_global(self, user: User) -> None:
+        """A superuser / holder of a global ``tenants.view_all`` sees every shop already."""
+        if user.is_superuser or await self._repo.holds_global_view_all(user.id, now=self._clock()):
+            raise ValidationError(
+                "Staff user with global access is never assigned to shops",
+                code=MODERATOR_HAS_GLOBAL_ACCESS,
+            )
+
+    async def _drop_assignments(self, actor_telegram_id: int, user: User) -> None:
+        """Remove every shop assignment of ``user`` (it got a global ``tenants.view_all``)."""
+        for row in await self._repo.tenant_moderators_of(user.id):
+            await self._session.delete(row)
+            await self._session.flush()
+            await self._audit(
+                actor_telegram_id,
+                "iam.moderator.unassign",
+                entity_type="user",
+                entity_id=user.id,
+                tenant_id=row.tenant_id,
+                before={
+                    "user_id": user.id,
+                    "telegram_user_id": user.telegram_user_id,
+                    "tenant_id": row.tenant_id,
+                    "reason": "global_access",
+                },
+            )
 
     async def unassign_moderator(
         self, actor_telegram_id: int, telegram_user_id: int, tenant_id: UUID

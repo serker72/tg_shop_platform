@@ -416,11 +416,12 @@ def test_seed_permissions() -> None:
     slugs = [slug for slug, _ in SEED_PERMISSIONS]
     # The only place the catalogue size is pinned: 27 TZ 46.7 permissions + tenants.view_all
     # (iam_rbac) + proxies.manage (proxy_pool) + logs.view (staff_permissions).
-    assert len(slugs) == len(set(slugs)) == len(SEED_PERMISSION_SLUGS) == 30
+    assert len(slugs) == len(set(slugs)) == len(SEED_PERMISSION_SLUGS) == 32
     assert GLOBAL_PERMISSIONS <= SEED_PERMISSION_SLUGS
     assert GLOBAL_PERMISSIONS == {
         "roles.manage",
         "settings.manage",
+        "tenants.manage",
         "tenants.view_all",
         "moderators.manage",
         "proxies.manage",
@@ -429,7 +430,12 @@ def test_seed_permissions() -> None:
         "logs.view",
     }
     assert len(IAM_RBAC_PERMISSIONS) == 28
-    assert [s for s, _ in LATER_PERMISSIONS] == ["proxies.manage", "logs.view"]
+    assert [s for s, _ in LATER_PERMISSIONS] == [
+        "proxies.manage",
+        "logs.view",
+        "tenants.manage",
+        "bots.manage",
+    ]
     assert all(re.fullmatch(PERMISSION_SLUG_PATTERN, s) for s in slugs)
     assert all(name.strip() for _, name in SEED_PERMISSIONS)
     assert TENANTS_VIEW_ALL in SEED_PERMISSION_SLUGS
@@ -454,8 +460,11 @@ def test_seed_roles() -> None:
             "payouts.approve",
             "users.manage",
             "logs.view",
+            "tenants.manage",
+            "moderators.manage",
         }
     )
+    assert "bots.manage" in senior
     views = {s for s in SEED_PERMISSION_SLUGS if s.endswith(".view")} - {
         "accounting.view",
         "logs.view",
@@ -466,5 +475,5 @@ def test_seed_roles() -> None:
     assert TENANTS_VIEW_ALL not in moderator
     assert moderator == senior - {TENANTS_VIEW_ALL}
     assert len(moderator) == 20
-    assert len(SEED_ROLE_PERMISSIONS[ROLE_ADMIN]) == 30
+    assert len(SEED_ROLE_PERMISSIONS[ROLE_ADMIN]) == 32
     assert "proxies.manage" not in senior
