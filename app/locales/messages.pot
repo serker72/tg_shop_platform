@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-16 14:35+0300\n"
+"POT-Creation-Date: 2026-11-16 15:18+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -33,6 +33,9 @@ msgstr ""
 msgid "Боты"
 msgstr ""
 
+msgid "Бухгалтерия"
+msgstr ""
+
 msgid ""
 "Введите ID чата числом, например -1001234567890, или «-», чтобы очистить."
 " Бот магазина должен быть участником этого чата."
@@ -43,19 +46,33 @@ msgid ""
 "первом /start."
 msgstr ""
 
+msgid ""
+"Введите slug роли: латиница в нижнем регистре, цифры и «_», начинается с "
+"буквы."
+msgstr ""
+
 msgid "Введите slug: латиница в нижнем регистре, цифры и дефисы, до 64 символов"
 msgstr ""
 
 msgid "Введите название магазина (до 128 символов)"
 msgstr ""
 
+msgid "Введите название новой роли (до 128 символов)."
+msgstr ""
+
 msgid "Введите новое название магазина (до 128 символов)"
+msgstr ""
+
+msgid "Введите новое название роли."
 msgstr ""
 
 msgid "Восстановить"
 msgstr ""
 
 msgid "Выберите язык по умолчанию магазина"
+msgstr ""
+
+msgid "Выплаты"
 msgstr ""
 
 msgid "Глобальное право нельзя переопределить для магазина."
@@ -79,10 +96,16 @@ msgstr ""
 msgid "Деактивировать магазин?"
 msgstr ""
 
+msgid "Деактивировать роль? Её права перестанут действовать."
+msgstr ""
+
 msgid "Деактивировать сотрудника?"
 msgstr ""
 
 msgid "Добавить сотрудника"
+msgstr ""
+
+msgid "Заказы"
 msgstr ""
 
 msgid "Идут технические работы. Попробуйте позже."
@@ -117,6 +140,13 @@ msgstr ""
 msgid "Магазины: {count}"
 msgstr ""
 
+msgid "Модераторы"
+msgstr ""
+
+#, python-brace-format
+msgid "Модуль: {module}. Отметьте права и нажмите «Сохранить»."
+msgstr ""
+
 msgid "Нажмите на магазин, чтобы привязать или отвязать"
 msgstr ""
 
@@ -124,6 +154,9 @@ msgid "Название должно содержать от 1 до 128 симв
 msgstr ""
 
 msgid "Название не должно быть пустым."
+msgstr ""
+
+msgid "Название: от 1 до 128 символов."
 msgstr ""
 
 msgid "Настройки"
@@ -154,6 +187,11 @@ msgid "Некорректный Telegram ID."
 msgstr ""
 
 msgid ""
+"Некорректный slug роли: латиница в нижнем регистре, цифры и «_», "
+"начинается с буквы."
+msgstr ""
+
+msgid ""
 "Некорректный slug: латиница в нижнем регистре, цифры и дефисы, до 64 "
 "символов."
 msgstr ""
@@ -179,6 +217,12 @@ msgstr ""
 msgid "Нужен положительный числовой Telegram ID (до 19 цифр)."
 msgstr ""
 
+msgid "Обращения"
+msgstr ""
+
+msgid "Отзывы"
+msgstr ""
+
 msgid "Панель управления платформой"
 msgstr ""
 
@@ -191,13 +235,40 @@ msgstr ""
 msgid "Покупки включены"
 msgstr ""
 
+msgid "Пользователи"
+msgstr ""
+
 msgid "Пополнение баланса"
+msgstr ""
+
+#, python-brace-format
+msgid "Прав: {count} из {total}"
+msgstr ""
+
+msgid "Права роли"
+msgstr ""
+
+#, python-brace-format
+msgid "Права роли «{name}»: отмечено {count} из {total}."
+msgstr ""
+
+#, python-brace-format
+msgid "Права системной роли «{name}» (только просмотр): {count} из {total}"
 msgstr ""
 
 msgid "Право не найдено."
 msgstr ""
 
+msgid "Предзаказы"
+msgstr ""
+
+msgid "Прокси"
+msgstr ""
+
 msgid "Раздел в разработке"
+msgstr ""
+
+msgid "Рефералы"
 msgstr ""
 
 msgid "Реферальная программа"
@@ -209,6 +280,10 @@ msgstr ""
 msgid "Роли (только просмотр):"
 msgstr ""
 
+#, python-brace-format
+msgid "Роли: {count}"
+msgstr ""
+
 msgid "Роль не назначена."
 msgstr ""
 
@@ -218,10 +293,20 @@ msgstr ""
 msgid "Роль уже назначена."
 msgstr ""
 
+#, python-brace-format
+msgid "Роль: {name}"
+msgstr ""
+
+msgid "Системная роль: набор прав только для просмотра."
+msgstr ""
+
 msgid "Системную роль нельзя изменить."
 msgstr ""
 
 msgid "Создать магазин"
+msgstr ""
+
+msgid "Создать роль"
 msgstr ""
 
 msgid "Сотрудник не найден."
@@ -250,7 +335,13 @@ msgstr ""
 msgid "Сотрудники: {count}"
 msgstr ""
 
+msgid "Сохранить"
+msgstr ""
+
 msgid "Срок действия должен быть в будущем."
+msgstr ""
+
+msgid "Статистика"
 msgstr ""
 
 #, python-brace-format
@@ -266,6 +357,9 @@ msgstr ""
 msgid "Такой сотрудник уже есть."
 msgstr ""
 
+msgid "Товары"
+msgstr ""
+
 msgid "Уведомления"
 msgstr ""
 
@@ -273,6 +367,9 @@ msgid "Удалить"
 msgstr ""
 
 msgid "Удалить магазин? Его можно будет восстановить."
+msgstr ""
+
+msgid "Удалить роль? Она будет снята со всех сотрудников."
 msgstr ""
 
 msgid "Удалить сотрудника? Его роли и привязки к магазинам будут сняты."
@@ -306,10 +403,16 @@ msgstr ""
 msgid "активен"
 msgstr ""
 
+msgid "активна"
+msgstr ""
+
 msgid "глобальный"
 msgstr ""
 
 msgid "да"
+msgstr ""
+
+msgid "деактивирована"
 msgstr ""
 
 msgid "нет"
@@ -319,5 +422,8 @@ msgid "отключён"
 msgstr ""
 
 msgid "удалён"
+msgstr ""
+
+msgid "🔒 — системная роль (набор прав только для просмотра), ⏸ — деактивирована."
 msgstr ""
 

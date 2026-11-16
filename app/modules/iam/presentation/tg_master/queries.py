@@ -2,24 +2,40 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.modules.iam.admin_repository import IamAdminRepository
 from app.modules.iam.models import (
     Language,
+    Permission,
     Role,
+    RolePermission,
     Tenant,
     TenantModerator,
     TenantSettings,
     User,
+    UserPermissionOverride,
     UserRole,
 )
 
-__all__ = ["IamAdminQueries"]
+__all__ = ["IamAdminQueries", "OverrideRow"]
+
+
+@dataclass(frozen=True, slots=True)
+class OverrideRow:
+    """One override of a user with the permission slug and the granting staff member."""
+
+    override: UserPermissionOverride
+    permission_slug: str
+    granted_by_telegram_id: int | None
+    granted_by_username: str | None
+    is_expired: bool
 
 
 class IamAdminQueries:
@@ -93,3 +109,61 @@ class IamAdminQueries:
         return await IamAdminRepository(self._session).holds_global_view_all(
             user.id, now=datetime.now(UTC)
         )
+
+    # --- roles (task 06) ----------------------------------------------------------------
+
+    async def roles(self) -> list[Role]:
+        """Live and deactivated roles (soft-deleted ones are hidden), system roles first."""
+        rows = await self._session.scalars(
+            select(Role)
+            .where(Role.is_deleted.is_(False))
+            .order_by(Role.is_system.desc(), Role.name)
+        )
+        return list(rows)
+
+    async def role(self, role_id: UUID) -> Role | None:
+        return await self._session.scalar(
+            select(Role).where(Role.id == role_id, Role.is_deleted.is_(False))
+        )
+
+    async def role_permission_slugs(self, role_id: UUID) -> frozenset[str]:
+        """Slugs linked to the role (inactive permissions included: the stored set)."""
+        rows = await self._session.scalars(
+            select(Permission.slug)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .where(RolePermission.role_id == role_id)
+        )
+        return frozenset(rows)
+
+    async def user_role_ids(self, user_id: UUID) -> frozenset[UUID]:
+        rows = await self._session.scalars(
+            select(UserRole.role_id).where(UserRole.user_id == user_id)
+        )
+        return frozenset(rows)
+
+    async def user_overrides(self, user_id: UUID) -> list[OverrideRow]:
+        """Overrides of the user (expired ones flagged) with the granting staff member."""
+        granter = aliased(User)
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            select(
+                UserPermissionOverride,
+                Permission.slug,
+                granter.telegram_user_id,
+                granter.telegram_user_name,
+            )
+            .join(Permission, Permission.id == UserPermissionOverride.permission_id)
+            .outerjoin(granter, granter.id == UserPermissionOverride.granted_by_id)
+            .where(UserPermissionOverride.user_id == user_id)
+            .order_by(Permission.slug, UserPermissionOverride.tenant_id.nulls_first())
+        )
+        return [
+            OverrideRow(
+                override=row,
+                permission_slug=slug,
+                granted_by_telegram_id=tg_id,
+                granted_by_username=username,
+                is_expired=row.expires_at is not None and row.expires_at <= now,
+            )
+            for row, slug, tg_id, username in result.tuples()
+        ]

@@ -1,10 +1,10 @@
-"""FSM states of the shops and staff dialogs."""
+"""FSM states of the shops, staff and roles dialogs."""
 
 from __future__ import annotations
 
 from aiogram.fsm.state import State, StatesGroup
 
-__all__ = ["StaffSG", "TenantsSG"]
+__all__ = ["RolesSG", "StaffSG", "TenantsSG"]
 
 
 class TenantsSG(StatesGroup):
@@ -25,4 +25,14 @@ class StaffSG(StatesGroup):
     add = State()
     card = State()
     tenants = State()
+    confirm = State()
+
+
+class RolesSG(StatesGroup):
+    list = State()
+    card = State()
+    create_name = State()
+    create_slug = State()
+    rename = State()
+    permissions = State()
     confirm = State()
