@@ -1,6 +1,7 @@
 #!/bin/sh
 # db_update: wait for PostgreSQL -> alembic upgrade head -> platform setup
-# (system_settings singleton, never overwritten) -> monitoring role (pg_monitor) for
+# (system_settings singleton, never overwritten) -> permission cache invalidation
+# (best-effort) -> monitoring role (pg_monitor) for
 # the Alloy postgres exporter -> sync pg_partman retention.
 # The role goes before the retention sync so monitoring is ready as early as possible.
 # POSIX sh only (docker-compose: command ["sh", "ops/scripts/migrate.sh"]).
@@ -22,6 +23,11 @@ alembic upgrade head
 # cwd is the project root (cd above), so "python -m app..." resolves the package.
 log "platform setup"
 python -m app.entrypoints.cli.setup
+
+# Migrations may change permissions / role links: drop cached snapshots (INCR perms:gen).
+# Best-effort: an unreachable Redis is a warning, the CLI always exits 0.
+log "invalidate permission cache"
+python -m app.entrypoints.cli.invalidate_permissions || log "WARNING: permission cache not invalidated"
 
 # Cluster-wide read-only role for Alloy (prometheus.exporter.postgres); skipped when
 # POSTGRES_MONITORING_PASSWORD is empty. The password is never printed.

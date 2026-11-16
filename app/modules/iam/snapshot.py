@@ -126,6 +126,8 @@ class PermissionSnapshot:
         Tenant-scoped overrides of :data:`GLOBAL_PERMISSIONS` are rejected by the write
         service; the resolver ignores them as well (defense in depth): such a row can only
         come from a bug or a manual database edit and must never narrow a global permission.
+        For permissions that became global later (``users.view`` / ``users.manage`` in the
+        ``staff_permissions`` revision) existing rows are blocked by the migration guard.
         """
         if self.user_id is None:
             return Decision(allowed=False, source=DecisionSource.UNKNOWN_USER)

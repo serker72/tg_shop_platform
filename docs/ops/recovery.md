@@ -133,8 +133,14 @@ docker run --rm --network "${PROJECT_NAME}_default" \
 ## 4. Migrations / config
 
 ```bash
-make migrate     # init-dirs + db_update: wait_for_db → alembic upgrade head → setup → sync retention
+make migrate     # init-dirs + db_update: wait_for_db → alembic upgrade head → setup → сброс кэша прав → sync retention
 ```
+
+После `setup` `migrate.sh` сбрасывает кэш снимков прав в Redis
+(`python -m app.entrypoints.cli.invalidate_permissions`, `INCR perms:gen`): миграция могла
+изменить справочник прав или права ролей, а Master Bot иначе видел бы старые права до
+истечения TTL снимка. Шаг best-effort: недоступный Redis — предупреждение в логе
+`db_update`, код возврата 0 (кэш тогда устареет не более чем на TTL).
 
 `db_update` идемпотентен: на восстановленной БД применяет только миграции новее дампа,
 `system_settings` не перезаписывает, синхронизирует retention pg_partman с настройками.

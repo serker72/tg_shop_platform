@@ -180,6 +180,7 @@ def test_migrate_sh_on_empty_database(settings: Settings, scratch_db: tuple[str,
         assert "[migrate] alembic upgrade head" in result.stderr
         assert "[migrate] platform setup" in result.stderr
         assert "platform_setup_done" in result.stdout
+        assert "[migrate] invalidate permission cache" in result.stderr
         assert "[migrate] done" in result.stderr
     head = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
     assert head is not None

@@ -2,7 +2,8 @@
 
 Staff permissions model: ``users.*`` are about staff only. Adds ``logs.view`` granted to
 ``admin``; takes ``users.manage`` away from ``senior_moderator`` and ``moderator`` (by slug;
-personal overrides are left as they are); renames ``tenant_customers`` -> ``customers``
+personal overrides are left as they are; tenant-scoped overrides of ``users.view`` /
+``users.manage``, which become global, stop the upgrade); renames ``tenant_customers`` -> ``customers``
 with every constraint / index following ``NAMING_CONVENTION``.
 
 Revision ID: staff_permissions
@@ -66,6 +67,18 @@ def _guard_links(stage: str, expected: dict[str, int]) -> None:
 
 
 def upgrade() -> None:
+    # users.view / users.manage become global: a tenant-scoped override of them would be
+    # silently ignored by the resolver, so refuse to migrate until it is resolved by hand.
+    op.execute(
+        "DO $$ DECLARE n bigint; BEGIN "
+        "SELECT count(*) INTO n FROM user_permission_overrides o "
+        "JOIN permissions p ON p.id = o.permission_id "
+        "WHERE o.tenant_id IS NOT NULL AND p.slug IN ('users.view', 'users.manage'); "
+        "IF n <> 0 THEN RAISE EXCEPTION 'staff_permissions: % tenant-scoped overrides of "
+        "users.view/users.manage exist; these permissions become global - delete them or "
+        "replace with global overrides (tenant_id IS NULL) before upgrading', n; "
+        "END IF; END $$"
+    )
     op.execute(
         "INSERT INTO permissions (id, slug, name) "
         f"VALUES (gen_random_uuid(), '{LOGS_SLUG}', '{LOGS_NAME}')"

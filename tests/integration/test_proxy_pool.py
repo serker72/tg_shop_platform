@@ -19,6 +19,7 @@ import pytest
 from alembic import command
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import ProxySettings
@@ -513,3 +514,33 @@ def test_staff_permissions_revision_ring(migrated_scratch_db: tuple[str, Query])
     )
     _alembic(url, command.upgrade, "head")
     check_head()
+
+
+@pytest.mark.req("R-II.2")
+def test_staff_permissions_guard_blocks_tenant_overrides(
+    migrated_scratch_db: tuple[str, Query],
+) -> None:
+    """users.view/users.manage become global: tenant-scoped overrides stop the upgrade."""
+    url, query = migrated_scratch_db
+    _alembic(url, command.downgrade, "proxy_pool")
+    query(
+        "INSERT INTO tenants (id, slug, name) "
+        "VALUES ('00000000-0000-0000-0000-0000000000a1', 'guard-shop', 'Guard')"
+    )
+    query(
+        "INSERT INTO users (id, telegram_user_id) "
+        "VALUES ('00000000-0000-0000-0000-0000000000b1', 990000001)"
+    )
+    query(
+        "INSERT INTO user_permission_overrides (id, user_id, permission_id, tenant_id, is_granted) "
+        "SELECT gen_random_uuid(), '00000000-0000-0000-0000-0000000000b1', p.id, "
+        "'00000000-0000-0000-0000-0000000000a1', true FROM permissions p "
+        "WHERE p.slug = 'users.manage'"
+    )
+    with pytest.raises(DBAPIError, match="tenant-scoped overrides of users.view/users.manage"):
+        _alembic(url, command.upgrade, "head")
+    assert query("SELECT count(*) FROM permissions WHERE slug = 'logs.view'") == [(0,)]
+    assert query("SELECT to_regclass('public.tenant_customers')") != [(None,)]
+    query("UPDATE user_permission_overrides SET tenant_id = NULL")  # make it global
+    _alembic(url, command.upgrade, "head")
+    assert query("SELECT count(*) FROM permissions WHERE slug = 'logs.view'") == [(1,)]
