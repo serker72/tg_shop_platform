@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.iam.admin_repository import IamAdminRepository
 from app.modules.iam.models import (
     Language,
     Role,
@@ -82,3 +84,12 @@ class IamAdminQueries:
             .order_by(Tenant.name)
         )
         return list(rows)
+
+    async def has_global_access(self, user: User) -> bool:
+        """Superuser or a global ``tenants.view_all`` (live role / global allow, a global deny
+        wins) - the same rule as ``AccessAdminService`` uses to refuse shop assignments."""
+        if user.is_superuser:
+            return True
+        return await IamAdminRepository(self._session).holds_global_view_all(
+            user.id, now=datetime.now(UTC)
+        )

@@ -452,6 +452,7 @@ async def test_settings_manage_alone_does_not_manage_tenants(
 
 
 @pytest.mark.parametrize("kind", ["senior", "superuser"])
+@pytest.mark.req("R-II.2", "R-II.4")
 async def test_global_access_is_never_assigned_to_shops(
     session: AsyncSession, services: dict[str, Any], kind: str
 ) -> None:
@@ -472,6 +473,7 @@ async def test_global_access_is_never_assigned_to_shops(
     assert await _assignments(session, target.id) == 0
 
 
+@pytest.mark.req("R-II.2", "R-II.4")
 async def test_senior_role_drops_assignments_with_audit(
     session: AsyncSession, services: dict[str, Any]
 ) -> None:
@@ -491,6 +493,7 @@ async def test_senior_role_drops_assignments_with_audit(
     assert [(a["reason"], a["tenant_id"]) for a in audits] == [("global_access", str(shop.id))]
 
 
+@pytest.mark.req("R-II.2", "R-II.4")
 async def test_global_view_all_override_drops_assignments(
     session: AsyncSession, services: dict[str, Any]
 ) -> None:
@@ -512,6 +515,7 @@ async def test_global_view_all_override_drops_assignments(
     assert info.value.code == svc.MODERATOR_HAS_GLOBAL_ACCESS
 
 
+@pytest.mark.req("R-II.2", "R-II.4")
 async def test_superuser_grant_drops_assignments(
     session: AsyncSession, services: dict[str, Any], perms: PermissionService
 ) -> None:
@@ -532,3 +536,86 @@ async def test_superuser_grant_drops_assignments(
         )
     )
     assert actors.all() == ["system"]
+
+
+# --- every path to a global tenants.view_all drops shop assignments (review F1/F2) ----
+
+
+async def _moderated(
+    session: AsyncSession, services: dict[str, Any], admin: Ref
+) -> tuple[Ref, Ref]:
+    shop = await _shop(services, admin)
+    target = await make_user(session, role=ROLE_MODERATOR)
+    await services["access"].assign_moderator(
+        admin.telegram_user_id, target.telegram_user_id, shop.id
+    )
+    return target, shop
+
+
+async def _custom_role(services: dict[str, Any], admin: Ref, *slugs: str) -> uuid.UUID:
+    role = await services["role"].create(
+        admin.telegram_user_id, name="Custom", slug=f"r_{uuid.uuid4().hex[:8]}"
+    )
+    role_uuid: uuid.UUID = role.id
+    await services["role"].set_permissions(admin.telegram_user_id, role_uuid, list(slugs))
+    return role_uuid
+
+
+@pytest.mark.req("R-II.2", "R-II.4")
+async def test_role_gaining_view_all_drops_assignments(
+    session: AsyncSession, services: dict[str, Any]
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    role = await _custom_role(services, admin, PRODUCTS_VIEW)
+    target, shop = await _moderated(session, services, admin)
+    await services["access"].assign_role(admin.telegram_user_id, target.telegram_user_id, role)
+    assert await _assignments(session, target.id) == 1
+    await services["role"].set_permissions(
+        admin.telegram_user_id, role, [PRODUCTS_VIEW, TENANTS_VIEW_ALL]
+    )
+    assert await _assignments(session, target.id) == 0
+    audits = await _unassign_audits(session, target.id)
+    assert [(a["reason"], a["tenant_id"]) for a in audits] == [("global_access", str(shop.id))]
+
+
+@pytest.mark.req("R-II.2", "R-II.4")
+async def test_role_activation_with_view_all_drops_assignments(
+    session: AsyncSession, services: dict[str, Any]
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    role = await _custom_role(services, admin, PRODUCTS_VIEW)
+    target = await make_user(session, role=ROLE_MODERATOR)
+    await services["access"].assign_role(admin.telegram_user_id, target.telegram_user_id, role)
+    await services["role"].deactivate(admin.telegram_user_id, role)
+    await services["role"].set_permissions(
+        admin.telegram_user_id, role, [PRODUCTS_VIEW, TENANTS_VIEW_ALL]
+    )
+    shop = await _shop(services, admin)
+    await services["access"].assign_moderator(
+        admin.telegram_user_id, target.telegram_user_id, shop.id
+    )  # inactive role: no global access yet
+    assert await _assignments(session, target.id) == 1
+    await services["role"].activate(admin.telegram_user_id, role)
+    assert await _assignments(session, target.id) == 0
+    assert [a["reason"] for a in await _unassign_audits(session, target.id)] == ["global_access"]
+
+
+@pytest.mark.req("R-II.2", "R-II.4")
+async def test_global_deny_keeps_assignments_until_removed(
+    session: AsyncSession, services: dict[str, Any]
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    target, shop = await _moderated(session, services, admin)
+    tg = target.telegram_user_id
+    await services["access"].upsert_override(
+        admin.telegram_user_id, tg, TENANTS_VIEW_ALL, is_granted=False
+    )
+    await services["access"].assign_role(
+        admin.telegram_user_id, tg, await role_id(session, ROLE_SENIOR_MODERATOR)
+    )
+    assert await _assignments(session, target.id) == 1  # deny wins: no global access
+    assert await _unassign_audits(session, target.id) == []
+    await services["access"].remove_override(admin.telegram_user_id, tg, TENANTS_VIEW_ALL)
+    assert await _assignments(session, target.id) == 0
+    audits = await _unassign_audits(session, target.id)
+    assert [(a["reason"], a["tenant_id"]) for a in audits] == [("global_access", str(shop.id))]

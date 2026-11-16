@@ -473,6 +473,44 @@ class _AdminService:
             await self._session.rollback()
             raise
 
+    async def _drop_assignments(self, actor_telegram_id: int, user: User) -> bool:
+        """Remove every shop assignment of ``user`` (it got a global ``tenants.view_all``)."""
+        rows = await self._repo.tenant_moderators_of(user.id)
+        for row in rows:
+            await self._session.delete(row)
+            await self._session.flush()
+            await self._audit(
+                actor_telegram_id,
+                "iam.moderator.unassign",
+                entity_type="user",
+                entity_id=user.id,
+                tenant_id=row.tenant_id,
+                before={
+                    "user_id": user.id,
+                    "telegram_user_id": user.telegram_user_id,
+                    "tenant_id": row.tenant_id,
+                    "reason": "global_access",
+                },
+            )
+        return bool(rows)
+
+    async def _drop_global_assignments(
+        self, actor_telegram_id: int, users: Iterable[User]
+    ) -> list[int]:
+        """Every path to a global ``tenants.view_all``: drop shop assignments of those users
+        who hold it now (superuser, live role or global allow, a global deny wins) - in the
+        current transaction, each audited. Returns Telegram ids whose assignments changed."""
+        now = self._clock()
+        touched: list[int] = []
+        for user in users:
+            if not user.is_superuser and not await self._repo.holds_global_view_all(
+                user.id, now=now
+            ):
+                continue
+            if await self._drop_assignments(actor_telegram_id, user):
+                touched.append(user.telegram_user_id)
+        return touched
+
     async def _invalidate(self, users: Iterable[int] = (), *, everything: bool = False) -> bool:
         """AFTER commit only; sets and returns :attr:`cache_invalidated` (no retry)."""
         if self._noop:
@@ -965,6 +1003,12 @@ class RoleAdminService(_AdminService):
                 before=before,
                 after=_role_state(role),
             )
+            if active and TENANTS_VIEW_ALL in await self._repo.role_permission_slugs(
+                role.id, live_only=True
+            ):
+                await self._drop_global_assignments(
+                    actor_telegram_id, await self._repo.role_users(role.id)
+                )
         await self._invalidate(everything=True)
         return role
 
@@ -1008,6 +1052,10 @@ class RoleAdminService(_AdminService):
                 before={"permissions": before},
                 after={"permissions": after},
             )
+            if TENANTS_VIEW_ALL in after - before and role.is_active:
+                await self._drop_global_assignments(
+                    actor_telegram_id, await self._repo.role_users(role.id)
+                )
         await self._invalidate(everything=True)
         return after
 
@@ -1034,12 +1082,11 @@ class AccessAdminService(_AdminService):
             )
             if await self._repo.get_user_role(user.id, role.id) is not None:
                 raise EntityAlreadyExistsError("Role already assigned", code=ROLE_ALREADY_ASSIGNED)
-            granted = await self._repo.role_permission_slugs(role.id, live_only=True)
             link = UserRole(user_id=user.id, role_id=role.id, granted_by_id=actor.id)
             self._session.add(link)
             await self._session.flush()
-            if TENANTS_VIEW_ALL in granted:
-                await self._drop_assignments(actor_telegram_id, user)
+            # Decided by the effective rights (a global deny of tenants.view_all wins).
+            await self._drop_global_assignments(actor_telegram_id, [user])
             await self._audit(
                 actor_telegram_id,
                 "iam.user_role.assign",
@@ -1140,7 +1187,7 @@ class AccessAdminService(_AdminService):
                 ),
             )
             if is_granted and tenant_id is None and permission_slug == TENANTS_VIEW_ALL:
-                await self._drop_assignments(actor_telegram_id, user)
+                await self._drop_global_assignments(actor_telegram_id, [user])
         if self._noop and existing is not None:
             return existing
         await self._invalidate([telegram_user_id])
@@ -1183,6 +1230,9 @@ class AccessAdminService(_AdminService):
                 tenant_id=tenant_id,
                 before=before,
             )
+            if tenant_id is None and permission_slug == TENANTS_VIEW_ALL and not row.is_granted:
+                # The global deny is gone: a role may grant tenants.view_all again.
+                await self._drop_global_assignments(actor_telegram_id, [user])
         await self._invalidate([telegram_user_id])
 
     async def assign_moderator(
@@ -1219,25 +1269,6 @@ class AccessAdminService(_AdminService):
             raise ValidationError(
                 "Staff user with global access is never assigned to shops",
                 code=MODERATOR_HAS_GLOBAL_ACCESS,
-            )
-
-    async def _drop_assignments(self, actor_telegram_id: int, user: User) -> None:
-        """Remove every shop assignment of ``user`` (it got a global ``tenants.view_all``)."""
-        for row in await self._repo.tenant_moderators_of(user.id):
-            await self._session.delete(row)
-            await self._session.flush()
-            await self._audit(
-                actor_telegram_id,
-                "iam.moderator.unassign",
-                entity_type="user",
-                entity_id=user.id,
-                tenant_id=row.tenant_id,
-                before={
-                    "user_id": user.id,
-                    "telegram_user_id": user.telegram_user_id,
-                    "tenant_id": row.tenant_id,
-                    "reason": "global_access",
-                },
             )
 
     async def unassign_moderator(

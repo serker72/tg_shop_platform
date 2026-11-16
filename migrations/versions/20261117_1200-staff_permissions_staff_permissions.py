@@ -146,10 +146,11 @@ def upgrade() -> None:
         f"WITH gone AS (DELETE FROM tenant_moderators WHERE id IN (SELECT id FROM "
         f"({_GLOBAL_ASSIGNMENTS}) g) RETURNING user_id, tenant_id) "
         "INSERT INTO audit_logs (id, created_at, tenant_id, actor_type, action, entity_type, "
-        "entity_id, payload, result) SELECT gen_random_uuid(), now(), tenant_id, 'system', "
-        "'iam.moderator.unassign', 'user', user_id, jsonb_build_object('user_id', user_id, "
-        "'tenant_id', tenant_id, 'reason', 'global_access', 'revision', 'staff_permissions'), "
-        "'success' FROM gone"
+        "entity_id, payload, result) SELECT gen_random_uuid(), now(), g.tenant_id, 'system', "
+        "'iam.moderator.unassign', 'user', g.user_id, jsonb_build_object('user_id', g.user_id, "
+        "'telegram_user_id', u.telegram_user_id, 'tenant_id', g.tenant_id, "
+        "'reason', 'global_access', 'revision', 'staff_permissions'), "
+        "'success' FROM gone g JOIN users u ON u.id = g.user_id"
     )
     _rename_table(OLD_TABLE, NEW_TABLE)
 

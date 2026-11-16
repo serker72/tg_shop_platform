@@ -29,7 +29,6 @@ from app.modules.iam.admin_service import (
 from app.modules.iam.permissions import (
     MODERATORS_MANAGE,
     TENANTS_MANAGE,
-    TENANTS_VIEW_ALL,
     USERS_MANAGE,
 )
 from app.modules.iam.presentation.tg_master.common import (
@@ -52,7 +51,6 @@ from app.modules.iam.presentation.tg_master.common import (
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import StaffSG
-from app.modules.iam.service import PermissionService
 
 __all__ = ["parse_telegram_id", "staff_dialog"]
 
@@ -86,14 +84,8 @@ def _can_moderate(manager: DialogManager) -> bool:
 
 async def _has_global_access(manager: DialogManager, user: Any) -> bool:
     """Superuser / global ``tenants.view_all``: never assigned to shops (the service checks)."""
-    if user.is_superuser:
-        return True
-    try:
-        service = await resolve(manager, PermissionService)
-        snapshot = await service.get_snapshot(user.telegram_user_id)
-    except Exception:  # noqa: BLE001 - display hint only, the service enforces the rule
-        return False
-    return bool(snapshot.decide(TENANTS_VIEW_ALL).allowed)
+    queries = await resolve(manager, IamAdminQueries)
+    return await queries.has_global_access(user)
 
 
 def _user_label(user: Any) -> str:
@@ -210,6 +202,13 @@ async def tenants_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
             "tenants": [],
             **nav_texts(),
         }
+    if await _has_global_access(dialog_manager, user):
+        # Forged callback: the card hides the button, the service refuses anyway.
+        return {
+            "text": compose(dialog_manager, error_text("moderator_has_global_access")),
+            "tenants": [],
+            **nav_texts(),
+        }
     assigned = {t.id for t in await queries.user_tenants(user.id)}
     service = await resolve(dialog_manager, TenantAdminService)
     tenants = await service.list_tenants(actor_id(dialog_manager))
@@ -323,6 +322,10 @@ async def on_tenant(
         set_notice(manager, error_text("tenant_not_found" if user else "user_not_found"))
         return
     actor, tenant_id = actor_id(manager), found[0].id
+    assigned = tenant_id in {t.id for t in await queries.user_tenants(user.id)}
+    if not assigned and await _has_global_access(manager, user):
+        set_notice(manager, error_text("moderator_has_global_access"))
+        return
     if tenant_id in {t.id for t in await queries.user_tenants(user.id)}:
         await mutate(
             manager, AccessAdminService, lambda s: s.unassign_moderator(actor, target, tenant_id)

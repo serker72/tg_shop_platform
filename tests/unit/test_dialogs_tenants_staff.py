@@ -45,7 +45,6 @@ from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME, error_
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
 from app.modules.iam.presentation.tg_master.tenants import parse_chat_id, parse_name, parse_slug
-from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError, ValidationError
 
@@ -129,18 +128,11 @@ class FakeQueries:
     async def user_roles(self, user_id: UUID) -> list[str]:
         return ["Модератор"]
 
+    async def has_global_access(self, user: Any) -> bool:
+        return bool(user.is_superuser) or user.telegram_user_id in self.env.global_access
+
     async def user_tenants(self, user_id: UUID) -> list[Any]:
         return list(self.env.moderated.get(user_id, []))
-
-
-class FakePermissions:
-    """Snapshots of the TARGET staff users (card hints); unknown -> no permissions."""
-
-    def __init__(self) -> None:
-        self.snapshots: dict[int, PermissionSnapshot] = {}
-
-    async def get_snapshot(self, telegram_user_id: int) -> PermissionSnapshot:
-        return self.snapshots.get(telegram_user_id, PermissionSnapshot(user_id=uuid4()))
 
 
 class FakeContainer:
@@ -187,10 +179,9 @@ class Env:
         self.user_service = Recorder(add_by_telegram_id=self._add_user)
         self.access = Recorder()
         self.queries = FakeQueries(self)
-        self.permissions = FakePermissions()
+        self.global_access: set[int] = set()
         container = FakeContainer(
             {
-                PermissionService: self.permissions,
                 TenantAdminService: self.tenants,
                 UserAdminService: self.user_service,
                 AccessAdminService: self.access,
@@ -691,10 +682,26 @@ async def test_staff_shops_button_hidden_for_global_access(kind: str) -> None:
         staff.is_superuser = True
     env = Env(SUPER, [_tenant("Shop A", "shop-a")], users=[staff])
     if kind == "senior":
-        env.permissions.snapshots[321] = PermissionSnapshot(
-            user_id=staff.id, role_permissions={TENANTS_VIEW_ALL: frozenset({"senior"})}
-        )
+        env.global_access.add(321)
     await env.start()
     await env.press("Сотрудники")
     await env.press("— (321)")
     assert ("Магазины сотрудника" in env.buttons()) is (kind == "moderator")
+
+
+@R4
+async def test_forged_staff_shops_of_global_access_user_show_nothing() -> None:
+    """Forged callback to the assignment window of a senior: no shop list, no service call."""
+    shop = _tenant("Shop A", "shop-a")
+    staff = _user(321)
+    env = Env(SUPER, [shop], users=[staff])
+    env.global_access.add(321)
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press("— (321)")
+    assert "Магазины сотрудника" not in env.buttons()
+    await env.forge("deactivate", "deactivate", "u_tenants")
+    assert "доступом ко всем магазинам" in env.text()
+    assert "Shop A" not in env.text()
+    assert ("list_tenants", ACTOR) not in env.tenants.calls
+    assert env.access.calls == []

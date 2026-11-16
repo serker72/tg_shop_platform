@@ -303,6 +303,18 @@ class IamAdminRepository:
         row, inserted = result.one()
         return row, bool(inserted)
 
+    async def role_users(self, role_id: UUID) -> list[User]:
+        """Live users holding the role, locked ``FOR UPDATE`` (stable order)."""
+        stmt = (
+            select(User)
+            .join(UserRole, UserRole.user_id == User.id)
+            .where(UserRole.role_id == role_id, User.is_deleted.is_(False))
+            .order_by(User.id)
+            .with_for_update(of=User)
+            .execution_options(populate_existing=True)
+        )
+        return list((await self._session.scalars(stmt)).all())
+
     async def tenant_moderators_of(self, user_id: UUID) -> list[TenantModerator]:
         """Every shop assignment of the user, locked ``FOR UPDATE``."""
         stmt = (

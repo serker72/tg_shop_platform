@@ -572,7 +572,7 @@ def test_staff_permissions_guard_blocks_tenant_overrides(
     assert query("SELECT count(*) FROM permissions WHERE slug = 'logs.view'") == [(1,)]
 
 
-@pytest.mark.req("R-II.2")
+@pytest.mark.req("R-II.2", "R-II.4")
 def test_staff_permissions_drops_global_access_assignments(
     migrated_scratch_db: tuple[str, Query],
 ) -> None:
@@ -603,10 +603,11 @@ def test_staff_permissions_drops_global_access_assignments(
     _alembic(url, command.upgrade, "head")
     assert query("SELECT user_id::text FROM tenant_moderators") == [(users["mod"][0],)]
     audits = query(
-        "SELECT entity_id::text, actor_type, payload->>'reason', tenant_id::text "
+        "SELECT entity_id::text, actor_type, payload->>'reason', tenant_id::text, "
+        "(payload->>'telegram_user_id')::bigint "
         "FROM audit_logs WHERE action = 'iam.moderator.unassign' ORDER BY 1"
     )
     assert [tuple(r) for r in audits] == [
-        (users["super"][0], "system", "global_access", shop),
-        (users["senior"][0], "system", "global_access", shop),
+        (users["super"][0], "system", "global_access", shop, users["super"][1]),
+        (users["senior"][0], "system", "global_access", shop, users["senior"][1]),
     ]
