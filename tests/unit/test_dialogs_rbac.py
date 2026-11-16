@@ -14,6 +14,13 @@ from uuid import uuid4
 import pytest
 from aiogram_dialog.widgets.kbd.calendar_kbd import raw_from_date
 
+from app.modules.iam.effective_permissions import (
+    EffectivePermission,
+    EffectivePermissionsReport,
+    OverrideRef,
+    RoleRef,
+    UserStatus,
+)
 from app.modules.iam.permissions import (
     LOGS_VIEW,
     PRODUCTS_CREATE,
@@ -23,6 +30,7 @@ from app.modules.iam.permissions import (
     USERS_VIEW,
 )
 from app.modules.iam.presentation.tg_master.common import error_text
+from app.modules.iam.presentation.tg_master.effective import PAGE_LIMIT, paginate
 from app.modules.iam.presentation.tg_master.overrides import end_of_day, parse_reason
 from app.modules.iam.presentation.tg_master.queries import OverrideRow
 from app.modules.iam.presentation.tg_master.roles import (
@@ -32,7 +40,7 @@ from app.modules.iam.presentation.tg_master.roles import (
     module_titles,
     parse_role_slug,
 )
-from app.modules.iam.snapshot import PermissionSnapshot
+from app.modules.iam.snapshot import DecisionSource, PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
 from tests.unit._master_bot_env import (
     ACTOR,
@@ -480,3 +488,165 @@ def test_override_helpers() -> None:
     for bad in ("", "   ", "x" * 501):
         with pytest.raises(ValueError):
             parse_reason(bad)
+
+
+# --- effective permissions (part 3) ------------------------------------------------------
+
+
+def _entry(
+    slug: str,
+    source: DecisionSource,
+    *,
+    allowed: bool = True,
+    tenant: Any = None,
+    roles: tuple[RoleRef, ...] = (),
+    override: OverrideRef | None = None,
+) -> EffectivePermission:
+    return EffectivePermission(
+        permission_slug=slug,
+        tenant_id=tenant,
+        allowed=allowed,
+        source=source,
+        roles=roles,
+        override=override,
+    )
+
+
+def _report(
+    *entries: EffectivePermission,
+    tenants: tuple[Any, ...] = (),
+    expired: tuple[EffectivePermission, ...] = (),
+    superuser: bool = False,
+) -> EffectivePermissionsReport:
+    return EffectivePermissionsReport(
+        telegram_user_id=STAFF,
+        status=UserStatus.ACTIVE,
+        is_superuser=superuser,
+        roles=(RoleRef("support", "Поддержка"),),
+        tenants=tenants,
+        permissions=entries,
+        expired_overrides=expired,
+    )
+
+
+async def _effective(env: Env) -> None:
+    await _staff_card(env)
+    await env.press("Фактические права")
+
+
+@SCENARIO
+async def test_effective_shows_role_and_override_sources() -> None:
+    boss = _user(777)
+    boss.telegram_user_name = "boss"
+    env = Env(STAFF_READER, users=[_user(STAFF), boss])
+    until = datetime(2030, 1, 2, 23, 59, 59, tzinfo=UTC)
+    ref = OverrideRef(
+        is_granted=False,
+        tenant_id=None,
+        expires_at=until,
+        granted_by_user_id=boss.id,
+        reason="аудит",
+    )
+    gone = OverrideRef(
+        is_granted=True, tenant_id=None, expires_at=until, granted_by_user_id=None, reason=None
+    )
+    env.reports[STAFF] = _report(
+        _entry(PRODUCTS_VIEW, DecisionSource.ROLE, roles=(RoleRef("support", "Поддержка"),)),
+        _entry(LOGS_VIEW, DecisionSource.OVERRIDE_DENY_GLOBAL, allowed=False, override=ref),
+        expired=(_entry(ROLES_MANAGE, DecisionSource.NOT_GRANTED, override=gone),),
+    )
+    await _effective(env)
+    text = env.text()
+    assert "Статус: активен" in text
+    assert "✅ Просмотр товаров — роль: Поддержка" in text
+    assert "⛔ Просмотр логов — персонально: запрещено" in text
+    assert "до 2030-01-02 23:59 UTC" in text and "@boss (777)" in text and "аудит" in text
+    assert text.index("Истёкшие") < text.index("⌛ Управление ролями")
+
+
+@SCENARIO
+async def test_effective_shop_in_scope_and_forged_foreign_shop() -> None:
+    own, foreign = _tenant("Shop A", "shop-a"), _tenant("Shop B", "shop-b")
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        role_permissions={USERS_VIEW: frozenset({"r"})},
+        tenants=frozenset({own.id}),
+    )
+    env = Env(snapshot, [own, foreign], visible=[own], users=[_user(STAFF)])
+    env.reports[STAFF] = _report(
+        _entry(PRODUCTS_VIEW, DecisionSource.ROLE, roles=(RoleRef("support", "Поддержка"),)),
+        _entry(
+            PRODUCTS_VIEW,
+            DecisionSource.NO_TENANT_ACCESS,
+            allowed=False,
+            tenant=foreign.id,
+        ),
+        _entry(PRODUCTS_VIEW, DecisionSource.ROLE, tenant=own.id, roles=(RoleRef("s", "Sup"),)),
+        tenants=(own.id, foreign.id),
+    )
+    await _effective(env)
+    await env.press("Права в магазине")
+    assert "Shop A (shop-a)" in env.buttons() and "Shop B (shop-b)" not in env.buttons()
+    await env.forge(str(own.id), str(own.id), str(foreign.id))
+    assert error_text("tenant_not_found") in env.text()
+    assert "Shop B" not in env.text()
+    await env.press("Shop A (shop-a)")
+    assert "Магазин: Shop A (shop-a)" in env.text()
+    assert "✅ Просмотр товаров — роль: Sup" in env.text()
+    assert "нет доступа к магазину" not in env.text()
+
+
+@SCENARIO
+async def test_effective_superuser_has_all_permissions() -> None:
+    env = Env(SUPER, users=[_user(STAFF)])
+    env.reports[STAFF] = _report(_entry("*", DecisionSource.SUPERUSER), superuser=True)
+    await _effective(env)
+    assert "Все права (суперпользователь)" in env.text()
+
+
+@R4
+async def test_forged_effective_without_users_view_shows_nothing() -> None:
+    env = Env(SUPER, users=[_user(STAFF)])
+    env.reports[STAFF] = _report(_entry(PRODUCTS_VIEW, DecisionSource.ROLE))
+    await _staff_card(env)
+    env.snapshot = ROLES_ADMIN  # roles.manage without users.view
+    await env.forge("u_card_back", "u_card_back", "u_eff")
+    assert env.permissions.calls == []
+    await env.start()
+    env.snapshot = SUPER
+    await _effective(env)
+    env.snapshot = ROLES_ADMIN
+    env.permissions.calls.clear()
+    await env.forge("ef_shops", "ef_shops", "ef_shops")
+    assert env.permissions.calls == []
+    assert "Просмотр товаров" not in env.text()
+
+
+@SCENARIO
+async def test_effective_long_report_is_paged_below_telegram_limit() -> None:
+    env = Env(SUPER, users=[_user(STAFF)])
+    ref = OverrideRef(
+        is_granted=True, tenant_id=None, expires_at=None, granted_by_user_id=None, reason="x" * 400
+    )
+    entries = tuple(
+        _entry(slug, DecisionSource.OVERRIDE_ALLOW_GLOBAL, override=ref)
+        for slug, _name in SEED_PERMISSIONS
+    )
+    env.reports[STAFF] = _report(*entries)
+    await _effective(env)
+    seen = [env.text()]
+    assert "Страница 1 из" in seen[0]
+    while "›" in env.buttons():
+        await env.press("›")
+        seen.append(env.text())
+    assert len(seen) > 1 and all(len(page) < 4096 for page in seen)
+    assert sum(page.count("✅") for page in seen) == len(SEED_PERMISSIONS)
+    await env.press("‹")
+    assert f"Страница {len(seen) - 1} из {len(seen)}" in env.text()
+
+
+def test_paginate_limits() -> None:
+    pages = paginate(["a" * 10] * 5, limit=25)
+    assert pages == ["a" * 10 + "\n" + "a" * 10] * 2 + ["a" * 10]
+    assert paginate([]) == [""]
+    assert len(paginate(["b" * (PAGE_LIMIT + 50)])[0]) == PAGE_LIMIT

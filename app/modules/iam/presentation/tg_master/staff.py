@@ -53,7 +53,7 @@ from app.modules.iam.presentation.tg_master.common import (
     status_text,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
-from app.modules.iam.presentation.tg_master.states import OverridesSG, StaffSG
+from app.modules.iam.presentation.tg_master.states import EffectiveSG, OverridesSG, StaffSG
 
 __all__ = ["parse_telegram_id", "staff_dialog"]
 
@@ -144,6 +144,8 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         "is_deleted": False,
         "can_moderate": False,
         "can_roles": False,
+        "has_user": False,
+        "btn_effective": _("Фактические права"),
         "btn_tenants": _("Магазины сотрудника"),
         "btn_roles": _("Роли сотрудника"),
         "btn_overrides": _("Персональные права"),
@@ -193,6 +195,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         is_live=status and not user.is_deleted,
         is_deleted=status and user.is_deleted,
         can_roles=mutable and _can_roles(dialog_manager) and not user.is_deleted,
+        has_user=True,
         can_moderate=mutable
         and _can_moderate(dialog_manager)
         and not user.is_deleted
@@ -399,6 +402,13 @@ async def on_role(callback: CallbackQuery, widget: Any, manager: DialogManager, 
         add_notice(manager, _("Привязки к магазинам сняты: у роли доступ ко всем магазинам."))
 
 
+async def on_effective(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    """Effective permissions: reading needs ``users.view`` (checked by the guard)."""
+    target = await _target_or_back(callback, manager)
+    if target is not None:
+        await manager.start(EffectiveSG.list, data={"user_id": str(target)})
+
+
 async def on_overrides(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
     target = await _target_or_back(callback, manager)
     if target is None:
@@ -461,6 +471,9 @@ def staff_dialog() -> Dialog:
                     id="u_tenants",
                     state=StaffSG.tenants,
                     when="can_moderate",
+                ),
+                Button(
+                    Format("{btn_effective}"), id="u_eff", on_click=on_effective, when="has_user"
                 ),
                 SwitchTo(
                     Format("{btn_roles}"), id="u_roles", state=StaffSG.roles, when="can_roles"

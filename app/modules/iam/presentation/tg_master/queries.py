@@ -167,3 +167,12 @@ class IamAdminQueries:
             )
             for row, slug, tg_id, username in result.tuples()
         ]
+
+    async def user_brief(self, user_id: UUID) -> tuple[int, str | None] | None:
+        """Telegram id and username of a user by the internal id (soft-deleted included)."""
+        row = (
+            await self._session.execute(
+                select(User.telegram_user_id, User.telegram_user_name).where(User.id == user_id)
+            )
+        ).first()
+        return None if row is None else (row[0], row[1])

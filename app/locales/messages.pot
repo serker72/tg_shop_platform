@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-16 15:25+0300\n"
+"POT-Creation-Date: 2026-11-16 15:33+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -76,6 +76,12 @@ msgid "Восстановить"
 msgstr ""
 
 msgid "Все магазины"
+msgstr ""
+
+msgid "Все права (суперпользователь)."
+msgstr ""
+
+msgid "Выберите магазин."
 msgstr ""
 
 msgid "Выберите модуль."
@@ -155,6 +161,9 @@ msgstr ""
 msgid "Изменить"
 msgstr ""
 
+msgid "Истёкшие персональные права:"
+msgstr ""
+
 msgid "Истёкшие:"
 msgstr ""
 
@@ -169,6 +178,10 @@ msgstr ""
 
 #, python-brace-format
 msgid "Магазин: {name}"
+msgstr ""
+
+#, python-brace-format
+msgid "Магазин: {name} ({slug})"
 msgstr ""
 
 msgid "Магазины"
@@ -268,6 +281,12 @@ msgstr ""
 msgid "Обращения"
 msgstr ""
 
+msgid "Общие (все магазины):"
+msgstr ""
+
+msgid "Общие права"
+msgstr ""
+
 msgid "Отзывы"
 msgstr ""
 
@@ -298,6 +317,9 @@ msgstr ""
 
 #, python-brace-format
 msgid "Прав: {count} из {total}"
+msgstr ""
+
+msgid "Права в магазине"
 msgstr ""
 
 msgid "Права роли"
@@ -370,6 +392,10 @@ msgstr ""
 msgid "Роли: {count}"
 msgstr ""
 
+#, python-brace-format
+msgid "Роли: {names}"
+msgstr ""
+
 msgid "Роль не назначена."
 msgstr ""
 
@@ -396,6 +422,12 @@ msgid "Создать роль"
 msgstr ""
 
 msgid "Сотрудник не найден."
+msgstr ""
+
+msgid ""
+"Сотрудник не привязан к этому магазину и не имеет в нём персональных "
+"прав: в магазине действуют только общие права при доступе ко всем "
+"магазинам."
 msgstr ""
 
 msgid "Сотрудник не привязан к этому магазину."
@@ -441,6 +473,10 @@ msgstr ""
 msgid "Статус: {status}"
 msgstr ""
 
+#, python-brace-format
+msgid "Страница {page} из {total}"
+msgstr ""
+
 msgid "Суперпользователь"
 msgstr ""
 
@@ -476,6 +512,13 @@ msgstr ""
 
 #, python-brace-format
 msgid "Удалённые магазины: {count}"
+msgstr ""
+
+msgid "Фактические права"
+msgstr ""
+
+#, python-brace-format
+msgid "Фактические права сотрудника {id}"
 msgstr ""
 
 msgid "Чат новостей"
@@ -534,10 +577,32 @@ msgstr ""
 msgid "истекло"
 msgstr ""
 
+msgid "магазин вне вашей области"
+msgstr ""
+
+msgid "не выдано"
+msgstr ""
+
+msgid "не найден"
+msgstr ""
+
 msgid "нет"
 msgstr ""
 
+msgid "нет доступа к магазину"
+msgstr ""
+
 msgid "отключён"
+msgstr ""
+
+msgid "отключён — прав нет"
+msgstr ""
+
+#, python-brace-format
+msgid "персонально: {effect}"
+msgstr ""
+
+msgid "пользователь не найден или отключён"
 msgstr ""
 
 #, python-brace-format
@@ -547,7 +612,17 @@ msgstr ""
 msgid "разрешено"
 msgstr ""
 
+#, python-brace-format
+msgid "роль: {names}"
+msgstr ""
+
+msgid "суперпользователь"
+msgstr ""
+
 msgid "удалён"
+msgstr ""
+
+msgid "удалён — прав нет"
 msgstr ""
 
 msgid "🔒 — системная роль (набор прав только для просмотра), ⏸ — деактивирована."

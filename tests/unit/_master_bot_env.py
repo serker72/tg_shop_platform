@@ -37,6 +37,7 @@ from app.modules.iam.permissions import (
 )
 from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
+from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
 
@@ -151,9 +152,28 @@ class FakeQueries:
         self.calls.append("user_overrides")
         return list(self.env.overrides.get(user_id, []))
 
+    async def user_brief(self, user_id: UUID) -> tuple[int, str | None] | None:
+        self.calls.append("user_brief")
+        for user in self.env.users.values():
+            if user.id == user_id:
+                return user.telegram_user_id, user.telegram_user_name
+        return None
+
     async def role_permission_slugs(self, role_id: UUID) -> frozenset[str]:
         self.calls.append("role_permission_slugs")
         return self.env.role_perms.get(role_id, frozenset())
+
+
+class FakePermissionService:
+    """``effective_permissions`` returns the prepared report of ``env.reports``."""
+
+    def __init__(self, env: Env) -> None:
+        self.env = env
+        self.calls: list[int] = []
+
+    async def effective_permissions(self, telegram_user_id: int) -> Any:
+        self.calls.append(telegram_user_id)
+        return self.env.reports[telegram_user_id]
 
 
 class FakeContainer:
@@ -202,6 +222,8 @@ class Env:
         self.access = Recorder()
         self.role_store: dict[UUID, SimpleNamespace] = {r.id: r for r in roles or []}
         self.user_roles: dict[UUID, set[UUID]] = {}
+        self.reports: dict[int, Any] = {}
+        self.permissions = FakePermissionService(self)
         self.overrides: dict[UUID, list[Any]] = {}
         self.role_perms: dict[UUID, frozenset[str]] = {r.id: frozenset() for r in roles or []}
         self.roles = Recorder(
@@ -220,6 +242,7 @@ class Env:
                 UserAdminService: self.user_service,
                 AccessAdminService: self.access,
                 RoleAdminService: self.roles,
+                PermissionService: self.permissions,
                 IamAdminQueries: self.queries,
             }
         )

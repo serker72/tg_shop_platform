@@ -4,7 +4,7 @@ click-log through ``LogBuffer`` into ``user_activity`` and files (task 04)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,12 +24,17 @@ from app.entrypoints.master_bot.middlewares import (
     TEXT_MARKER,
     ClickLogMiddleware,
 )
-from app.modules.iam.admin_service import TenantAdminService
+from app.modules.iam.admin_service import (
+    AccessAdminService,
+    RoleAdminService,
+    TenantAdminService,
+)
 from app.modules.iam.ioc import IamProvider
 from app.modules.iam.models import Tenant, TenantSettings
 from app.modules.iam.models import User as IamUser
-from app.modules.iam.permissions import USERS_VIEW
+from app.modules.iam.permissions import LOGS_VIEW, PRODUCTS_VIEW, USERS_VIEW
 from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
+from app.modules.iam.presentation.tg_master.effective import general_getter
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import TenantsSG
 from app.modules.iam.presentation.tg_master.tenants import card_getter, on_slug
@@ -214,3 +219,43 @@ async def test_dialog_reads_leave_session_clean(
             ids["superuser"], tenant.id, {"is_store_open": not before}
         )
         assert settings.is_store_open is (not before)
+
+
+@pytest.mark.req("R-II.4")
+async def test_effective_permissions_view_real_db(
+    container: AsyncContainer, clean_db: AsyncEngine, redis_client: Any
+) -> None:
+    """Role + assignment + override through the real services, then the read queries and
+    the effective permissions getter of the dialog show the sources."""
+    ids = await _create_users(clean_db)
+    actor, target = ids["superuser"], ids["plain"]
+    until = datetime.now(UTC).replace(microsecond=0) + timedelta(days=5)
+    async with container() as request:
+        roles = await request.get(RoleAdminService)
+        role = await roles.create(actor, name="Поддержка", slug=f"support_{uuid4().hex[:6]}")
+        role_id = role.id
+        await roles.set_permissions(actor, role_id, {PRODUCTS_VIEW})
+    async with container() as request:
+        access = await request.get(AccessAdminService)
+        await access.assign_role(actor, target, role_id)
+        await access.upsert_override(
+            actor, target, LOGS_VIEW, is_granted=True, expires_at=until, reason="дежурство"
+        )
+    async with container() as request:
+        queries = await request.get(IamAdminQueries)
+        user = await queries.user(target)
+        assert user is not None
+        assert await queries.user_role_ids(user.id) == frozenset({role_id})
+        (row,) = await queries.user_overrides(user.id)
+        assert row.permission_slug == LOGS_VIEW and not row.is_expired
+        assert row.granted_by_telegram_id == actor and row.override.reason == "дежурство"
+        assert await queries.user_brief(user.id) == (target, None)
+        manager = _manager(request, actor)
+        manager.start_data = {"user_id": str(target)}
+        manager.dialog_data = {}
+        page = await general_getter(manager)
+    text = page["text"]
+    assert "Роли: Поддержка" in text
+    assert "✅ Просмотр товаров — роль: Поддержка" in text
+    assert "✅ Просмотр логов — персонально: разрешено" in text
+    assert f"выдал: {actor}" in text and "дежурство" in text
