@@ -900,6 +900,23 @@ class RoleAdminService(_AdminService):
             raise ValidationError(f"Unknown permissions: {missing}", code=PERMISSION_NOT_FOUND)
         return {slug: p.id for slug, p in found.items()}
 
+    async def _resolve_kept_permissions(
+        self, slugs: Collection[str], held: frozenset[str]
+    ) -> dict[str, UUID]:
+        """Like :meth:`_resolve_permissions`, but a permission the role already holds stays
+        allowed even when it is inactive / soft-deleted: saving a role must not fail or
+        drop it. Adding a new non-live permission is still refused."""
+        wanted = validate_permission_slugs(slugs)
+        found = {slug: p.id for slug, p in (await self._repo.live_permissions(wanted)).items()}
+        for slug in sorted((wanted - found.keys()) & held):
+            row = await self._repo.get_permission_by_slug(slug)
+            if row is not None:
+                found[slug] = row.id
+        missing = sorted(wanted - found.keys())
+        if missing:
+            raise ValidationError(f"Unknown permissions: {missing}", code=PERMISSION_NOT_FOUND)
+        return found
+
     async def create(
         self,
         actor_telegram_id: int,
@@ -1037,8 +1054,8 @@ class RoleAdminService(_AdminService):
             await self._authorize(actor_telegram_id, ROLES_MANAGE)
             role = await self._role(role_id)
             ensure_system_role_mutable(role, "set permissions")
-            permissions = await self._resolve_permissions(permission_slugs)
             before = await self._repo.role_permission_slugs(role.id)
+            permissions = await self._resolve_kept_permissions(permission_slugs, before)
             after = frozenset(permissions)
             if before == after:
                 raise _NoChange

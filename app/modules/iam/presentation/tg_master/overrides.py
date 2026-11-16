@@ -159,8 +159,9 @@ def _page(manager: DialogManager, *lines: str, **data: Any) -> dict[str, Any]:
 
 
 def _key(row: OverrideRow) -> str:
-    tenant_id = row.override.tenant_id
-    return f"{row.permission_slug}|{'' if tenant_id is None else tenant_id}"
+    """Button id of an override: its row id (a slug + shop id may exceed the 64 bytes of
+    Telegram ``callback_data``)."""
+    return str(row.override.id)
 
 
 def _effect(granted: bool) -> str:

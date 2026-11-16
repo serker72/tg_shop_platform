@@ -165,7 +165,7 @@ class IamAdminQueries:
                 granted_by_username=username,
                 is_expired=row.expires_at is not None and row.expires_at <= now,
             )
-            for row, slug, tg_id, username in result.tuples()
+            for row, slug, tg_id, username in result.all()
         ]
 
     async def user_brief(self, user_id: UUID) -> tuple[int, str | None] | None:
@@ -176,3 +176,12 @@ class IamAdminQueries:
             )
         ).first()
         return None if row is None else (row[0], row[1])
+
+    async def live_permission_slugs(self) -> frozenset[str]:
+        """Slugs of live (``is_active AND NOT is_deleted``) permissions."""
+        rows = await self._session.scalars(
+            select(Permission.slug).where(
+                Permission.is_active.is_(True), Permission.is_deleted.is_(False)
+            )
+        )
+        return frozenset(rows)

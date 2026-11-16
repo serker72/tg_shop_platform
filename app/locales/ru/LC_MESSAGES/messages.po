@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-16 15:33+0300\n"
+"POT-Creation-Date: 2026-11-16 15:44+0300\n"
 "PO-Revision-Date: 2026-11-15 20:44+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -224,6 +224,11 @@ msgstr ""
 msgid "Настройки магазина"
 msgstr ""
 
+msgid ""
+"Не редактируются здесь (неактивные или вне справочника), сохраняются как "
+"есть:"
+msgstr ""
+
 msgid "Не удалось выполнить действие, повторите попытку."
 msgstr ""
 
@@ -415,6 +420,10 @@ msgid "Системная роль: набор прав только для пр
 msgstr ""
 
 msgid "Системную роль нельзя изменить."
+msgstr ""
+
+#, python-brace-format
+msgid "Снять роль «{name}» с сотрудника?"
 msgstr ""
 
 msgid "Создать магазин"

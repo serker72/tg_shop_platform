@@ -33,6 +33,7 @@ from app.modules.iam.admin_service import (
 )
 from app.modules.iam.permissions import (
     LOGS_VIEW,
+    SEED_PERMISSION_SLUGS,
     USERS_VIEW,
 )
 from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
@@ -152,6 +153,9 @@ class FakeQueries:
         self.calls.append("user_overrides")
         return list(self.env.overrides.get(user_id, []))
 
+    async def live_permission_slugs(self) -> frozenset[str]:
+        return self.env.live_slugs
+
     async def user_brief(self, user_id: UUID) -> tuple[int, str | None] | None:
         self.calls.append("user_brief")
         for user in self.env.users.values():
@@ -162,6 +166,25 @@ class FakeQueries:
     async def role_permission_slugs(self, role_id: UUID) -> frozenset[str]:
         self.calls.append("role_permission_slugs")
         return self.env.role_perms.get(role_id, frozenset())
+
+
+#: Telegram limit of ``InlineKeyboardButton.callback_data`` (bytes).
+CALLBACK_DATA_LIMIT = 64
+
+
+class CheckedMessageManager(MockMessageManager):
+    """Fails a test as soon as a rendered button carries ``callback_data`` longer than the
+    Telegram limit (Telegram rejects such a keyboard with ``BUTTON_DATA_INVALID``)."""
+
+    async def show_message(self, bot: Any, new_message: Any, old_message: Any) -> Any:
+        markup = new_message.reply_markup
+        for row in getattr(markup, "inline_keyboard", None) or []:
+            for button in row:
+                data = button.callback_data or ""
+                assert len(data.encode()) <= CALLBACK_DATA_LIMIT, (
+                    f"callback_data too long: {data!r}"
+                )
+        return await super().show_message(bot, new_message, old_message)
 
 
 class FakePermissionService:
@@ -223,6 +246,7 @@ class Env:
         self.role_store: dict[UUID, SimpleNamespace] = {r.id: r for r in roles or []}
         self.user_roles: dict[UUID, set[UUID]] = {}
         self.reports: dict[int, Any] = {}
+        self.live_slugs: frozenset[str] = SEED_PERMISSION_SLUGS
         self.permissions = FakePermissionService(self)
         self.overrides: dict[UUID, list[Any]] = {}
         self.role_perms: dict[UUID, frozenset[str]] = {r.id: frozenset() for r in roles or []}
@@ -259,7 +283,7 @@ class Env:
         dispatcher = Dispatcher(storage=MemoryStorage())
         dispatcher.update.outer_middleware(inject)
         dispatcher.include_router(build_menu_router())
-        self.messages = MockMessageManager()  # type: ignore[no-untyped-call]
+        self.messages = CheckedMessageManager()  # type: ignore[no-untyped-call]
         setup_dialogs(dispatcher, message_manager=self.messages)
         self.client = BotClient(dispatcher, user_id=ACTOR, chat_id=ACTOR)
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from operator import itemgetter
 from typing import Any
+from uuid import UUID
 
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
@@ -93,6 +94,20 @@ async def _has_global_access(manager: DialogManager, user: Any) -> bool:
 
 def _can_roles(manager: DialogManager) -> bool:
     return snapshot_of(manager).decide(ROLES_MANAGE).allowed
+
+
+async def _roles_user(manager: DialogManager) -> Any:
+    """Target of role / override management, the server side of ``can_roles``: staff read
+    access and ``roles.manage``, not the actor, not a superuser, not soft-deleted."""
+    if not _allowed(manager) or not _can_roles(manager):
+        return None
+    target = _target(manager)
+    if target is None or target == actor_id(manager):
+        return None
+    user = await (await resolve(manager, IamAdminQueries)).user(target)
+    if user is None or user.is_superuser or user.is_deleted:
+        return None
+    return user
 
 
 def _user_label(user: Any) -> str:
@@ -236,17 +251,10 @@ async def tenants_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
 
 
 async def roles_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
-    if not _allowed(dialog_manager) or not _can_roles(dialog_manager):
-        return _denied(dialog_manager, roles=[])
-    target = _target(dialog_manager)
-    queries = await resolve(dialog_manager, IamAdminQueries)
-    user = await queries.user(target) if target is not None else None
+    user = await _roles_user(dialog_manager)
     if user is None:
-        return {
-            "text": compose(dialog_manager, error_text("user_not_found")),
-            "roles": [],
-            **nav_texts(),
-        }
+        return _denied(dialog_manager, roles=[])
+    queries = await resolve(dialog_manager, IamAdminQueries)
     assigned = await queries.user_role_ids(user.id)
     roles = [r for r in await queries.roles() if r.is_active or r.id in assigned]
     prompt = _("Роли сотрудника {id}. Нажмите на роль, чтобы назначить или снять её.")
@@ -272,6 +280,9 @@ async def confirm_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
     questions = {
         "delete": _("Удалить сотрудника? Его роли и привязки к магазинам будут сняты."),
         "deactivate": _("Деактивировать сотрудника?"),
+        "revoke_role": _("Снять роль «{name}» с сотрудника?").format(
+            name=dialog_manager.dialog_data.get("role_name", "")
+        ),
     }
     action = str(dialog_manager.dialog_data.get("confirm", ""))
     return {"text": compose(dialog_manager, questions.get(action, "")), **nav_texts()}
@@ -336,6 +347,11 @@ async def on_confirm(callback: CallbackQuery, button: Button, manager: DialogMan
     target = await _target_or_back(callback, manager)
     if target is None:
         return
+    if action == "revoke_role":
+        manager.dialog_data.pop("role_name", None)
+        await _revoke_role(manager, target, parse_uuid(manager.dialog_data.pop("role_id", None)))
+        await manager.switch_to(StaffSG.roles)
+        return
     actor = actor_id(manager)
     if action == "delete":
         await mutate(manager, UserAdminService, lambda s: s.soft_delete(actor, target))
@@ -375,23 +391,25 @@ async def on_tenant(
 
 
 async def on_role(callback: CallbackQuery, widget: Any, manager: DialogManager, item: str) -> None:
+    """Assign at once; revoking an assigned role asks for confirmation."""
     target = await _target_or_back(callback, manager)
     if target is None:
         return
-    if not _can_roles(manager):
+    user = await _roles_user(manager)
+    if user is None:
         set_notice(manager, denied_text())
         return
     role_id = parse_uuid(item)
     queries = await resolve(manager, IamAdminQueries)
-    user = await queries.user(target)
     role = await queries.role(role_id) if role_id is not None else None
-    if user is None or role is None:
-        set_notice(manager, error_text("role_not_found" if user else "user_not_found"))
+    if role is None:
+        set_notice(manager, error_text("role_not_found"))
+        return
+    if role.id in await queries.user_role_ids(user.id):
+        manager.dialog_data.update(confirm="revoke_role", role_id=str(role.id), role_name=role.name)
+        await manager.switch_to(StaffSG.confirm)
         return
     actor, picked = actor_id(manager), role.id
-    if picked in await queries.user_role_ids(user.id):
-        await mutate(manager, AccessAdminService, lambda s: s.revoke_role(actor, target, picked))
-        return
     # The service drops shop assignments when the role brings tenants.view_all.
     before = {t.id for t in await queries.user_tenants(user.id)}
     outcome = await mutate(
@@ -400,6 +418,14 @@ async def on_role(callback: CallbackQuery, widget: Any, manager: DialogManager, 
     after = {t.id for t in await queries.user_tenants(user.id)}
     if outcome.ok and before - after:
         add_notice(manager, _("Привязки к магазинам сняты: у роли доступ ко всем магазинам."))
+
+
+async def _revoke_role(manager: DialogManager, target: int, role_id: UUID | None) -> None:
+    if role_id is None or await _roles_user(manager) is None:
+        set_notice(manager, denied_text())
+        return
+    actor, picked = actor_id(manager), role_id
+    await mutate(manager, AccessAdminService, lambda s: s.revoke_role(actor, target, picked))
 
 
 async def on_effective(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
@@ -413,7 +439,7 @@ async def on_overrides(callback: CallbackQuery, button: Button, manager: DialogM
     target = await _target_or_back(callback, manager)
     if target is None:
         return
-    if not _can_roles(manager):
+    if await _roles_user(manager) is None:
         await callback.answer(denied_text())
         return
     await manager.start(OverridesSG.list, data={"user_id": str(target)})

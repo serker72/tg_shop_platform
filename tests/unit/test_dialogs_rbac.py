@@ -22,10 +22,12 @@ from app.modules.iam.effective_permissions import (
     UserStatus,
 )
 from app.modules.iam.permissions import (
+    ACCOUNTING_MANAGE,
     LOGS_VIEW,
     PRODUCTS_CREATE,
     PRODUCTS_VIEW,
     ROLES_MANAGE,
+    SEED_PERMISSION_SLUGS,
     SEED_PERMISSIONS,
     USERS_VIEW,
 )
@@ -289,6 +291,9 @@ async def test_assign_and_revoke_staff_role() -> None:
     assert ("assign_role", ACTOR, STAFF, role.id) in env.access.calls
     assert "Готово." in env.text() and "✅ Custom (custom)" in env.buttons()
     await env.press("✅ Custom (custom)")
+    assert "Снять роль «Custom» с сотрудника?" in env.text()
+    assert not any(call[0] == "revoke_role" for call in env.access.calls)
+    await env.press("Да")
     assert ("revoke_role", ACTOR, STAFF, role.id) in env.access.calls
     assert "▫️ Custom (custom)" in env.buttons()
 
@@ -335,7 +340,7 @@ async def test_forged_staff_roles_and_overrides_without_roles_manage() -> None:
 def _row(slug: str, *, granted: bool, expired: bool = False, tenant: Any = None) -> OverrideRow:
     when = datetime.now(UTC) + timedelta(days=-1 if expired else 3)
     override = SimpleNamespace(
-        tenant_id=tenant, is_granted=granted, expires_at=when, reason="аудит"
+        id=uuid4(), tenant_id=tenant, is_granted=granted, expires_at=when, reason="аудит"
     )
     return OverrideRow(
         override=cast(Any, override),
@@ -650,3 +655,78 @@ def test_paginate_limits() -> None:
     assert pages == ["a" * 10 + "\n" + "a" * 10] * 2 + ["a" * 10]
     assert paginate([]) == [""]
     assert len(paginate(["b" * (PAGE_LIMIT + 50)])[0]) == PAGE_LIMIT
+
+
+# --- review fixes ------------------------------------------------------------------------
+
+
+@R4
+async def test_tenant_override_with_long_slug_fits_callback_limit() -> None:
+    """``callback_data`` of an override button is its row id (env checks <= 64 bytes)."""
+    staff, shop = _user(STAFF), _tenant("Shop A", "shop-a")
+    env = Env(SUPER, [shop], users=[staff])
+    env.overrides[staff.id] = [_row(ACCOUNTING_MANAGE, granted=True, tenant=shop.id)]
+    await _overrides(env)
+    await env.press("Управление бухгалтерией · Shop A")
+    assert "accounting.manage" in env.text()
+    await env.press("Удалить")
+    await env.press("Да")
+    assert ("remove_override", ACTOR, STAFF, ACCOUNTING_MANAGE, shop.id) in env.access.calls
+
+
+@SCENARIO
+async def test_save_keeps_inactive_and_unknown_permissions() -> None:
+    role = make_role("Custom", "custom")
+    env = Env(ROLES_ADMIN, roles=[role])
+    env.role_perms[role.id] = frozenset({PRODUCTS_VIEW, LOGS_VIEW, "legacy.export"})
+    env.live_slugs = SEED_PERMISSION_SLUGS - {LOGS_VIEW}
+    await _open_card(env, "Custom \\(custom\\)")
+    await env.press("Права роли")
+    assert "Не редактируются здесь" in env.text()
+    assert "legacy.export" in env.text() and "Просмотр логов (logs.view)" in env.text()
+    await env.press("▫️ Создание товаров")
+    await env.press(r".*Логи \d/1", regex=True)
+    assert not any(b.startswith(("✅", "▫️")) for b in env.buttons())  # logs.view is inactive
+    await env.press("Сохранить")
+    assert env.roles.calls == [
+        (
+            "set_permissions",
+            ACTOR,
+            role.id,
+            frozenset({PRODUCTS_VIEW, PRODUCTS_CREATE, LOGS_VIEW, "legacy.export"}),
+        )
+    ]
+
+
+@R4
+async def test_forged_checkbox_toggle_without_roles_manage_closes_dialog() -> None:
+    role = make_role("Custom", "custom")
+    env = Env(ROLES_ADMIN, roles=[role])
+    await _open_card(env, "Custom \\(custom\\)")
+    await env.press("Права роли")
+    env.snapshot = VIEWER
+    env.queries.calls.clear()
+    await env.forge("r_perms", "r_perms", "r_perms")
+    assert env.roles.calls == []
+    assert not {"role", "role_permission_slugs"} & set(env.queries.calls)
+    assert "Custom" not in env.text()
+
+
+@R4
+@pytest.mark.parametrize("kind", ["self", "superuser", "deleted"])
+async def test_forged_staff_roles_of_protected_target_show_nothing(kind: str) -> None:
+    target = _user(ACTOR if kind == "self" else STAFF, deleted=kind == "deleted")
+    target.is_superuser = kind == "superuser"
+    env = Env(SUPER, users=[target], roles=[make_role("Custom", "custom")])
+    await env.start()
+    await env.press("Сотрудники")
+    await env.press(f".*\\({target.telegram_user_id}\\).*", regex=True)
+    assert "Роли сотрудника" not in env.buttons()
+    env.queries.calls.clear()
+    await env.forge("u_card_back", "u_card_back", "u_roles")
+    assert "Custom" not in env.text() and "user_role_ids" not in env.queries.calls
+    await env.forge("u_card_back", "u_card_back", "u_ovr") if "u_card_back" in str(
+        env.messages.last_message().reply_markup
+    ) else None
+    assert "user_overrides" not in env.queries.calls
+    assert env.access.calls == []

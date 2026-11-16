@@ -14,7 +14,7 @@ from uuid import uuid4
 import pytest
 from aiogram.types import Chat, Message, Update, User
 from dishka import AsyncContainer, make_async_container
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.core.config import Settings
@@ -30,9 +30,15 @@ from app.modules.iam.admin_service import (
     TenantAdminService,
 )
 from app.modules.iam.ioc import IamProvider
-from app.modules.iam.models import Tenant, TenantSettings
+from app.modules.iam.models import Permission, Tenant, TenantSettings
 from app.modules.iam.models import User as IamUser
-from app.modules.iam.permissions import LOGS_VIEW, PRODUCTS_VIEW, USERS_VIEW
+from app.modules.iam.permissions import (
+    LOGS_VIEW,
+    ORDERS_MANAGE,
+    PRODUCTS_CREATE,
+    PRODUCTS_VIEW,
+    USERS_VIEW,
+)
 from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
 from app.modules.iam.presentation.tg_master.effective import general_getter
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
@@ -43,6 +49,7 @@ from app.modules.logging.buffer import LogBuffer
 from app.modules.logging.files import DailyFileWriter
 from app.modules.logging.metrics import LogsDroppedCounter
 from app.modules.logging.models import UserActivity
+from app.shared_kernel.domain.exceptions import DomainError
 from app.shared_kernel.infrastructure.database import build_session_factory
 from app.shared_kernel.infrastructure.providers import DatabaseProvider, RedisProvider
 from tests.integration.test_permission_service import grant_role
@@ -259,3 +266,43 @@ async def test_effective_permissions_view_real_db(
     assert "✅ Просмотр товаров — роль: Поддержка" in text
     assert "✅ Просмотр логов — персонально: разрешено" in text
     assert f"выдал: {actor}" in text and "дежурство" in text
+
+
+async def _set_active(engine: AsyncEngine, slugs: list[str], *, active: bool) -> None:
+    async with build_session_factory(engine)() as session:
+        await session.execute(
+            update(Permission).where(Permission.slug.in_(slugs)).values(is_active=active)
+        )
+        await session.commit()
+
+
+@pytest.mark.req("R-II.4")
+async def test_set_permissions_keeps_held_inactive_permission_real_db(
+    container: AsyncContainer, clean_db: AsyncEngine, redis_client: Any
+) -> None:
+    """Saving a role keeps a held inactive permission; adding a new inactive one fails."""
+    ids = await _create_users(clean_db)
+    actor = ids["superuser"]
+    async with container() as request:
+        role = await (await request.get(RoleAdminService)).create(
+            actor,
+            name="Legacy",
+            slug=f"legacy_{uuid4().hex[:6]}",
+            permission_slugs={PRODUCTS_VIEW, LOGS_VIEW},
+        )
+        role_id = role.id
+    await _set_active(clean_db, [LOGS_VIEW, ORDERS_MANAGE], active=False)
+    try:
+        async with container() as request:
+            after = await (await request.get(RoleAdminService)).set_permissions(
+                actor, role_id, {PRODUCTS_VIEW, PRODUCTS_CREATE, LOGS_VIEW}
+            )
+        assert after == frozenset({PRODUCTS_VIEW, PRODUCTS_CREATE, LOGS_VIEW})
+        async with container() as request:
+            with pytest.raises(DomainError) as error:
+                await (await request.get(RoleAdminService)).set_permissions(
+                    actor, role_id, {PRODUCTS_VIEW, LOGS_VIEW, ORDERS_MANAGE}
+                )
+        assert error.value.code == "permission_not_found"
+    finally:
+        await _set_active(clean_db, [LOGS_VIEW, ORDERS_MANAGE], active=True)

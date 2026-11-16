@@ -173,6 +173,13 @@ def _picker(manager: DialogManager) -> ManagedMultiselect[str]:
     return cast("ManagedMultiselect[str]", manager.find(PERMS_WIDGET))
 
 
+async def _editable(manager: DialogManager) -> frozenset[str]:
+    """Permissions edited by the checkboxes: catalogue slugs that are live in the database.
+    The rest of the role's set (inactive or unknown here) is kept as is on save."""
+    live = await (await resolve(manager, IamAdminQueries)).live_permission_slugs()
+    return frozenset(PERMISSION_NAMES) & live
+
+
 def _current_module(manager: DialogManager) -> str:
     module = str(manager.dialog_data.get("module", ""))
     return module if module in MODULES else next(iter(MODULES))
@@ -244,6 +251,17 @@ async def permissions_getter(dialog_manager: DialogManager, **kwargs: Any) -> di
                 lines.extend(f"• {name}" for name in names)
         return _page(dialog_manager, *lines, has_role=True)
     checked = set(_picker(dialog_manager).get_checked())
+    editable = await _editable(dialog_manager)
+    queries = await resolve(dialog_manager, IamAdminQueries)
+    fixed = sorted(await queries.role_permission_slugs(role.id) - editable)
+    fixed_lines = (
+        [
+            _("Не редактируются здесь (неактивные или вне справочника), сохраняются как есть:"),
+            *(f"• {PERMISSION_NAMES.get(s, s)} ({s})" for s in fixed),
+        ]
+        if fixed
+        else []
+    )
     current = _current_module(dialog_manager)
     modules = []
     for module, slugs in MODULES.items():
@@ -260,10 +278,11 @@ async def permissions_getter(dialog_manager: DialogManager, **kwargs: Any) -> di
         _("Модуль: {module}. Отметьте права и нажмите «Сохранить».").format(
             module=titles.get(current, current)
         ),
+        *fixed_lines,
         has_role=True,
         editable=True,
         modules=modules,
-        perms=[(slug, PERMISSION_NAMES[slug]) for slug in MODULES[current]],
+        perms=[(slug, PERMISSION_NAMES[slug]) for slug in MODULES[current] if slug in editable],
     )
 
 
@@ -328,6 +347,11 @@ async def on_open_permissions(
     await manager.switch_to(RolesSG.permissions)
 
 
+async def on_toggle(event: Any, widget: Any, manager: DialogManager, item: str) -> None:
+    """A forged checkbox click without ``roles.manage`` closes the dialog (state is lost)."""
+    await _guard(event, manager)
+
+
 async def on_module(
     callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
 ) -> None:
@@ -343,7 +367,11 @@ async def on_save(callback: CallbackQuery, button: Button, manager: DialogManage
         # Forged callback: the button is not rendered for system roles.
         set_notice(manager, error_text("system_role_protected"))
         return
-    slugs = frozenset(s for s in _picker(manager).get_checked() if s in PERMISSION_NAMES)
+    editable = await _editable(manager)
+    held = await (await resolve(manager, IamAdminQueries)).role_permission_slugs(role.id)
+    checked = frozenset(_picker(manager).get_checked())
+    # Non-editable permissions (inactive / outside the catalogue) are kept as they are.
+    slugs = (checked & editable) | (held - editable)
     actor, role_id = actor_id(manager), role.id
     outcome = await mutate(
         manager, RoleAdminService, lambda s: s.set_permissions(actor, role_id, slugs)
@@ -545,6 +573,7 @@ def roles_dialog() -> Dialog:
                     id=PERMS_WIDGET,
                     item_id_getter=itemgetter(0),
                     items="perms",
+                    on_state_changed=on_toggle,
                 ),
                 when="editable",
             ),
