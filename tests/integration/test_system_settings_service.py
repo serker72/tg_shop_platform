@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import itertools
 import uuid
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.modules.iam.cache import PermissionCache
 from app.modules.iam.models import Role, User, UserRole
 from app.modules.iam.permissions import ROLE_MODERATOR
 from app.modules.iam.service import PERMISSION_DENIED, PermissionService
+from app.modules.logging import retention
 from app.modules.logging.models import AuditLog
 from app.modules.system import service as svc
 from app.modules.system.maintenance import MaintenanceGate
@@ -203,7 +205,13 @@ async def test_denied_without_settings_manage(
     assert info.value.code == PERMISSION_DENIED
     with pytest.raises(PermissionDeniedError):
         await service.set_maintenance(moderator, True)
+    with pytest.raises(PermissionDeniedError):
+        await service.set_iam_cache_ttl(moderator, 600)
+    with pytest.raises(PermissionDeniedError):
+        await service.set_file_logs_retention_days(moderator, 30)
     assert await current(session) == before
+    for action in ("retention", "maintenance", "iam_cache_ttl", "file_logs_retention"):
+        assert await audit_count(session, f"system.settings.{action}", moderator) == 0
 
 
 @pytest.mark.parametrize(
@@ -214,6 +222,7 @@ async def test_denied_without_settings_manage(
         ("set_file_logs_retention_days", (0,), svc.INVALID_FILE_LOGS_RETENTION),
         ("set_file_logs_retention_days", (3651,), svc.INVALID_FILE_LOGS_RETENTION),
         ("set_iam_cache_ttl", (0,), svc.INVALID_IAM_CACHE_TTL),
+        ("set_iam_cache_ttl", (2_592_001,), svc.INVALID_IAM_CACHE_TTL),
     ],
 )
 async def test_range_rejected(
@@ -232,3 +241,112 @@ async def test_range_bounds_accepted(session: AsyncSession, service: SystemSetti
     await service.set_file_logs_retention_days(admin, 3650)
     await service.set_file_logs_retention_days(admin, 1)
     assert (await current(session))[:3] == (1, 120, 1)
+    await service.set_iam_cache_ttl(admin, 2_592_000)
+    assert (await current(session))[3] == 2_592_000
+    await service.set_iam_cache_ttl(admin, 1)
+    assert (await current(session))[3] == 1
+
+
+async def _break_audit_config(session: AsyncSession) -> None:
+    await session.execute(
+        text("ALTER TABLE partman.part_config DISABLE TRIGGER guard_audit_part_config")
+    )
+    await session.execute(
+        text(
+            "UPDATE partman.part_config SET retention_keep_table = false "
+            "WHERE parent_table = 'public.audit_logs'"
+        )
+    )
+    await session.execute(
+        text("ALTER TABLE partman.part_config ENABLE TRIGGER guard_audit_part_config")
+    )
+    await session.commit()
+
+
+async def test_db_trigger_guard_rolls_back(
+    session: AsyncSession, service: SystemSettingsService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python guard bypassed: the ``guard_audit_part_config`` trigger is the last line."""
+    admin = await make_user(session, superuser=True)
+    before = await current(session)
+    await _break_audit_config(session)
+    monkeypatch.setattr(retention, "check_audit_guard", lambda row: None)
+    with pytest.raises(DomainError) as info:
+        await service.set_retention(admin, 7, 48)
+    assert info.value.code == svc.RETENTION_GUARD
+    assert await current(session) == before
+    assert await retention_synced(session, before[0], before[1])
+    assert await audit_count(session, "system.settings.retention", admin) == 0
+
+
+async def test_config_error_is_not_reported_as_guard(
+    session: AsyncSession, service: SystemSettingsService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin = await make_user(session, superuser=True)
+    before = await current(session)
+
+    def missing(*_args: Any) -> Any:
+        raise retention.PartConfigMissingError("partman.part_config has no row")
+
+    monkeypatch.setattr(retention, "plan_changes", missing)
+    with pytest.raises(DomainError) as info:
+        await service.set_retention(admin, 7, 48)
+    assert info.value.code == svc.RETENTION_CONFIG_ERROR
+    assert await current(session) == before
+    assert await audit_count(session, "system.settings.retention", admin) == 0
+
+
+async def test_locked_settings_row_reports_busy(
+    session: AsyncSession, redis_client: Any, gate: MaintenanceGate, engine: AsyncEngine
+) -> None:
+    admin = await make_user(session, superuser=True)
+    service = SystemSettingsService(
+        session,
+        PermissionService(session, PermissionCache(redis_client)),
+        gate=gate,
+        lock_timeout_ms=200,
+    )
+    async with engine.connect() as other:
+        await other.execute(text("SELECT id FROM system_settings WHERE id = 1 FOR UPDATE"))
+        with pytest.raises(DomainError) as info:
+            await service.set_maintenance(admin, True)
+        await other.rollback()
+    assert info.value.code == svc.SETTINGS_BUSY
+    assert await audit_count(session, "system.settings.maintenance", admin) == 0
+
+
+async def test_ttl_cache_invalidation_failure_reported(
+    session: AsyncSession, redis_client: Any, gate: MaintenanceGate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin = await make_user(session, superuser=True)
+    permissions = PermissionService(session, PermissionCache(redis_client))
+
+    async def unconfirmed() -> Any:
+        return SimpleNamespace(ok=False)
+
+    monkeypatch.setattr(permissions, "invalidate_all", unconfirmed)
+    failures: list[dict[str, Any]] = []
+    counter = SimpleNamespace(inc=lambda **labels: failures.append(labels))
+    service = SystemSettingsService(
+        session, permissions, gate=gate, invalidation_failures=cast(Any, counter)
+    )
+    await service.set_iam_cache_ttl(admin, 1200)
+    assert service.cache_invalidated is False
+    assert failures == [{"scope": "all"}]
+    assert (await current(session))[3] == 1200
+    assert await audit_count(session, "system.settings.iam_cache_ttl", admin) == 1
+
+
+async def test_maintenance_noop_keeps_gate_cache(
+    session: AsyncSession,
+    service: SystemSettingsService,
+    gate: MaintenanceGate,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin = await make_user(session, superuser=True)
+    calls: list[int] = []
+    monkeypatch.setattr(gate, "invalidate", lambda: calls.append(1))
+    await service.set_maintenance(admin, False)
+    assert service._noop is True
+    assert calls == []
+    assert await audit_count(session, "system.settings.maintenance", admin) == 0

@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from dishka.integrations.aiogram import CONTAINER_NAME
 
+from app.entrypoints.master_bot.middlewares import SNAPSHOT_KEY
 from app.modules.iam.permissions import SETTINGS_MANAGE
+from app.modules.iam.presentation.tg_master.common import NOTICE_KEY
 from app.modules.iam.snapshot import PermissionSnapshot
-from app.modules.system.presentation.tg_master.settings import FIELDS, parse_value
-from app.modules.system.service import RETENTION_GUARD
-from app.shared_kernel.domain.exceptions import DomainError
+from app.modules.system.presentation.tg_master.settings import (
+    FIELDS,
+    SettingsSG,
+    _on_confirm,
+    parse_value,
+)
+from app.modules.system.service import RETENTION_CONFIG_ERROR, RETENTION_GUARD, SETTINGS_BUSY
+from app.shared_kernel.domain.exceptions import DomainError, EntityNotFoundError
 from tests.unit._master_bot_env import ACTOR, SUPER, VIEWER, Env
 
 pytestmark = pytest.mark.req("R-II.5")
@@ -35,6 +46,59 @@ def test_parse_value_bounds() -> None:
     assert parse_value("ttl", "abc") is None
     assert parse_value("ttl", None) is None
     assert set(FIELDS) == {"ttl", "ua", "audit", "files"}
+
+
+@pytest.mark.parametrize("raw", ["1_000", "+5", "-5", "٣", "１２", "1.0", "", "1 2"])
+def test_parse_value_ascii_digits_only(raw: str) -> None:
+    assert parse_value("files", raw) is None
+
+
+async def test_confirm_without_target_does_not_call_service() -> None:
+    container = AsyncMock()
+    manager = SimpleNamespace(
+        dialog_data={},
+        middleware_data={
+            SNAPSHOT_KEY: SUPER,
+            "event_from_user": SimpleNamespace(id=ACTOR),
+            CONTAINER_NAME: container,
+        },
+        switch_to=AsyncMock(),
+    )
+    await _on_confirm(AsyncMock(), cast(Any, None), cast(Any, manager))
+    container.get.assert_not_called()
+    manager.switch_to.assert_awaited_once_with(SettingsSG.main)
+    assert "Некорректное действие" in manager.dialog_data[NOTICE_KEY]
+
+
+async def test_missing_settings_row_shows_error() -> None:
+    env = Env(SETTINGS_ADMIN)
+    env.system.errors["get"] = EntityNotFoundError("missing", code="system_settings_missing")
+    await _open(env)
+    assert "не инициализированы" in env.text()
+    assert "Включить техработы" not in env.buttons()
+
+
+@pytest.mark.parametrize(
+    ("code", "needle"),
+    [(RETENTION_CONFIG_ERROR, "не найдена или некорректна"), (SETTINGS_BUSY, "другим процессом")],
+)
+async def test_config_and_busy_errors_have_own_text(code: str, needle: str) -> None:
+    env = Env(SETTINGS_ADMIN)
+    env.system.errors["set_retention"] = DomainError("x", code=code)
+    await _open(env)
+    await env.press("Хранение user_activity (мес.)")
+    await env.send("6")
+    assert needle in env.text()
+    assert "архивирование партиций" not in env.text()
+
+
+async def test_stale_permission_cache_warning() -> None:
+    env = Env(SETTINGS_ADMIN)
+    env.system.cache_invalidated = False
+    await _open(env)
+    await env.press("TTL кэша прав (сек.)")
+    await env.send("600")
+    assert "кэш прав обновится с задержкой" in env.text()
 
 
 async def test_button_only_with_settings_manage() -> None:

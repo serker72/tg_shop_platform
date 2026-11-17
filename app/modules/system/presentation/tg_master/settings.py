@@ -23,6 +23,7 @@ from app.modules.iam.presentation.tg_master.common import (
     actor_id,
     compose,
     denied_text,
+    error_text,
     mutate,
     nav_texts,
     resolve,
@@ -38,9 +39,9 @@ from app.modules.system.models import (
 from app.modules.system.service import (
     IAM_CACHE_TTL_SECONDS_MAX,
     IAM_CACHE_TTL_SECONDS_MIN,
-    RETENTION_GUARD,
     SystemSettingsService,
 )
+from app.shared_kernel.domain.exceptions import DomainError
 
 __all__ = ["FIELDS", "SettingsSG", "parse_value", "settings_dialog"]
 
@@ -62,12 +63,15 @@ class SettingsSG(StatesGroup):
 
 
 def parse_value(field: str, raw: str | None) -> int | None:
-    """Integer of ``raw`` inside the range of ``field``; anything else -> ``None``."""
+    """Integer of ``raw`` inside the range of ``field``; anything else -> ``None``.
+
+    ASCII digits only: ``int()`` would also accept ``"1_000"``, ``"+5"`` and non-ASCII digits.
+    """
     low, high = FIELDS[field]
-    try:
-        value = int((raw or "").strip())
-    except ValueError:
+    text = (raw or "").strip()
+    if not (text.isascii() and text.isdecimal()):
         return None
+    value = int(text)
     return value if low <= value <= high else None
 
 
@@ -95,7 +99,10 @@ async def main_getter(dialog_manager: DialogManager, **_kw: Any) -> dict[str, An
     data = _texts()
     if not _allowed(dialog_manager):
         return {**data, "allowed": False, "text": compose(dialog_manager, denied_text())}
-    settings = await (await resolve(dialog_manager, SystemSettingsService)).get()
+    try:
+        settings = await (await resolve(dialog_manager, SystemSettingsService)).get()
+    except DomainError as error:
+        return {**data, "allowed": False, "text": compose(dialog_manager, error_text(error.code))}
     on = bool(settings.is_maintenance_mode)
     lines = [
         _("Системные настройки"),
@@ -147,7 +154,11 @@ async def _on_maintenance(callback: CallbackQuery, button: Button, manager: Dial
     if not _allowed(manager):
         await _deny(callback)
         return
-    settings = await (await resolve(manager, SystemSettingsService)).get()
+    try:
+        settings = await (await resolve(manager, SystemSettingsService)).get()
+    except DomainError as error:
+        await callback.answer(error_text(error.code))
+        return
     manager.dialog_data[TARGET_KEY] = not bool(settings.is_maintenance_mode)
     await manager.switch_to(SettingsSG.confirm)
 
@@ -156,7 +167,13 @@ async def _on_confirm(callback: CallbackQuery, button: Button, manager: DialogMa
     if not _allowed(manager):
         await _deny(callback)
         return
-    enabled = bool(manager.dialog_data.pop(TARGET_KEY, False))
+    target = manager.dialog_data.pop(TARGET_KEY, None)
+    if not isinstance(target, bool):
+        # Repeated / forged "Yes" or lost FSM data: never guess the target state.
+        set_notice(manager, _("Некорректное действие, повторите."))
+        await manager.switch_to(SettingsSG.main)
+        return
+    enabled = target
     actor = actor_id(manager)
     await mutate(manager, SystemSettingsService, lambda s: s.set_maintenance(actor, enabled))
     await manager.switch_to(SettingsSG.main)
@@ -197,15 +214,7 @@ async def _on_input(message: Message, widget: MessageInput, manager: DialogManag
             ),
         )
         return
-    outcome = await mutate(manager, SystemSettingsService, _setter(field, value, actor_id(manager)))
-    if outcome.code == RETENTION_GUARD:
-        set_notice(
-            manager,
-            _(
-                "Изменение отменено: конфигурация pg_partman для audit_logs небезопасна "
-                "(архивирование партиций выключено). Обратитесь к администратору БД."
-            ),
-        )
+    await mutate(manager, SystemSettingsService, _setter(field, value, actor_id(manager)))
     manager.dialog_data.pop(FIELD_KEY, None)
     await manager.switch_to(SettingsSG.main)
 

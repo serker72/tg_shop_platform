@@ -29,6 +29,7 @@ from typing import Any, Final
 
 import structlog
 from psycopg import Error as PsycopgError
+from psycopg import errors as pg_errors
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,7 +62,10 @@ __all__ = [
     "INVALID_IAM_CACHE_TTL",
     "INVALID_MAINTENANCE_FLAG",
     "INVALID_RETENTION",
+    "LOCK_TIMEOUT_MS",
+    "RETENTION_CONFIG_ERROR",
     "RETENTION_GUARD",
+    "SETTINGS_BUSY",
     "SESSION_NOT_CLEAN",
     "SystemSettingsService",
     "validate_file_logs_days",
@@ -74,7 +78,14 @@ INVALID_IAM_CACHE_TTL: Final = "invalid_iam_cache_ttl"
 INVALID_MAINTENANCE_FLAG: Final = "invalid_maintenance_flag"
 INVALID_RETENTION: Final = "invalid_retention"
 RETENTION_GUARD: Final = "retention_guard"
+#: ``part_config`` rows missing / invalid stored value (not the audit_logs guard).
+RETENTION_CONFIG_ERROR: Final = "retention_config_error"
+#: A row lock was not granted within :data:`LOCK_TIMEOUT_MS` (``lock_not_available``).
+SETTINGS_BUSY: Final = "settings_busy"
 SESSION_NOT_CLEAN: Final = "session_not_clean"
+#: ``SET LOCAL lock_timeout`` of every write transaction: a long ``part_config`` /
+#: ``system_settings`` lock holder must not hang the bot handler.
+LOCK_TIMEOUT_MS: Final = 5000
 
 #: IAM snapshot TTL bounds (seconds): 1 s .. 30 days (the table CHECK only demands > 0).
 IAM_CACHE_TTL_SECONDS_MIN: Final = 1
@@ -144,7 +155,9 @@ class SystemSettingsService:
         gate: MaintenanceGate | None = None,
         audit: AuditLogger | None = None,
         invalidation_failures: CacheInvalidationFailures = iam_cache_invalidation_failures_total,
+        lock_timeout_ms: int = LOCK_TIMEOUT_MS,
     ) -> None:
+        self._lock_timeout_ms = int(lock_timeout_ms)
         self._session = session
         self._permissions = permissions
         self._gate = gate
@@ -231,6 +244,9 @@ class SystemSettingsService:
         sync_partman: bool = False,
     ) -> SystemSettings:
         async with self._transaction():
+            await self._session.execute(
+                text(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
+            )
             await self._permissions.require(actor_telegram_id, SETTINGS_MANAGE)
             config_rows = await self._lock_part_config() if sync_partman else []
             settings = await self._repo.get_for_update()
@@ -288,7 +304,8 @@ class SystemSettingsService:
         except retention.PartmanRetentionGuardError as error:
             raise DomainError(str(error), code=RETENTION_GUARD) from error
         except retention.RetentionSyncError as error:
-            raise DomainError(str(error), code=RETENTION_GUARD) from error
+            # PartConfigMissingError / InvalidRetentionError: broken config, not the guard.
+            raise DomainError(str(error), code=RETENTION_CONFIG_ERROR) from error
         synced = []
         for change in changes:
             if not change.changed:
@@ -321,6 +338,10 @@ class SystemSettingsService:
         except DBAPIError as error:
             await self._session.rollback()
             orig = error.orig
+            if isinstance(orig, pg_errors.LockNotAvailable):
+                raise DomainError(
+                    "system settings are locked by another transaction", code=SETTINGS_BUSY
+                ) from error
             if isinstance(orig, PsycopgError) and retention.is_db_guard_error(orig):
                 raise DomainError(
                     "partman retention guard rejected the change", code=RETENTION_GUARD

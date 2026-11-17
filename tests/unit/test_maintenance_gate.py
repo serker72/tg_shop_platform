@@ -77,6 +77,35 @@ async def test_cached_within_ttl_and_reloaded_after(db: _Db) -> None:
     assert await gate.is_on() is False and db.reads == 2
 
 
+async def test_invalidate_during_read_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read started before the commit must not cache the old value after ``invalidate``."""
+    started, release = asyncio.Event(), asyncio.Event()
+    state: dict[str, Any] = {"value": False, "reads": 0}
+
+    class _Repo:
+        def __init__(self, session: Any) -> None:
+            pass
+
+        async def get(self) -> Any:
+            state["reads"] += 1
+            value = state["value"]
+            if state["reads"] == 1:
+                started.set()
+                await release.wait()
+            return SimpleNamespace(is_maintenance_mode=value)
+
+    monkeypatch.setattr(maintenance, "SystemSettingsRepository", _Repo)
+    gate = _gate(_Clock())
+    task = asyncio.create_task(gate.is_on())
+    await started.wait()
+    state["value"] = True  # committed while the first read is in flight
+    gate.invalidate()
+    release.set()
+    assert await task is False
+    assert await gate.is_on() is True
+    assert state["reads"] == 2
+
+
 async def test_concurrent_callers_share_one_read(db: _Db) -> None:
     gate = _gate(_Clock())
     results = await asyncio.gather(*(gate.is_on() for _ in range(5)))

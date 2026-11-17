@@ -44,9 +44,15 @@ class MaintenanceGate:
         self._known = False
         self._expires_at = float("-inf")
         self._lock = asyncio.Lock()
+        #: Bumped by :meth:`invalidate`; a read started before the bump is not cached.
+        self._gen = 0
 
     def invalidate(self) -> None:
-        """Forget the cached value: the next :meth:`is_on` reads PostgreSQL (after a change)."""
+        """Forget the cached value: the next :meth:`is_on` reads PostgreSQL (after a change).
+
+        A read already in flight may return the old value once, but it is not cached.
+        """
+        self._gen += 1
         self._expires_at = float("-inf")
 
     async def is_on(self) -> bool:
@@ -56,9 +62,12 @@ class MaintenanceGate:
             now = self._clock()
             if now < self._expires_at:  # refreshed by a concurrent caller
                 return self._value
-            self._value = await self._read()
-            self._expires_at = now + self._ttl
-            return self._value
+            gen = self._gen
+            value = await self._read()
+            self._value = value
+            if gen == self._gen:  # not invalidated during the read
+                self._expires_at = now + self._ttl
+            return value
 
     async def _read(self) -> bool:
         try:
