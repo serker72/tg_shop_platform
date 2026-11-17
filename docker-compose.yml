@@ -105,11 +105,15 @@ services:
     # in `docker inspect` Cmd/Args or `ps`. REDISCLI_AUTH is also used by the healthcheck.
     # `\` and `"` are escaped for the redis config quoted string. The official
     # docker-entrypoint.sh drops privileges to the redis user only for `redis-server`.
+    # `rm -f` first: on restart the old redis-owned /tmp/redis.conf survives, and with the
+    # host sysctl fs.protected_regular>=1 even root may not O_CREAT-open another user's file
+    # in the sticky /tmp ("can't create /tmp/redis.conf: Permission denied").
     command:
       - "sh"
       - "-c"
       - >-
         umask 077
+        && rm -f /tmp/redis.conf
         && printf 'requirepass "%s"\nappendonly yes\nmaxmemory ${REDIS_MAXMEMORY:-256mb}\nmaxmemory-policy noeviction\n'
         "$$(printf '%s' "$$REDISCLI_AUTH" | sed 's/[\\"]/\\&/g')" > /tmp/redis.conf
         && chown redis:redis /tmp/redis.conf
