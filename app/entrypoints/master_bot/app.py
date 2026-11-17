@@ -49,6 +49,7 @@ from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.ports import ActivityLogger
 from app.modules.system.maintenance import MaintenanceGate
+from app.shared_kernel.presentation.aiogram_dialog_ids import install_unique_intent_ids
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -133,6 +134,7 @@ def build_dispatcher(
     dispatcher.update.outer_middleware(ClickLogMiddleware(activity, telegram_bot_id))
     dispatcher.update.outer_middleware(MaintenanceMiddleware(gate))
     dispatcher.include_router(build_menu_router())
+    install_unique_intent_ids()
     setup_dialogs(dispatcher)
     setup_dishka(container=container, router=dispatcher, auto_inject=True)
     return dispatcher
