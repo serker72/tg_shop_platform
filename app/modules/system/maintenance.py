@@ -64,8 +64,8 @@ class MaintenanceGate:
                 return self._value
             gen = self._gen
             value = await self._read()
-            self._value = value
-            if gen == self._gen:  # not invalidated during the read
+            if gen == self._gen:  # not invalidated during the read: cache + fallback
+                self._value = value
                 self._expires_at = now + self._ttl
             return value
 

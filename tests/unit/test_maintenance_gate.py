@@ -102,8 +102,42 @@ async def test_invalidate_during_read_is_not_cached(monkeypatch: pytest.MonkeyPa
     gate.invalidate()
     release.set()
     assert await task is False
+    assert gate._value is False and gate._expires_at == float("-inf")
     assert await gate.is_on() is True
     assert state["reads"] == 2
+
+
+async def test_raced_read_is_not_kept_as_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A read overlapping ``invalidate`` must not become the DB-error fallback value."""
+    started, release = asyncio.Event(), asyncio.Event()
+    state: dict[str, Any] = {"reads": 0, "error": None}
+
+    class _Repo:
+        def __init__(self, session: Any) -> None:
+            pass
+
+        async def get(self) -> Any:
+            state["reads"] += 1
+            if state["error"] is not None:
+                raise state["error"]
+            if state["reads"] == 1:
+                return SimpleNamespace(is_maintenance_mode=True)
+            started.set()
+            await release.wait()
+            return SimpleNamespace(is_maintenance_mode=False)  # stale, pre-commit read
+
+    monkeypatch.setattr(maintenance, "SystemSettingsRepository", _Repo)
+    clock = _Clock()
+    gate = _gate(clock)
+    assert await gate.is_on() is True  # known value: True
+    clock.now += 10
+    task = asyncio.create_task(gate.is_on())
+    await started.wait()
+    gate.invalidate()
+    release.set()
+    assert await task is False  # returned to the caller only
+    state["error"] = OperationalError("select", {}, Exception("down"))
+    assert await gate.is_on() is True  # fallback = last value read without a race
 
 
 async def test_concurrent_callers_share_one_read(db: _Db) -> None:

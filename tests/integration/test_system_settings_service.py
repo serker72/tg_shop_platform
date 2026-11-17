@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import uuid
 from types import SimpleNamespace
@@ -309,7 +310,8 @@ async def test_locked_settings_row_reports_busy(
     async with engine.connect() as other:
         await other.execute(text("SELECT id FROM system_settings WHERE id = 1 FOR UPDATE"))
         with pytest.raises(DomainError) as info:
-            await service.set_maintenance(admin, True)
+            # wait_for: without ``SET LOCAL lock_timeout`` the test fails instead of hanging.
+            await asyncio.wait_for(service.set_maintenance(admin, True), timeout=10)
         await other.rollback()
     assert info.value.code == svc.SETTINGS_BUSY
     assert await audit_count(session, "system.settings.maintenance", admin) == 0
