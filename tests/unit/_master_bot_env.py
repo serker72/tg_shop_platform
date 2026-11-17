@@ -40,6 +40,7 @@ from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
+from app.modules.system.service import SystemSettingsService
 from app.shared_kernel.domain.exceptions import DomainError
 
 R4 = pytest.mark.req("R-II.4")
@@ -260,6 +261,23 @@ class Env:
         )
         self.queries = FakeQueries(self)
         self.global_access: set[int] = set()
+        self.system_settings = SimpleNamespace(
+            is_maintenance_mode=False,
+            iam_cache_ttl_seconds=86400,
+            user_activity_retention_months=3,
+            audit_logs_retention_months=24,
+            file_logs_retention_days=90,
+        )
+        settings_row = self.system_settings
+        self.system = Recorder(
+            get=lambda: settings_row,
+            set_maintenance=lambda actor, on: setattr(settings_row, "is_maintenance_mode", on),
+            set_iam_cache_ttl=lambda actor, v: setattr(settings_row, "iam_cache_ttl_seconds", v),
+            set_retention=self._set_retention,
+            set_file_logs_retention_days=lambda actor, v: setattr(
+                settings_row, "file_logs_retention_days", v
+            ),
+        )
         container = FakeContainer(
             {
                 TenantAdminService: self.tenants,
@@ -268,6 +286,7 @@ class Env:
                 RoleAdminService: self.roles,
                 PermissionService: self.permissions,
                 IamAdminQueries: self.queries,
+                SystemSettingsService: self.system,
             }
         )
 
@@ -330,6 +349,18 @@ class Env:
     def _set_role_permissions(self, actor: int, role_id: UUID, slugs: Any) -> frozenset[str]:
         self.role_perms[role_id] = frozenset(slugs)
         return self.role_perms[role_id]
+
+    def _set_retention(
+        self,
+        actor: int,
+        user_activity_months: int | None = None,
+        audit_logs_months: int | None = None,
+    ) -> SimpleNamespace:
+        if user_activity_months is not None:
+            self.system_settings.user_activity_retention_months = user_activity_months
+        if audit_logs_months is not None:
+            self.system_settings.audit_logs_retention_months = audit_logs_months
+        return self.system_settings
 
     def _add_user(self, actor: int, telegram_user_id: int) -> SimpleNamespace:
         self.users[telegram_user_id] = _user(telegram_user_id)

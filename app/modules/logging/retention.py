@@ -46,6 +46,7 @@ __all__ = [
     "MIN_RETENTION_MONTHS",
     "USER_ACTIVITY_TABLE",
     "InvalidRetentionError",
+    "SELECT_PART_CONFIG",
     "PartConfigMissingError",
     "PartConfigRow",
     "PartmanRetentionGuardError",
@@ -56,6 +57,7 @@ __all__ = [
     "check_audit_guard",
     "exit_code_for",
     "format_retention",
+    "is_db_guard_error",
     "main",
     "plan_changes",
     "sync_retention",
@@ -83,7 +85,8 @@ _SELECT_SETTINGS: Final = (
     "SELECT user_activity_retention_months, audit_logs_retention_months "
     "FROM public.system_settings WHERE id = 1"
 )
-_SELECT_PART_CONFIG: Final = (
+#: Locks both log ``part_config`` rows; take this lock BEFORE reading ``system_settings``.
+SELECT_PART_CONFIG: Final = (
     "SELECT parent_table, retention, retention_schema, retention_keep_table, "
     "retention_keep_index FROM partman.part_config "
     "WHERE parent_table IN ('public.user_activity', 'public.audit_logs') "
@@ -206,7 +209,8 @@ def plan_changes(
     )
 
 
-def _is_db_guard_error(error: psycopg.Error) -> bool:
+def is_db_guard_error(error: psycopg.Error) -> bool:
+    """``True`` for the ``check_violation`` of the ``guard_audit_part_config`` trigger."""
     if not isinstance(error, pg_errors.CheckViolation):
         return False
     primary = error.diag.message_primary or str(error)
@@ -231,7 +235,7 @@ def sync_retention(conn: psycopg.Connection[Any], *, dry_run: bool = False) -> S
                     retention_keep_table=row[3],
                     retention_keep_index=row[4],
                 )
-                for row in conn.execute(_SELECT_PART_CONFIG).fetchall()
+                for row in conn.execute(SELECT_PART_CONFIG).fetchall()
             ]
             settings_row = conn.execute(_SELECT_SETTINGS).fetchone()
             if settings_row is None:
@@ -255,7 +259,7 @@ def sync_retention(conn: psycopg.Connection[Any], *, dry_run: bool = False) -> S
             if dry_run:
                 raise psycopg.Rollback()
     except psycopg.Error as error:
-        if _is_db_guard_error(error):
+        if is_db_guard_error(error):
             raise PartmanRetentionGuardError(
                 error.diag.message_primary or str(error).strip()
             ) from error

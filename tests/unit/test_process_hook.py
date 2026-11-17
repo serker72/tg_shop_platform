@@ -33,6 +33,7 @@ from app.entrypoints.master_bot.middlewares import (
     MaintenanceMiddleware,
 )
 from app.modules.logging.ports import ActivityLogger
+from app.modules.system.maintenance import MaintenanceGate
 
 pytestmark = pytest.mark.req("R-II.3")
 
@@ -48,6 +49,7 @@ class _Container:
         self.objects: dict[Any, Any] = {
             Redis: MagicMock(),
             async_sessionmaker[AsyncSession]: MagicMock(),
+            MaintenanceGate: MagicMock(),
             ActivityLogger: MagicMock(),
             HeartbeatRegistry: self.registry,
         }

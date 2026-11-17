@@ -45,6 +45,10 @@ class MaintenanceGate:
         self._expires_at = float("-inf")
         self._lock = asyncio.Lock()
 
+    def invalidate(self) -> None:
+        """Forget the cached value: the next :meth:`is_on` reads PostgreSQL (after a change)."""
+        self._expires_at = float("-inf")
+
     async def is_on(self) -> bool:
         if self._clock() < self._expires_at:
             return self._value

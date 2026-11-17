@@ -173,6 +173,7 @@ async def run_service(
     from app.modules.bot_manager.proxy_health import OutageMonitor
     from app.modules.iam.ioc import IamProvider
     from app.modules.logging.ioc import LoggingProvider
+    from app.modules.system.ioc import SystemProvider
     from app.shared_kernel.infrastructure.providers import (
         DatabaseProvider,
         RedisProvider,
@@ -190,6 +191,7 @@ async def run_service(
         LoggingProvider(),
         ObservabilityProvider(),
         IamProvider(),
+        SystemProvider(),
         context={Settings: settings},
     )
     exit_code = 0

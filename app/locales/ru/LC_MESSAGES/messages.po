@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-16 15:44+0300\n"
+"POT-Creation-Date: 2026-11-17 10:27+0300\n"
 "PO-Revision-Date: 2026-11-15 20:44+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -21,6 +21,9 @@ msgstr ""
 
 #, python-brace-format
 msgid "Slug: {slug}"
+msgstr ""
+
+msgid "TTL кэша прав (сек.)"
 msgstr ""
 
 msgid "« Назад"
@@ -65,6 +68,10 @@ msgstr ""
 msgid "Введите название новой роли (до 128 символов)."
 msgstr ""
 
+#, python-brace-format
+msgid "Введите новое значение «{title}» — целое число от {low} до {high}."
+msgstr ""
+
 msgid "Введите новое название магазина (до 128 символов)"
 msgstr ""
 
@@ -72,6 +79,14 @@ msgid "Введите новое название роли."
 msgstr ""
 
 msgid "Введите причину (до 500 символов) или нажмите «Пропустить»."
+msgstr ""
+
+msgid ""
+"Включить режим технических работ? Боты будут отвечать только "
+"администраторам."
+msgstr ""
+
+msgid "Включить техработы"
 msgstr ""
 
 msgid "Восстановить"
@@ -96,6 +111,12 @@ msgid "Выберите право."
 msgstr ""
 
 msgid "Выберите язык по умолчанию магазина"
+msgstr ""
+
+msgid "Выключить режим технических работ?"
+msgstr ""
+
+msgid "Выключить техработы"
 msgstr ""
 
 msgid "Выплаты"
@@ -155,6 +176,11 @@ msgid "Запретить"
 msgstr ""
 
 msgid "Идут технические работы. Попробуйте позже."
+msgstr ""
+
+msgid ""
+"Изменение отменено: конфигурация pg_partman для audit_logs небезопасна "
+"(архивирование партиций выключено). Обратитесь к администратору БД."
 msgstr ""
 
 msgid "Изменение сохранено, но кэш прав обновится с задержкой."
@@ -242,6 +268,10 @@ msgid "Некорректное значение настройки."
 msgstr ""
 
 msgid "Некорректное значение, попробуйте ещё раз."
+msgstr ""
+
+#, python-brace-format
+msgid "Некорректное значение: нужно целое число от {low} до {high}."
 msgstr ""
 
 msgid "Некорректные данные."
@@ -422,6 +452,9 @@ msgstr ""
 msgid "Системную роль нельзя изменить."
 msgstr ""
 
+msgid "Системные настройки"
+msgstr ""
+
 #, python-brace-format
 msgid "Снять роль «{name}» с сотрудника?"
 msgstr ""
@@ -497,6 +530,10 @@ msgstr ""
 msgid "Такой сотрудник уже есть."
 msgstr ""
 
+#, python-brace-format
+msgid "Технические работы: {state}"
+msgstr ""
+
 msgid "Товары"
 msgstr ""
 
@@ -532,6 +569,15 @@ msgstr ""
 msgid "Фактические права сотрудника {id}"
 msgstr ""
 
+msgid "Хранение audit_logs (мес.)"
+msgstr ""
+
+msgid "Хранение user_activity (мес.)"
+msgstr ""
+
+msgid "Хранение файловых логов (дн.)"
+msgstr ""
+
 msgid "Чат новостей"
 msgstr ""
 
@@ -559,11 +605,17 @@ msgstr ""
 msgid "бессрочно"
 msgstr ""
 
+msgid "включены"
+msgstr ""
+
 msgid "все магазины"
 msgstr ""
 
 #, python-brace-format
 msgid "выдал: {who}"
+msgstr ""
+
+msgid "выключены"
 msgstr ""
 
 msgid "глобальный"

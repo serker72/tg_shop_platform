@@ -1,7 +1,8 @@
 """Main menu skeleton (aiogram-dialog): section buttons visible by permissions.
 
-"Shops", "Staff" (task 05) and "Roles" (task 06) open the IAM dialogs; the other sections
-are built in tasks 07-09 and their buttons only answer "in progress".
+"Shops", "Staff" (task 05) and "Roles" (task 06) open the IAM dialogs, "Settings" (task 07)
+the system settings dialog; the other sections are built in tasks 08-09 and their buttons
+only answer "in progress".
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from app.modules.iam.presentation.tg_master import (
 )
 from app.modules.iam.presentation.tg_master.common import STAFF_VIEW_PERMISSIONS
 from app.modules.iam.snapshot import PermissionSnapshot
+from app.modules.system.presentation.tg_master import SettingsSG, settings_dialog
 
 __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_getter"]
 
@@ -56,6 +58,7 @@ _SECTION_DIALOGS: Final[dict[str, State]] = {
     "shops": TenantsSG.list,
     "staff": StaffSG.list,
     "roles": RolesSG.list,
+    "settings": SettingsSG.main,
 }
 
 
@@ -135,4 +138,5 @@ def build_menu_router() -> Router:
     router.include_router(roles_dialog())
     router.include_router(overrides_dialog())
     router.include_router(effective_dialog())
+    router.include_router(settings_dialog())
     return router

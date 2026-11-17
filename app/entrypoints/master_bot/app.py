@@ -30,7 +30,6 @@ from aiogram_dialog import setup_dialogs
 from dishka import AsyncContainer
 from dishka.integrations.aiogram import setup_dishka
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.i18n import DEFAULT_LOCALE, build_i18n
 from app.core.observability.health import HeartbeatRegistry, ReadinessGate
@@ -229,7 +228,8 @@ async def master_bot_component(ctx: ServiceContext) -> AsyncIterator[MasterBotRu
     readiness = registry.readiness.get(TELEGRAM_READINESS) or ReadinessGate()
     readiness.set_not_ready()
     redis = await container.get(Redis)
-    gate = MaintenanceGate(await container.get(async_sessionmaker[AsyncSession]))
+    # Shared with SystemSettingsService (APP scope): a change resets this process' cache.
+    gate = await container.get(MaintenanceGate)
     activity = await container.get(ActivityLogger)
 
     async def build(telegram_bot_id: int) -> Dispatcher:
