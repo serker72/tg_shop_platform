@@ -190,6 +190,17 @@ def cache_warning() -> str:
     return _("Изменение сохранено, но кэш прав обновится с задержкой.")
 
 
+def settings_cache_warning() -> str:
+    return _("Настройки сохранены, но другие процессы увидят изменение с задержкой до 1 мин.")
+
+
+#: ``_stale_caches`` entry of a service -> warning text (default: the permission cache).
+_STALE_CACHE_WARNINGS: dict[str, Callable[[], str]] = {
+    "permissions": cache_warning,
+    "settings": settings_cache_warning,
+}
+
+
 def short(text: str, limit: int = LABEL_LIMIT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -236,7 +247,11 @@ async def mutate[S, T](
     # ``_noop`` is the admin services' "requested state already held" flag.
     notice = _("Без изменений.") if getattr(service, "_noop", False) else _("Готово.")
     if not getattr(service, "cache_invalidated", True):
-        notice = f"{notice}\n{cache_warning()}"
+        # ``_stale_caches``: which caches were not reset (SystemSettingsService); IAM admin
+        # services only have the permission cache.
+        stale = getattr(service, "_stale_caches", None) or ("permissions",)
+        warnings = [_STALE_CACHE_WARNINGS.get(kind, cache_warning)() for kind in stale]
+        notice = "\n".join([notice, *dict.fromkeys(warnings)])
     set_notice(manager, notice)
     return Outcome(ok=True, value=result)
 

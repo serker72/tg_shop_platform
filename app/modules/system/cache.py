@@ -12,11 +12,20 @@ never the request session) and written back by one Lua script that checks that
 committed meanwhile (``invalidate`` bumps the generation) can never be overwritten by a
 stale row. The TTL is only a safety net.
 
-No process-local cache: every call costs one ``MGET`` - a change is visible to every
-process right after :meth:`SystemSettingsCache.invalidate`. Redis unavailable (own circuit
-breaker ``settings_cache``) -> PostgreSQL; PostgreSQL error -> the last snapshot this
-instance has seen; before the first successful read -> :data:`DEFAULT_SETTINGS`
-(maintenance off, default IAM cache TTL). A missing row reads as the defaults.
+No process-local cache while Redis answers: every call costs one ``MGET`` - a change is
+visible to every process right after :meth:`SystemSettingsCache.invalidate`.
+
+Redis unavailable (own circuit breaker ``settings_cache`` open, or a Redis error of the
+``MGET``): the last snapshot read from PostgreSQL by this instance is reused while it is
+younger than :data:`PG_FALLBACK_SECONDS` (monotonic clock), otherwise PostgreSQL is read
+again. PostgreSQL error -> the last snapshot this instance has seen; before the first
+successful read -> :data:`DEFAULT_SETTINGS` (maintenance off, default IAM cache TTL).
+
+A missing row reads as the defaults and :data:`DEFAULT_SETTINGS` is written to Redis by the
+same guarded write (no PostgreSQL read per call). A non-integer ``settings:gen`` (corrupted
+key) is a miss that can never be cached: PostgreSQL is read on every call (logged as a
+warning) until the key is repaired (``DEL settings:gen``); ``invalidate`` fails meanwhile
+(``INCR`` of a non-integer).
 """
 
 from __future__ import annotations
@@ -45,11 +54,13 @@ from app.shared_kernel.infrastructure.generational_cache import (
     GenerationalCache,
     InvalidationResult,
     RedisCircuitBreaker,
+    as_int,
 )
 
 __all__ = [
     "DEFAULT_SETTINGS",
     "GENERATION_KEY",
+    "PG_FALLBACK_SECONDS",
     "SETTINGS_KEY_PATTERN",
     "SNAPSHOT_KEY",
     "SNAPSHOT_TTL_SECONDS",
@@ -62,7 +73,9 @@ GENERATION_KEY: Final = "settings:gen"
 #: ``SCAN MATCH`` pattern of every key of this cache (test cleanup).
 SETTINGS_KEY_PATTERN: Final = "settings:*"
 #: Safety-net TTL of the snapshot key; correctness comes from the generation.
-SNAPSHOT_TTL_SECONDS: Final = 3600
+SNAPSHOT_TTL_SECONDS: Final = 60
+#: Redis unavailable: reuse the last PostgreSQL snapshot of this instance for this long.
+PG_FALLBACK_SECONDS: Final = 5.0
 _BREAKER_NAME: Final = "settings_cache"
 
 _log = structlog.get_logger(__name__)
@@ -124,7 +137,7 @@ DEFAULT_SETTINGS: Final = SettingsSnapshot()
 
 
 class SystemSettingsCache:
-    """Process-wide (APP scope) reader of the settings snapshot; Redis only, no local TTL."""
+    """Process-wide (APP scope) reader of the settings snapshot (see the module docstring)."""
 
     def __init__(
         self,
@@ -132,6 +145,7 @@ class SystemSettingsCache:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         ttl_seconds: int = SNAPSHOT_TTL_SECONDS,
+        fallback_seconds: float = PG_FALLBACK_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._cache = GenerationalCache(
@@ -139,33 +153,30 @@ class SystemSettingsCache:
         )
         self._session_factory = session_factory
         self._ttl = ttl_seconds
+        self._fallback = fallback_seconds
+        self._clock = clock
+        #: Last snapshot seen from any source (PostgreSQL error fallback).
         self._last: SettingsSnapshot | None = None
-
-    @property
-    def available(self) -> bool:
-        """``False`` while the breaker is open."""
-        return self._cache.available
+        #: Last snapshot read from PostgreSQL and its monotonic read time (Redis-down reuse).
+        self._pg: tuple[SettingsSnapshot, float] | None = None
 
     async def get(self) -> SettingsSnapshot:
         """Current settings; never raises (see the module docstring for the fallbacks)."""
         values = await self._cache.mget(SNAPSHOT_KEY, GENERATION_KEY, event="get_failed")
-        generation: int | None = None
-        if values is not None:
-            raw, raw_generation = values
-            try:
-                generation = 0 if raw_generation is None else int(raw_generation)
-            except ValueError:
-                generation = None
-            cached = None if raw is None else SettingsSnapshot.from_json(raw)
-            if cached is not None and cached[1] == generation:
-                self._last = cached[0]
-                return cached[0]
-        loaded = await self._load()
-        if loaded is None:
+        if values is None:
+            return await self._get_without_redis()
+        raw, raw_generation = values
+        generation = _parse_generation(raw_generation)
+        cached = None if raw is None else SettingsSnapshot.from_json(raw)
+        if cached is not None and generation is not None and cached[1] == generation:
+            self._last = cached[0]
+            return cached[0]
+        snapshot = await self._load()
+        if snapshot is None:
             return self._last or DEFAULT_SETTINGS
-        snapshot, exists = loaded
-        self._last = snapshot
-        if exists and generation is not None:
+        if generation is None:
+            _log.warning("settings_cache_generation_invalid", key=GENERATION_KEY)
+        else:
             written = await self._cache.set_if_unchanged(
                 SNAPSHOT_KEY,
                 snapshot.to_json(generation),
@@ -183,18 +194,41 @@ class SystemSettingsCache:
             GENERATION_KEY, delete=(SNAPSHOT_KEY,), event="invalidate_failed"
         )
 
-    async def _load(self) -> tuple[SettingsSnapshot, bool] | None:
-        """``(snapshot, row_exists)`` from PostgreSQL; ``None`` on a database error."""
+    async def _get_without_redis(self) -> SettingsSnapshot:
+        """Redis unavailable: a fresh enough PostgreSQL snapshot, else PostgreSQL."""
+        if self._pg is not None and self._clock() - self._pg[1] < self._fallback:
+            return self._pg[0]
+        snapshot = await self._load()
+        return snapshot if snapshot is not None else self._last or DEFAULT_SETTINGS
+
+    async def _load(self) -> SettingsSnapshot | None:
+        """Row from PostgreSQL (missing row -> defaults); ``None`` on a database error.
+
+        Connection errors may surface unwrapped (``OSError`` / ``TimeoutError``), not only
+        as ``SQLAlchemyError``: all of them keep the "never raises" contract.
+        """
         try:
             async with self._session_factory() as session:
                 try:
                     row = await SystemSettingsRepository(session).get()
                 except EntityNotFoundError:
-                    return DEFAULT_SETTINGS, False
-                return SettingsSnapshot.from_model(row), True
-        except SQLAlchemyError as error:
+                    snapshot = DEFAULT_SETTINGS
+                else:
+                    snapshot = SettingsSnapshot.from_model(row)
+        except (SQLAlchemyError, OSError, TimeoutError) as error:
             if self._last is not None:
                 _log.warning("system_settings_read_failed", error=type(error).__name__)
             else:
                 _log.error("system_settings_read_failed_fail_open", error=type(error).__name__)
             return None
+        self._last = snapshot
+        self._pg = (snapshot, self._clock())
+        return snapshot
+
+
+def _parse_generation(raw: bytes | None) -> int | None:
+    """``settings:gen`` value (missing = 0); ``None`` for a corrupted (non-integer) value."""
+    try:
+        return as_int(raw)
+    except ValueError:
+        return None

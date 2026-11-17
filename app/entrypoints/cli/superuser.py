@@ -30,6 +30,7 @@ from app.entrypoints.cli._common import EXIT_CONFIG, EXIT_OK, log_failure
 from app.modules.iam.cache import PermissionCache
 from app.modules.iam.service import PermissionService
 from app.modules.iam.superuser import SuperuserInstaller, SuperuserResult
+from app.modules.system.cache import SystemSettingsCache
 from app.shared_kernel.domain.exceptions import ConfigurationError, DomainError
 from app.shared_kernel.infrastructure.database import build_engine, build_session_factory
 from app.shared_kernel.infrastructure.redis import build_redis
@@ -68,8 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run(settings: Settings, args: argparse.Namespace) -> SuperuserResult:
-    from app.modules.system.cache import SystemSettingsCache
-
     """Execute the parsed command; engine and Redis client are always closed."""
     if settings.postgres.password is None:
         raise ConfigurationError(

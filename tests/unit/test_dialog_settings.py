@@ -94,6 +94,27 @@ async def test_config_and_busy_errors_have_own_text(code: str, needle: str) -> N
     assert "архивирование партиций" not in env.text()
 
 
+@pytest.mark.parametrize(
+    ("stale", "settings_text", "permissions_text"),
+    [
+        (["settings"], True, False),
+        (["permissions"], False, True),
+        (["settings", "permissions"], True, True),
+    ],
+)
+async def test_stale_cache_warning_names_the_cache(
+    stale: list[str], settings_text: bool, permissions_text: bool
+) -> None:
+    env = Env(SETTINGS_ADMIN)
+    env.system.cache_invalidated = False
+    setattr(env.system, "_stale_caches", stale)  # noqa: B010 - private attr of the fake
+    await _open(env)
+    await env.press("TTL кэша прав (сек.)")
+    await env.send("600")
+    assert ("другие процессы увидят изменение с задержкой до 1 мин." in env.text()) is settings_text
+    assert ("кэш прав обновится с задержкой" in env.text()) is permissions_text
+
+
 async def test_stale_permission_cache_warning() -> None:
     env = Env(SETTINGS_ADMIN)
     env.system.cache_invalidated = False

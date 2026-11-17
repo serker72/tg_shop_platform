@@ -16,6 +16,7 @@ from app.modules.system import cache as cache_module
 from app.modules.system.cache import (
     DEFAULT_SETTINGS,
     GENERATION_KEY,
+    PG_FALLBACK_SECONDS,
     SNAPSHOT_KEY,
     SNAPSHOT_TTL_SECONDS,
     SettingsSnapshot,
@@ -123,11 +124,75 @@ async def test_invalidate_between_read_and_write_skips_snapshot(
     assert redis.eval.await_args.args[-1] == "5"
 
 
-async def test_missing_row_returns_defaults_without_write(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_row_caches_defaults_in_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     db = FakeDb(monkeypatch)
     db.result = EntityNotFoundError("missing")
     redis = redis_mock([None, None])
-    assert await make(redis, db).get() == DEFAULT_SETTINGS
+    cache = make(redis, db)
+    assert await cache.get() == DEFAULT_SETTINGS
+    args = redis.eval.await_args.args
+    assert SettingsSnapshot.from_json(args[4]) == (DEFAULT_SETTINGS, 0)
+    assert args[5:] == (SNAPSHOT_TTL_SECONDS, "0")
+    redis.mget.return_value = [args[4], None]  # what Redis now holds
+    assert await cache.get() == DEFAULT_SETTINGS
+    assert db.reads == 1  # second call served by Redis
+
+
+def test_snapshot_ttl_is_60_seconds() -> None:
+    assert SNAPSHOT_TTL_SECONDS == 60
+    assert PG_FALLBACK_SECONDS == 5.0
+
+
+async def test_redis_down_reuses_pg_snapshot_for_5_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [100.0]
+    db = FakeDb(monkeypatch)
+    redis = redis_mock()
+    redis.mget.side_effect = RedisConnectionError("down")
+    cache = make(redis, db, now)
+    await cache.get()
+    now[0] += 4.9
+    await cache.get()
+    assert db.reads == 1  # Redis error, snapshot younger than 5 s
+    now[0] += 0.1  # 5 s since the PostgreSQL read
+    db.result = row(is_maintenance_mode=True)
+    assert (await cache.get()).is_maintenance_mode is True
+    assert db.reads == 2
+
+
+async def test_redis_up_never_uses_in_process_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = FakeDb(monkeypatch)
+    redis = redis_mock([None, b"1"])
+    redis.eval.return_value = 0  # nothing ever lands in Redis
+    cache = make(redis, db)  # frozen clock: a fallback window would cover every call
+    for _ in range(3):
+        await cache.get()
+    assert redis.mget.await_count == 3
+    assert db.reads == 3  # Redis reachable -> no reuse of the PostgreSQL snapshot
+
+
+async def test_corrupted_generation_is_a_miss_without_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = FakeDb(monkeypatch)
+    redis = redis_mock([SettingsSnapshot().to_json(0), b"not-an-int"])
+    cache = make(redis, db)
+    assert (await cache.get()).iam_cache_ttl_seconds == 600
+    assert (await cache.get()).iam_cache_ttl_seconds == 600
+    assert db.reads == 2  # every call reads PostgreSQL until the key is repaired
+    redis.eval.assert_not_awaited()
+
+
+async def test_connection_error_of_session_factory_is_swallowed() -> None:
+    @asynccontextmanager
+    async def broken() -> AsyncIterator[Any]:
+        raise OSError("connection refused")
+        yield  # pragma: no cover
+
+    redis = redis_mock([None, b"0"])
+    cache = SystemSettingsCache(redis, cast(Any, broken), clock=lambda: 0.0)
+    assert await cache.get() == DEFAULT_SETTINGS
     redis.eval.assert_not_awaited()
 
 
@@ -137,10 +202,11 @@ async def test_breaker_open_reads_postgres(monkeypatch: pytest.MonkeyPatch) -> N
     db.result = row(is_maintenance_mode=True)
     redis = redis_mock()
     redis.mget.side_effect = RedisConnectionError("down")
-    cache = make(redis, db, now)
+    # No reuse window here (covered by the 5 s test): every call must read PostgreSQL;
+    # the clock stays frozen so the breaker cooldown never expires.
+    cache = SystemSettingsCache(redis, cast(Any, db), fallback_seconds=0.0, clock=lambda: now[0])
     for _ in range(3):
         assert (await cache.get()).is_maintenance_mode is True
-    assert cache.available is False
     assert (await cache.get()).is_maintenance_mode is True
     assert redis.mget.await_count == 3  # breaker open: no Redis traffic
     assert db.reads == 4

@@ -45,6 +45,7 @@ from app.shared_kernel.infrastructure.generational_cache import (
     GenerationalCache,
     InvalidationResult,
     RedisCircuitBreaker,
+    as_int,
 )
 
 __all__ = [
@@ -67,10 +68,6 @@ _COOLDOWN_SECONDS = 5.0
 _BREAKER_NAME = "permission_cache"
 
 _log = structlog.get_logger(__name__)
-
-
-def _as_int(value: bytes | str | None) -> int:
-    return 0 if value is None else int(value)
 
 
 class PermissionCache:
@@ -122,7 +119,7 @@ class PermissionCache:
         if raw is None:
             return None
         snapshot = PermissionSnapshot.from_json(raw)
-        if snapshot is None or snapshot.global_generation != _as_int(global_gen):
+        if snapshot is None or snapshot.global_generation != as_int(global_gen):
             _log.debug("permission_cache_stale_or_invalid", key=self.key(telegram_user_id))
             return None
         return snapshot, snapshot.generation, snapshot.global_generation
@@ -140,10 +137,7 @@ class PermissionCache:
             event="generations_failed",
             telegram_user_id=telegram_user_id,
         )
-        if generations is None:
-            return None
-        user_gen, global_gen = generations
-        return user_gen, global_gen
+        return None if generations is None else (generations[0], generations[1])
 
     # --- writes -----------------------------------------------------------------------
 

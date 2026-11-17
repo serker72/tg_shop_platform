@@ -168,6 +168,9 @@ class SystemSettingsService:
         self._failures = invalidation_failures
         self._noop = False
         self.cache_invalidated = True
+        #: Caches not reset by the last call (``"settings"`` / ``"permissions"``): picks the
+        #: warning text of the Master Bot dialog.
+        self._stale_caches: list[str] = []
 
     # --- reads -----------------------------------------------------------------------------
 
@@ -243,10 +246,12 @@ class SystemSettingsService:
             return
         if self._settings_cache is not None and not (await self._settings_cache.invalidate()).ok:
             self.cache_invalidated = False
+            self._stale_caches.append("settings")
             self._failures.inc(scope="settings")
             _log.error("system_settings_snapshot_invalidation_failed")
         if permissions and not (await self._permissions.invalidate_all()).ok:
             self.cache_invalidated = False
+            self._stale_caches.append("permissions")
             self._failures.inc(scope="all")
             _log.error("system_settings_cache_invalidation_failed")
 
@@ -344,6 +349,7 @@ class SystemSettingsService:
         self._ensure_clean_session()
         self._noop = False
         self.cache_invalidated = True
+        self._stale_caches = []
         try:
             yield
             await self._session.commit()

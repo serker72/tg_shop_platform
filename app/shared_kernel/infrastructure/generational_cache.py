@@ -27,6 +27,7 @@ __all__ = [
     "GenerationalCache",
     "InvalidationResult",
     "RedisCircuitBreaker",
+    "as_int",
 ]
 
 #: Errors of a Redis call that mean "Redis is unavailable".
@@ -54,7 +55,8 @@ class InvalidationResult:
     ok: bool = True
 
 
-def _as_int(value: bytes | str | None) -> int:
+def as_int(value: bytes | str | None) -> int:
+    """Value of a generation key: missing = 0; ``ValueError`` for a non-integer value."""
     return 0 if value is None else int(value)
 
 
@@ -120,10 +122,6 @@ class GenerationalCache:
         self._breaker = breaker
 
     @property
-    def breaker(self) -> RedisCircuitBreaker:
-        return self._breaker
-
-    @property
     def available(self) -> bool:
         return self._breaker.available
 
@@ -146,7 +144,7 @@ class GenerationalCache:
     ) -> tuple[int, ...] | None:
         """Current values of the generation keys (missing = 0); ``None`` when unavailable."""
         values = await self.mget(*gen_keys, event=event, **ctx)
-        return None if values is None else tuple(_as_int(value) for value in values)
+        return None if values is None else tuple(as_int(value) for value in values)
 
     async def set_if_unchanged(
         self,
