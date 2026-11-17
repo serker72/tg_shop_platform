@@ -172,6 +172,11 @@ class SystemSettingsService:
         #: warning text of the Master Bot dialog.
         self._stale_caches: list[str] = []
 
+    @property
+    def stale_caches(self) -> tuple[str, ...]:
+        """Caches the last call did not reset (``"settings"`` / ``"permissions"``)."""
+        return tuple(self._stale_caches)
+
     # --- reads -----------------------------------------------------------------------------
 
     async def get(self) -> SystemSettings:

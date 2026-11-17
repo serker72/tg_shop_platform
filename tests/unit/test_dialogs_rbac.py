@@ -31,7 +31,6 @@ from app.modules.iam.permissions import (
     SEED_PERMISSIONS,
     USERS_VIEW,
 )
-from app.modules.iam.presentation.tg_master.common import error_text
 from app.modules.iam.presentation.tg_master.effective import PAGE_LIMIT, paginate
 from app.modules.iam.presentation.tg_master.overrides import end_of_day, parse_reason
 from app.modules.iam.presentation.tg_master.queries import OverrideRow
@@ -44,6 +43,9 @@ from app.modules.iam.presentation.tg_master.roles import (
 )
 from app.modules.iam.snapshot import DecisionSource, PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError
+from app.shared_kernel.presentation.tg_master.common import (
+    error_text,
+)
 from tests.unit._master_bot_env import (
     ACTOR,
     R4,

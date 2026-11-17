@@ -35,26 +35,28 @@ from app.modules.iam.permissions import (
 )
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
-    actor_id,
-    add_notice,
     can_view_staff,
-    compose,
-    denied_text,
-    error_text,
     in_scope,
     load_tenant,
     mark,
-    mutate,
-    nav_texts,
     parse_uuid,
-    resolve,
-    set_notice,
-    short,
     snapshot_of,
     status_text,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import EffectiveSG, OverridesSG, StaffSG
+from app.shared_kernel.presentation.tg_master.common import (
+    actor_id,
+    add_notice,
+    compose,
+    denied_text,
+    error_text,
+    mutate,
+    nav_texts,
+    resolve,
+    set_notice,
+    short,
+)
 
 __all__ = ["parse_telegram_id", "staff_dialog"]
 

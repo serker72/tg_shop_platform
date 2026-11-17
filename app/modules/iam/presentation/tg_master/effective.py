@@ -38,16 +38,8 @@ from app.modules.iam.effective_permissions import (
     UserStatus,
 )
 from app.modules.iam.presentation.tg_master.common import (
-    actor_id,
     can_view_staff,
-    compose,
-    denied_text,
-    error_text,
     load_tenant,
-    nav_texts,
-    resolve,
-    set_notice,
-    short,
     snapshot_of,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
@@ -56,6 +48,16 @@ from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
 from app.modules.iam.presentation.tg_master.states import EffectiveSG
 from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import DecisionSource
+from app.shared_kernel.presentation.tg_master.common import (
+    actor_id,
+    compose,
+    denied_text,
+    error_text,
+    nav_texts,
+    resolve,
+    set_notice,
+    short,
+)
 
 __all__ = ["PAGE_LIMIT", "effective_dialog", "paginate"]
 

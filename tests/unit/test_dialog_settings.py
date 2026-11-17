@@ -12,7 +12,6 @@ from dishka.integrations.aiogram import CONTAINER_NAME
 
 from app.entrypoints.master_bot.middlewares import SNAPSHOT_KEY
 from app.modules.iam.permissions import SETTINGS_MANAGE
-from app.modules.iam.presentation.tg_master.common import NOTICE_KEY
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.system.presentation.tg_master.settings import (
     FIELDS,
@@ -24,6 +23,9 @@ from app.modules.system.presentation.tg_master.settings import (
 )
 from app.modules.system.service import RETENTION_CONFIG_ERROR, RETENTION_GUARD, SETTINGS_BUSY
 from app.shared_kernel.domain.exceptions import DomainError, EntityNotFoundError
+from app.shared_kernel.presentation.tg_master.common import (
+    NOTICE_KEY,
+)
 from tests.unit._master_bot_env import ACTOR, SUPER, VIEWER, Env
 
 pytestmark = pytest.mark.req("R-II.5")
@@ -107,7 +109,7 @@ async def test_stale_cache_warning_names_the_cache(
 ) -> None:
     env = Env(SETTINGS_ADMIN)
     env.system.cache_invalidated = False
-    setattr(env.system, "_stale_caches", stale)  # noqa: B010 - private attr of the fake
+    env.system.stale = tuple(stale)
     await _open(env)
     await env.press("TTL кэша прав (сек.)")
     await env.send("600")

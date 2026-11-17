@@ -40,22 +40,24 @@ from app.core.i18n import gettext as _
 from app.modules.iam.admin_service import AccessAdminService, TenantAdminService
 from app.modules.iam.permissions import GLOBAL_PERMISSIONS, ROLES_MANAGE
 from app.modules.iam.presentation.tg_master.common import (
-    actor_id,
-    compose,
-    denied_text,
-    error_text,
     load_tenant,
-    mutate,
-    nav_texts,
-    resolve,
-    set_notice,
-    short,
     snapshot_of,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries, OverrideRow
 from app.modules.iam.presentation.tg_master.roles import MODULES, PERMISSION_NAMES, module_titles
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
 from app.modules.iam.presentation.tg_master.states import OverridesSG
+from app.shared_kernel.presentation.tg_master.common import (
+    actor_id,
+    compose,
+    denied_text,
+    error_text,
+    mutate,
+    nav_texts,
+    resolve,
+    set_notice,
+    short,
+)
 
 __all__ = ["REASON_MAX_LENGTH", "end_of_day", "overrides_dialog", "parse_reason"]
 

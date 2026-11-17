@@ -39,7 +39,6 @@ from app.modules.iam.permissions import (
     PRODUCTS_VIEW,
     USERS_VIEW,
 )
-from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
 from app.modules.iam.presentation.tg_master.effective import general_getter
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import TenantsSG
@@ -53,6 +52,9 @@ from app.modules.system.ioc import SystemProvider
 from app.shared_kernel.domain.exceptions import DomainError
 from app.shared_kernel.infrastructure.database import build_session_factory
 from app.shared_kernel.infrastructure.providers import DatabaseProvider, RedisProvider
+from app.shared_kernel.presentation.tg_master.common import (
+    CONTAINER_NAME,
+)
 from tests.integration.test_permission_service import grant_role
 
 pytestmark = [pytest.mark.integration, pytest.mark.req("R-II.3", "S-II.2")]

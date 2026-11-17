@@ -24,11 +24,14 @@ from app.modules.iam.permissions import (
     USERS_MANAGE,
     USERS_VIEW,
 )
-from app.modules.iam.presentation.tg_master.common import error_text, short
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
 from app.modules.iam.presentation.tg_master.tenants import parse_chat_id, parse_name, parse_slug
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError, ValidationError
+from app.shared_kernel.presentation.tg_master.common import (
+    error_text,
+    short,
+)
 from tests.unit._master_bot_env import (  # noqa: F401
     ACTOR,
     R4,

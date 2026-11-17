@@ -37,22 +37,24 @@ from app.core.i18n import gettext as _
 from app.modules.iam.admin_service import RoleAdminService, validate_role_slug
 from app.modules.iam.permissions import ROLES_MANAGE, SEED_PERMISSIONS
 from app.modules.iam.presentation.tg_master.common import (
-    actor_id,
-    compose,
-    denied_text,
-    error_text,
-    mutate,
-    nav_texts,
     parse_uuid,
-    resolve,
-    set_notice,
-    short,
     snapshot_of,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import RolesSG
 from app.modules.iam.presentation.tg_master.tenants import parse_name
 from app.shared_kernel.domain.exceptions import DomainError
+from app.shared_kernel.presentation.tg_master.common import (
+    actor_id,
+    compose,
+    denied_text,
+    error_text,
+    mutate,
+    nav_texts,
+    resolve,
+    set_notice,
+    short,
+)
 
 __all__ = ["MODULES", "PERMISSION_NAMES", "module_of", "parse_role_slug", "roles_dialog"]
 

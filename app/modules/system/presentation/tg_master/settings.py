@@ -19,17 +19,7 @@ from aiogram_dialog.widgets.text import Format
 
 from app.core.i18n import gettext as _
 from app.modules.iam.permissions import SETTINGS_MANAGE
-from app.modules.iam.presentation.tg_master.common import (
-    actor_id,
-    compose,
-    denied_text,
-    error_text,
-    mutate,
-    nav_texts,
-    resolve,
-    set_notice,
-    snapshot_of,
-)
+from app.modules.iam.presentation.tg_master.common import snapshot_of
 from app.modules.system.models import (
     FILE_LOGS_RETENTION_DAYS_MAX,
     FILE_LOGS_RETENTION_DAYS_MIN,
@@ -42,6 +32,18 @@ from app.modules.system.service import (
     SystemSettingsService,
 )
 from app.shared_kernel.domain.exceptions import DomainError
+from app.shared_kernel.presentation.tg_master.common import (
+    actor_id,
+    compose,
+    denied_text,
+    error_text,
+    mutate,
+    nav_texts,
+    register_error_texts,
+    register_stale_cache_texts,
+    resolve,
+    set_notice,
+)
 
 __all__ = ["FIELDS", "SettingsSG", "parse_value", "settings_dialog"]
 
@@ -57,6 +59,34 @@ FIELDS: Final[dict[str, tuple[int, int]]] = {
     "audit": (RETENTION_MONTHS_MIN, RETENTION_MONTHS_MAX),
     "files": (FILE_LOGS_RETENTION_DAYS_MIN, FILE_LOGS_RETENTION_DAYS_MAX),
 }
+
+
+def _error_messages() -> dict[str, str]:
+    return {
+        "retention_guard": _(
+            "Изменение отменено: конфигурация pg_partman для audit_logs небезопасна "
+            "(архивирование партиций выключено). Пока она не исправлена, сроки хранения "
+            "логов изменить нельзя. Обратитесь к администратору БД."
+        ),
+        "retention_config_error": _(
+            "Изменение отменено: конфигурация pg_partman для таблиц логов не найдена "
+            "или некорректна. Обратитесь к администратору БД."
+        ),
+        "settings_busy": _(
+            "Настройки сейчас изменяются другим процессом, повторите через несколько секунд."
+        ),
+        "system_settings_missing": _(
+            "Системные настройки не инициализированы. Обратитесь к администратору."
+        ),
+    }
+
+
+def settings_cache_warning() -> str:
+    return _("Настройки сохранены, но другие процессы увидят изменение с задержкой до 1 мин.")
+
+
+register_error_texts(_error_messages)
+register_stale_cache_texts({"settings": settings_cache_warning})
 
 
 class SettingsSG(StatesGroup):

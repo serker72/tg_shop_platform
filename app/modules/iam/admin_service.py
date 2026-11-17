@@ -383,6 +383,11 @@ class _AdminService:
         #: invalidation (change stored, stale permissions possible until the TTL).
         self.cache_invalidated = True
 
+    @property
+    def stale_caches(self) -> tuple[str, ...]:
+        """Caches the last call did not reset: ``("permissions",)`` or empty."""
+        return () if self.cache_invalidated else ("permissions",)
+
     async def _authorize(
         self, actor_telegram_id: int, slug: str, tenant_id: UUID | None = None
     ) -> User:

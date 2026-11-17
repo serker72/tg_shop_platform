@@ -36,12 +36,12 @@ from app.modules.iam.permissions import (
     SEED_PERMISSION_SLUGS,
     USERS_VIEW,
 )
-from app.modules.iam.presentation.tg_master.common import CONTAINER_NAME
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.system.service import SystemSettingsService
 from app.shared_kernel.domain.exceptions import DomainError
+from app.shared_kernel.presentation.tg_master.common import CONTAINER_NAME
 
 R4 = pytest.mark.req("R-II.4")
 SCENARIO = pytest.mark.req("R-II.4", "S-II.3")
@@ -88,6 +88,14 @@ class Recorder:
         self.calls: list[tuple[Any, ...]] = []
         self.cache_invalidated = True
         self._noop = False
+        #: Explicit ``stale_caches``; ``None`` -> like the IAM admin services.
+        self.stale: tuple[str, ...] | None = None
+
+    @property
+    def stale_caches(self) -> tuple[str, ...]:
+        if self.stale is not None:
+            return self.stale
+        return () if self.cache_invalidated else ("permissions",)
 
     def __getattr__(self, name: str) -> Callable[..., Awaitable[Any]]:
         if name.startswith("_"):

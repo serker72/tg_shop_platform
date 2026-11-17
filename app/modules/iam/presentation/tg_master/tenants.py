@@ -23,23 +23,25 @@ from app.modules.iam.models import TENANT_SLUG_MAX_LENGTH, TENANT_SLUG_PATTERN
 from app.modules.iam.permissions import TENANTS_MANAGE
 from app.modules.iam.presentation.tg_master.common import (
     BIGINT_MAX,
-    actor_id,
-    compose,
-    denied_text,
-    error_text,
     load_tenant,
     mark,
-    mutate,
-    nav_texts,
-    resolve,
-    set_notice,
-    short,
     snapshot_of,
     status_text,
     yes_no,
 )
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import TenantsSG
+from app.shared_kernel.presentation.tg_master.common import (
+    actor_id,
+    compose,
+    denied_text,
+    error_text,
+    mutate,
+    nav_texts,
+    resolve,
+    set_notice,
+    short,
+)
 
 __all__ = ["NAME_MAX_LENGTH", "parse_chat_id", "parse_name", "parse_slug", "tenants_dialog"]
 
