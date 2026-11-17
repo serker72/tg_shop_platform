@@ -16,6 +16,11 @@ from app.shared_kernel.presentation.aiogram_dialog_ids import (
 
 ORIGINAL_MAX = 99 * 100_000_000 + 99_999_999
 
+# Captured at import: pytest collects (imports) every test module before any fixture
+# runs, so this is still the library function, not the generator installed by the
+# autouse ``unique_dialog_ids`` fixture (which also restores it after each test).
+LIBRARY_NEW_INT_ID = stack.new_int_id
+
 
 class _S(StatesGroup):
     main = State()
@@ -23,7 +28,9 @@ class _S(StatesGroup):
 
 @pytest.fixture
 def restore_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(stack, "new_int_id", stack.new_int_id)
+    """Start from the library original; monkeypatch restores the previous value."""
+    assert not isinstance(LIBRARY_NEW_INT_ID, UniqueIntIdGenerator)
+    monkeypatch.setattr(stack, "new_int_id", LIBRARY_NEW_INT_ID)
 
 
 def test_many_ids_in_one_second_are_unique() -> None:
@@ -64,6 +71,8 @@ def test_invalid_slot_rejected() -> None:
 
 @pytest.mark.usefixtures("restore_stack")
 def test_install_is_idempotent() -> None:
+    assert stack.new_int_id is LIBRARY_NEW_INT_ID
+    assert not isinstance(stack.new_int_id, UniqueIntIdGenerator)
     assert install_unique_intent_ids() is True
     installed = stack.new_int_id
     assert isinstance(installed, UniqueIntIdGenerator)

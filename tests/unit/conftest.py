@@ -16,8 +16,10 @@ def unique_dialog_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     within one second share an id with probability 1/100 (and pytest-randomly reseeds
     ``random`` per test), so a child dialog's ``done`` removed the parent's context ->
     ``UnknownIntent`` in forged-callback tests. The production generator from
-    shared_kernel keeps ids unique; installed per test and restored afterwards so
-    tests of the installer itself start from the library original.
+    shared_kernel keeps ids unique: it is installed before every test and the previous
+    ``new_int_id`` is restored afterwards. Tests of the installer itself
+    (``test_aiogram_dialog_ids.py::restore_stack``) put the library original back
+    explicitly, since inside a test this fixture has already replaced it.
     """
     monkeypatch.setattr(stack, "new_int_id", stack.new_int_id)
     assert install_unique_intent_ids()
