@@ -25,6 +25,7 @@ from app.modules.iam.service import (
     PermissionService,
 )
 from app.modules.iam.snapshot import DecisionSource, PermissionSnapshot
+from app.modules.system.cache import SystemSettingsCache
 from app.modules.system.models import DEFAULT_IAM_CACHE_TTL_SECONDS
 from app.shared_kernel.domain.exceptions import (
     EntityNotFoundError,
@@ -212,6 +213,22 @@ class _FakeSessionProvider(Provider):
     @provide(scope=Scope.REQUEST)
     def session(self) -> AsyncSession:
         return MagicMock(spec=AsyncSession)
+
+    @provide(scope=Scope.APP)
+    def settings_cache(self) -> SystemSettingsCache:
+        return MagicMock(spec=SystemSettingsCache)
+
+
+async def test_ttl_from_settings_cache() -> None:
+    settings_cache = MagicMock()
+    settings_cache.get = AsyncMock(return_value=SimpleNamespace(iam_cache_ttl_seconds=321))
+    repo = MagicMock()
+    repo.get = AsyncMock(side_effect=AssertionError("repository must not be read"))
+    service = PermissionService(
+        MagicMock(), MagicMock(), system_settings=repo, settings_cache=settings_cache
+    )
+    assert await service._ttl_for(user_snapshot(), NOW) == 321
+    settings_cache.get.assert_awaited_once()
 
 
 async def test_container_wiring() -> None:

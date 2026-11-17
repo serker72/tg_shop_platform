@@ -1,90 +1,24 @@
-"""``MaintenanceGate``: cached ``system_settings.is_maintenance_mode`` flag (decision Q4).
+"""``MaintenanceGate``: ``system_settings.is_maintenance_mode`` flag (decision Q4).
 
-The flag is read from PostgreSQL at most once per ``ttl`` seconds per process (a short TTL
-keeps every update from hitting the DB); concurrent callers after expiry share one read
-(``asyncio.Lock``). A missing singleton row means "off". A DB error keeps the last known
-value (fail-open ``False`` before the first successful read) for one more TTL. Reused by
-the shop bots (task 12).
+Reads the flag through :class:`~app.modules.system.cache.SystemSettingsCache` (Redis
+snapshot + generation, no process-local cache): a change committed by
+``SystemSettingsService`` is visible to every process on the next update. Redis down ->
+PostgreSQL; PostgreSQL down -> last known value; before the first successful read the flag
+is off (fail-open). Reused by the shop bots (task 12).
 """
 
 from __future__ import annotations
 
-import asyncio
-import time
-from collections.abc import Callable
+from app.modules.system.cache import SystemSettingsCache
 
-import structlog
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from app.modules.system.repository import SystemSettingsRepository
-from app.shared_kernel.domain.exceptions import EntityNotFoundError
-
-__all__ = ["DEFAULT_MAINTENANCE_TTL_SECONDS", "MaintenanceGate"]
-
-DEFAULT_MAINTENANCE_TTL_SECONDS = 5.0
-
-_log = structlog.get_logger(__name__)
+__all__ = ["MaintenanceGate"]
 
 
 class MaintenanceGate:
-    """Read-only, process-local cache of the maintenance flag."""
+    """Read-only view of the maintenance flag."""
 
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        *,
-        ttl: float = DEFAULT_MAINTENANCE_TTL_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._session_factory = session_factory
-        self._ttl = ttl
-        self._clock = clock
-        self._value = False
-        self._known = False
-        self._expires_at = float("-inf")
-        self._lock = asyncio.Lock()
-        #: Bumped by :meth:`invalidate`; a read started before the bump is not cached.
-        self._gen = 0
-
-    def invalidate(self) -> None:
-        """Forget the cached value: the next :meth:`is_on` reads PostgreSQL (after a change).
-
-        A read already in flight may return the old value once, but it is not cached.
-        """
-        self._gen += 1
-        self._expires_at = float("-inf")
+    def __init__(self, settings: SystemSettingsCache) -> None:
+        self._settings = settings
 
     async def is_on(self) -> bool:
-        if self._clock() < self._expires_at:
-            return self._value
-        async with self._lock:
-            now = self._clock()
-            if now < self._expires_at:  # refreshed by a concurrent caller
-                return self._value
-            gen = self._gen
-            value = await self._read()
-            if gen == self._gen:  # not invalidated during the read: cache + fallback
-                self._value = value
-                self._expires_at = now + self._ttl
-            return value
-
-    async def _read(self) -> bool:
-        try:
-            async with self._session_factory() as session:
-                try:
-                    settings = await SystemSettingsRepository(session).get()
-                except EntityNotFoundError:
-                    value = False
-                else:
-                    value = bool(settings.is_maintenance_mode)
-        except SQLAlchemyError as error:
-            if self._known:
-                _log.warning(
-                    "maintenance_flag_read_failed", error=type(error).__name__, kept=self._value
-                )
-                return self._value
-            _log.error("maintenance_flag_read_failed_fail_open", error=type(error).__name__)
-            return False
-        self._known = True
-        return value
+        return (await self._settings.get()).is_maintenance_mode

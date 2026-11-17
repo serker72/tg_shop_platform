@@ -228,7 +228,7 @@ async def master_bot_component(ctx: ServiceContext) -> AsyncIterator[MasterBotRu
     readiness = registry.readiness.get(TELEGRAM_READINESS) or ReadinessGate()
     readiness.set_not_ready()
     redis = await container.get(Redis)
-    # Shared with SystemSettingsService (APP scope): a change resets this process' cache.
+    # Reads the Redis settings snapshot (SystemSettingsCache): changes of any process apply.
     gate = await container.get(MaintenanceGate)
     activity = await container.get(ActivityLogger)
 

@@ -49,6 +49,7 @@ from app.modules.logging.buffer import LogBuffer
 from app.modules.logging.files import DailyFileWriter
 from app.modules.logging.metrics import LogsDroppedCounter
 from app.modules.logging.models import UserActivity
+from app.modules.system.ioc import SystemProvider
 from app.shared_kernel.domain.exceptions import DomainError
 from app.shared_kernel.infrastructure.database import build_session_factory
 from app.shared_kernel.infrastructure.providers import DatabaseProvider, RedisProvider
@@ -66,7 +67,11 @@ def _tg() -> int:
 @pytest.fixture
 async def container(settings: Settings, clean_db: AsyncEngine) -> AsyncIterator[AsyncContainer]:
     built = make_async_container(
-        DatabaseProvider(), RedisProvider(), IamProvider(), context={Settings: settings}
+        DatabaseProvider(),
+        RedisProvider(),
+        IamProvider(),
+        SystemProvider(),
+        context={Settings: settings},
     )
     try:
         yield built

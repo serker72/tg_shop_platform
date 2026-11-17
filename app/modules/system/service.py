@@ -9,13 +9,15 @@ Every mutating method follows the IAM write-service pattern (``app.modules.iam.a
    then update ``part_config.retention`` in the same transaction (guard -> rollback);
 4. an ``AuditLogger`` record in the SAME transaction (``before`` / ``after``);
 5. ``commit`` (any error -> rollback, nothing is written);
-6. strictly AFTER the commit: ``PermissionService.invalidate_all`` (IAM cache TTL) or a reset
-   of the process-local :class:`MaintenanceGate` cache. Other processes (client bots) read
-   the flag again within the gate TTL.
+6. strictly AFTER the commit: :meth:`SystemSettingsCache.invalidate` (every change: bump of
+   ``settings:gen`` - every process sees the new row on its next read) and, for the IAM
+   cache TTL, ``PermissionService.invalidate_all``.
 
 A request that changes nothing commits the read transaction and writes neither audit nor
 invalidation (``_noop``). After every call :attr:`cache_invalidated` tells whether Redis
-confirmed ``invalidate_all`` (``False`` -> stored, stale permission TTL until expiry).
+confirmed every invalidation (``False`` -> stored, but other processes may read the old
+settings snapshot / permission TTL until the key TTL; counted in
+``iam_cache_invalidation_failures_total{scope="settings"|"all"}``).
 
 **Session contract.** The service commits the request session itself, so it must not hold
 foreign pending changes on entry (``session_not_clean``).
@@ -44,7 +46,7 @@ from app.modules.logging import retention
 from app.modules.logging.audit import SqlAuditLogger
 from app.modules.logging.events import AuditEvent
 from app.modules.logging.ports import AuditLogger
-from app.modules.system.maintenance import MaintenanceGate
+from app.modules.system.cache import SystemSettingsCache
 from app.modules.system.models import (
     FILE_LOGS_RETENTION_DAYS_MAX,
     FILE_LOGS_RETENTION_DAYS_MIN,
@@ -152,7 +154,7 @@ class SystemSettingsService:
         session: AsyncSession,
         permissions: PermissionService,
         *,
-        gate: MaintenanceGate | None = None,
+        settings_cache: SystemSettingsCache | None = None,
         audit: AuditLogger | None = None,
         invalidation_failures: CacheInvalidationFailures = iam_cache_invalidation_failures_total,
         lock_timeout_ms: int = LOCK_TIMEOUT_MS,
@@ -160,7 +162,7 @@ class SystemSettingsService:
         self._lock_timeout_ms = int(lock_timeout_ms)
         self._session = session
         self._permissions = permissions
-        self._gate = gate
+        self._settings_cache = settings_cache
         self._audit_logger: AuditLogger = audit or SqlAuditLogger()
         self._repo = SystemSettingsRepository(session)
         self._failures = invalidation_failures
@@ -181,8 +183,7 @@ class SystemSettingsService:
         settings = await self._change(
             actor_telegram_id, "system.settings.maintenance", {"is_maintenance_mode": enabled}
         )
-        if not self._noop and self._gate is not None:
-            self._gate.invalidate()
+        await self._publish()
         return settings
 
     async def set_iam_cache_ttl(self, actor_telegram_id: int, seconds: int) -> SystemSettings:
@@ -190,11 +191,7 @@ class SystemSettingsService:
         settings = await self._change(
             actor_telegram_id, "system.settings.iam_cache_ttl", {"iam_cache_ttl_seconds": value}
         )
-        if not self._noop:
-            if not (await self._permissions.invalidate_all()).ok:
-                self.cache_invalidated = False
-                self._failures.inc(scope="all")
-                _log.error("system_settings_cache_invalidation_failed")
+        await self._publish(permissions=True)
         return settings
 
     async def set_retention(
@@ -219,21 +216,39 @@ class SystemSettingsService:
             raise ValidationError(
                 "user_activity_months or audit_logs_months is required", code=INVALID_RETENTION
             )
-        return await self._change(
+        settings = await self._change(
             actor_telegram_id, "system.settings.retention", values, sync_partman=True
         )
+        await self._publish()
+        return settings
 
     async def set_file_logs_retention_days(
         self, actor_telegram_id: int, days: int
     ) -> SystemSettings:
         value = validate_file_logs_days(days)
-        return await self._change(
+        settings = await self._change(
             actor_telegram_id,
             "system.settings.file_logs_retention",
             {"file_logs_retention_days": value},
         )
+        await self._publish()
+        return settings
 
     # --- internals -------------------------------------------------------------------------
+
+    async def _publish(self, *, permissions: bool = False) -> None:
+        """After a committed change: drop the settings snapshot (and the permission snapshots
+        when their TTL changed); a failure is counted and reported via ``cache_invalidated``."""
+        if self._noop:
+            return
+        if self._settings_cache is not None and not (await self._settings_cache.invalidate()).ok:
+            self.cache_invalidated = False
+            self._failures.inc(scope="settings")
+            _log.error("system_settings_snapshot_invalidation_failed")
+        if permissions and not (await self._permissions.invalidate_all()).ok:
+            self.cache_invalidated = False
+            self._failures.inc(scope="all")
+            _log.error("system_settings_cache_invalidation_failed")
 
     async def _change(
         self,

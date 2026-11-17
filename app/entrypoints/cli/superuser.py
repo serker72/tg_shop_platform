@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run(settings: Settings, args: argparse.Namespace) -> SuperuserResult:
+    from app.modules.system.cache import SystemSettingsCache
+
     """Execute the parsed command; engine and Redis client are always closed."""
     if settings.postgres.password is None:
         raise ConfigurationError(
@@ -80,7 +82,12 @@ async def run(settings: Settings, args: argparse.Namespace) -> SuperuserResult:
         session_factory = build_session_factory(engine)
         async with session_factory() as session:
             installer = SuperuserInstaller(
-                session, PermissionService(session, PermissionCache(redis))
+                session,
+                PermissionService(
+                    session,
+                    PermissionCache(redis),
+                    settings_cache=SystemSettingsCache(redis, session_factory),
+                ),
             )
             if args.command == "create":
                 return await installer.grant(args.telegram_id, args.username)

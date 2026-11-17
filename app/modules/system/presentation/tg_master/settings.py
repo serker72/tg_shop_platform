@@ -47,6 +47,9 @@ __all__ = ["FIELDS", "SettingsSG", "parse_value", "settings_dialog"]
 
 FIELD_KEY: Final = "field"
 TARGET_KEY: Final = "maintenance"
+#: ``dialog_data`` key of a pending retention decrease: ``{"field": "ua"|"audit", "value": N}``.
+RETENTION_KEY: Final = "retention_decrease"
+_RETENTION_FIELDS: Final = ("ua", "audit")
 #: Editable numeric field -> (min, max).
 FIELDS: Final[dict[str, tuple[int, int]]] = {
     "ttl": (IAM_CACHE_TTL_SECONDS_MIN, IAM_CACHE_TTL_SECONDS_MAX),
@@ -60,6 +63,7 @@ class SettingsSG(StatesGroup):
     main = State()
     confirm = State()
     edit = State()
+    retention_confirm = State()
 
 
 def parse_value(field: str, raw: str | None) -> int | None:
@@ -131,6 +135,32 @@ async def confirm_getter(dialog_manager: DialogManager, **_kw: Any) -> dict[str,
         if enabled
         else _("Выключить режим технических работ?")
     )
+    return {**data, "allowed": True, "text": question}
+
+
+def _pending_retention(manager: DialogManager) -> tuple[str, int] | None:
+    """Validated pending decrease from ``dialog_data``; anything malformed -> ``None``."""
+    pending = manager.dialog_data.get(RETENTION_KEY)
+    if not isinstance(pending, dict):
+        return None
+    field, value = pending.get("field"), pending.get("value")
+    if field not in _RETENTION_FIELDS or isinstance(value, bool) or not isinstance(value, int):
+        return None
+    low, high = FIELDS[field]
+    return (field, value) if low <= value <= high else None
+
+
+async def retention_confirm_getter(dialog_manager: DialogManager, **_kw: Any) -> dict[str, Any]:
+    data = _texts()
+    pending = _pending_retention(dialog_manager)
+    if not _allowed(dialog_manager) or pending is None:
+        return {**data, "allowed": False, "text": denied_text()}
+    field, value = pending
+    question = (
+        _("Партиции user_activity старше {n} мес. будут удалены безвозвратно. Продолжить?")
+        if field == "ua"
+        else _("Партиции audit_logs старше {n} мес. будут отсоединены и архивированы. Продолжить?")
+    ).format(n=value)
     return {**data, "allowed": True, "text": question}
 
 
@@ -214,8 +244,51 @@ async def _on_input(message: Message, widget: MessageInput, manager: DialogManag
             ),
         )
         return
+    if field in _RETENTION_FIELDS:
+        try:
+            current = await (await resolve(manager, SystemSettingsService)).get()
+        except DomainError as error:
+            set_notice(manager, error_text(error.code))
+            return
+        stored = (
+            current.user_activity_retention_months
+            if field == "ua"
+            else current.audit_logs_retention_months
+        )
+        if value < stored:
+            # Partitions are dropped / archived: ask before calling the service.
+            manager.dialog_data[RETENTION_KEY] = {"field": field, "value": value}
+            manager.dialog_data.pop(FIELD_KEY, None)
+            await manager.switch_to(SettingsSG.retention_confirm)
+            return
     await mutate(manager, SystemSettingsService, _setter(field, value, actor_id(manager)))
     manager.dialog_data.pop(FIELD_KEY, None)
+    await manager.switch_to(SettingsSG.main)
+
+
+async def _on_retention_confirm(
+    callback: CallbackQuery, button: Button, manager: DialogManager
+) -> None:
+    if not _allowed(manager):
+        manager.dialog_data.pop(RETENTION_KEY, None)
+        await _deny(callback)
+        return
+    pending = _pending_retention(manager)
+    manager.dialog_data.pop(RETENTION_KEY, None)
+    if pending is None:
+        # Repeated / forged "Yes" or lost FSM data: never guess the value.
+        set_notice(manager, _("Некорректное действие, повторите."))
+        await manager.switch_to(SettingsSG.main)
+        return
+    field, value = pending
+    await mutate(manager, SystemSettingsService, _setter(field, value, actor_id(manager)))
+    await manager.switch_to(SettingsSG.main)
+
+
+async def _on_retention_cancel(
+    callback: CallbackQuery, button: Button, manager: DialogManager
+) -> None:
+    manager.dialog_data.pop(RETENTION_KEY, None)
     await manager.switch_to(SettingsSG.main)
 
 
@@ -254,5 +327,19 @@ def settings_dialog() -> Dialog:
             SwitchTo(Format("{btn_back}"), id="back", state=SettingsSG.main),
             state=SettingsSG.edit,
             getter=edit_getter,
+        ),
+        Window(
+            Format("{text}"),
+            Row(
+                Button(
+                    Format("{btn_yes}"),
+                    id="ret_yes",
+                    on_click=_on_retention_confirm,
+                    when="allowed",
+                ),
+                Button(Format("{btn_no}"), id="ret_no", on_click=_on_retention_cancel),
+            ),
+            state=SettingsSG.retention_confirm,
+            getter=retention_confirm_getter,
         ),
     )

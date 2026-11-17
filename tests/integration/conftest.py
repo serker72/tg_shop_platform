@@ -349,8 +349,13 @@ REDIS_TEST_DB = 15
 
 async def _drop_permission_keys(client: Any) -> None:
     from app.modules.iam.cache import GLOBAL_GENERATION_KEY
+    from app.modules.system.cache import SETTINGS_KEY_PATTERN
 
-    keys = [key async for key in client.scan_iter(match=REDIS_TEST_KEY_PATTERN, count=500)]
+    keys = [
+        key
+        for pattern in (REDIS_TEST_KEY_PATTERN, SETTINGS_KEY_PATTERN)
+        async for key in client.scan_iter(match=pattern, count=500)
+    ]
     keys.append(GLOBAL_GENERATION_KEY.encode())
     if keys:
         await client.unlink(*keys)
@@ -363,7 +368,7 @@ async def redis_client(settings: Settings) -> AsyncIterator[Any]:
     Guards before any connection: ``PROJECT_ENVIRONMENT=test`` + ``*_test`` database (same
     rule as PostgreSQL) and ``REDIS_DB`` equal to the test database number
     (:data:`REDIS_TEST_DB`, written by ``ops/scripts/env_test.sh``) - the dev cache is never
-    touched. Only the permission keys (``user:*``, ``perms:gen``) are removed, before and
+    touched. Only the cache keys (``user:*``, ``perms:gen``, ``settings:*``) are removed, before and
     after the test; no ``FLUSHDB`` / ``FLUSHALL``.
     """
     from redis.exceptions import RedisError

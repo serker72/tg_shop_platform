@@ -19,6 +19,7 @@ from app.modules.iam.service import PERMISSION_DENIED, PermissionService
 from app.modules.logging import retention
 from app.modules.logging.models import AuditLog
 from app.modules.system import service as svc
+from app.modules.system.cache import SystemSettingsCache
 from app.modules.system.maintenance import MaintenanceGate
 from app.modules.system.models import SystemSettings
 from app.modules.system.service import SystemSettingsService
@@ -40,16 +41,25 @@ RETENTION_SQL = text(
 
 
 @pytest.fixture
-def gate(session_factory: async_sessionmaker[AsyncSession]) -> MaintenanceGate:
-    return MaintenanceGate(session_factory, ttl=3600)
+def settings_cache(
+    redis_client: Any, session_factory: async_sessionmaker[AsyncSession]
+) -> SystemSettingsCache:
+    return SystemSettingsCache(redis_client, session_factory)
+
+
+@pytest.fixture
+def gate(settings_cache: SystemSettingsCache) -> MaintenanceGate:
+    return MaintenanceGate(settings_cache)
 
 
 @pytest.fixture
 def service(
-    session: AsyncSession, redis_client: Any, gate: MaintenanceGate
+    session: AsyncSession, redis_client: Any, settings_cache: SystemSettingsCache
 ) -> SystemSettingsService:
     return SystemSettingsService(
-        session, PermissionService(session, PermissionCache(redis_client)), gate=gate
+        session,
+        PermissionService(session, PermissionCache(redis_client), settings_cache=settings_cache),
+        settings_cache=settings_cache,
     )
 
 
@@ -175,15 +185,71 @@ async def test_guard_error_rolls_back(
 
 
 async def test_maintenance_visible_to_gate(
-    session: AsyncSession, service: SystemSettingsService, gate: MaintenanceGate
+    session: AsyncSession,
+    service: SystemSettingsService,
+    gate: MaintenanceGate,
+    redis_client: Any,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     admin = await make_user(session, superuser=True)
+    # Another process: its own cache/gate instances over the same Redis.
+    other = MaintenanceGate(SystemSettingsCache(redis_client, session_factory))
     assert await gate.is_on() is False
+    assert await other.is_on() is False
+    assert await redis_client.exists("settings:snapshot") == 1  # warmed by the read
     await service.set_maintenance(admin, True)
-    assert await gate.is_on() is True  # cache reset after commit (ttl=3600 otherwise)
+    assert service.cache_invalidated is True
+    assert await other.is_on() is True
+    assert await gate.is_on() is True
     assert await audit_count(session, "system.settings.maintenance", admin) == 1
     await service.set_maintenance(admin, False)
-    assert await gate.is_on() is False
+    assert await other.is_on() is False
+
+
+async def test_permission_ttl_taken_from_settings_cache(
+    session: AsyncSession,
+    service: SystemSettingsService,
+    redis_client: Any,
+    settings_cache: SystemSettingsCache,
+) -> None:
+    admin = await make_user(session, superuser=True)
+    await service.set_iam_cache_ttl(admin, 777)
+    user = await make_user(session, role=ROLE_MODERATOR)
+    permissions = PermissionService(
+        session, PermissionCache(redis_client), settings_cache=settings_cache
+    )
+    await permissions.get_snapshot(user)
+    ttl = await redis_client.ttl(PermissionCache.key(user))
+    assert 0 < ttl <= 777
+    assert (await settings_cache.get()).iam_cache_ttl_seconds == 777
+
+
+async def test_redis_down_service_works_but_reports_stale_cache(
+    session: AsyncSession, session_factory: async_sessionmaker[AsyncSession], settings: Any
+) -> None:
+    from app.shared_kernel.infrastructure.redis import build_redis
+
+    admin = await make_user(session, superuser=True)
+    dead_settings = settings.model_copy(
+        update={"redis": settings.redis.model_copy(update={"port": 1})}
+    )
+    dead = build_redis(dead_settings)
+    try:
+        cache = SystemSettingsCache(dead, session_factory)
+        failures: list[dict[str, Any]] = []
+        counter = SimpleNamespace(inc=lambda **labels: failures.append(labels))
+        service = SystemSettingsService(
+            session,
+            PermissionService(session, PermissionCache(dead), settings_cache=cache),
+            settings_cache=cache,
+            invalidation_failures=cast(Any, counter),
+        )
+        await service.set_maintenance(admin, True)
+        assert service.cache_invalidated is False
+        assert failures == [{"scope": "settings"}]
+        assert await MaintenanceGate(cache).is_on() is True  # Redis down -> PostgreSQL
+    finally:
+        await dead.aclose()
 
 
 async def test_ttl_and_file_logs(session: AsyncSession, service: SystemSettingsService) -> None:
@@ -298,13 +364,16 @@ async def test_config_error_is_not_reported_as_guard(
 
 
 async def test_locked_settings_row_reports_busy(
-    session: AsyncSession, redis_client: Any, gate: MaintenanceGate, engine: AsyncEngine
+    session: AsyncSession,
+    redis_client: Any,
+    settings_cache: SystemSettingsCache,
+    engine: AsyncEngine,
 ) -> None:
     admin = await make_user(session, superuser=True)
     service = SystemSettingsService(
         session,
         PermissionService(session, PermissionCache(redis_client)),
-        gate=gate,
+        settings_cache=settings_cache,
         lock_timeout_ms=200,
     )
     async with engine.connect() as other:
@@ -318,7 +387,10 @@ async def test_locked_settings_row_reports_busy(
 
 
 async def test_ttl_cache_invalidation_failure_reported(
-    session: AsyncSession, redis_client: Any, gate: MaintenanceGate, monkeypatch: pytest.MonkeyPatch
+    session: AsyncSession,
+    redis_client: Any,
+    settings_cache: SystemSettingsCache,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     admin = await make_user(session, superuser=True)
     permissions = PermissionService(session, PermissionCache(redis_client))
@@ -330,7 +402,10 @@ async def test_ttl_cache_invalidation_failure_reported(
     failures: list[dict[str, Any]] = []
     counter = SimpleNamespace(inc=lambda **labels: failures.append(labels))
     service = SystemSettingsService(
-        session, permissions, gate=gate, invalidation_failures=cast(Any, counter)
+        session,
+        permissions,
+        settings_cache=settings_cache,
+        invalidation_failures=cast(Any, counter),
     )
     await service.set_iam_cache_ttl(admin, 1200)
     assert service.cache_invalidated is False
@@ -339,15 +414,20 @@ async def test_ttl_cache_invalidation_failure_reported(
     assert await audit_count(session, "system.settings.iam_cache_ttl", admin) == 1
 
 
-async def test_maintenance_noop_keeps_gate_cache(
+async def test_maintenance_noop_keeps_settings_cache(
     session: AsyncSession,
     service: SystemSettingsService,
-    gate: MaintenanceGate,
+    settings_cache: SystemSettingsCache,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     admin = await make_user(session, superuser=True)
     calls: list[int] = []
-    monkeypatch.setattr(gate, "invalidate", lambda: calls.append(1))
+
+    async def invalidate() -> Any:
+        calls.append(1)
+        return SimpleNamespace(ok=True)
+
+    monkeypatch.setattr(settings_cache, "invalidate", invalidate)
     await service.set_maintenance(admin, False)
     assert service._noop is True
     assert calls == []

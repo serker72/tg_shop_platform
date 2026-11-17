@@ -1,7 +1,8 @@
 """In-process metrics of the IAM module.
 
 ``iam_cache_invalidation_failures_total{scope}`` counts permission-cache invalidations that
-Redis did not confirm after a committed IAM change (``scope`` = ``user`` | ``all``): the
+Redis did not confirm after a committed IAM change (``scope`` = ``user`` | ``all``; ``settings``
+- the ``system_settings`` snapshot of ``SystemSettingsCache``): the
 change is stored, but other processes may serve the old snapshot until its TTL. Exported by
 :class:`~app.core.observability.metrics.IamCacheInvalidationCollector`.
 """
@@ -17,7 +18,7 @@ __all__ = [
 ]
 
 #: Every ``scope`` label value (exported with ``0`` before the first failure).
-INVALIDATION_SCOPES: tuple[str, ...] = ("all", "user")
+INVALIDATION_SCOPES: tuple[str, ...] = ("all", "settings", "user")
 
 
 class CacheInvalidationFailures:

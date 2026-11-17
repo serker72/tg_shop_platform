@@ -1,7 +1,7 @@
 """Dishka provider of the IAM module.
 
-Requires ``redis.asyncio.Redis`` (``RedisProvider``) and ``AsyncSession``
-(``DatabaseProvider``).
+Requires ``redis.asyncio.Redis`` (``RedisProvider``), ``AsyncSession``
+(``DatabaseProvider``) and ``SystemSettingsCache`` (``SystemProvider``).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from app.modules.iam.admin_service import (
 from app.modules.iam.cache import PermissionCache
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.service import PermissionService
+from app.modules.system.cache import SystemSettingsCache
 
 __all__ = ["IamProvider"]
 
@@ -33,10 +34,10 @@ class IamProvider(Provider):
 
     @provide(scope=Scope.REQUEST)
     def provide_permission_service(
-        self, session: AsyncSession, cache: PermissionCache
+        self, session: AsyncSession, cache: PermissionCache, settings_cache: SystemSettingsCache
     ) -> PermissionService:
-        """Permission checker bound to the request session."""
-        return PermissionService(session, cache)
+        """Permission checker bound to the request session (TTL from the settings cache)."""
+        return PermissionService(session, cache, settings_cache=settings_cache)
 
     @provide(scope=Scope.REQUEST)
     def provide_tenant_admin_service(

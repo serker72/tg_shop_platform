@@ -45,6 +45,7 @@ from app.modules.iam.effective_permissions import EffectivePermissionsReport
 from app.modules.iam.models import PERMISSION_SLUG_PATTERN
 from app.modules.iam.repository import PermissionQueryRepository
 from app.modules.iam.snapshot import Decision, PermissionSnapshot
+from app.modules.system.cache import SystemSettingsCache
 from app.modules.system.models import DEFAULT_IAM_CACHE_TTL_SECONDS
 from app.modules.system.repository import SystemSettingsRepository
 from app.shared_kernel.domain.exceptions import (
@@ -89,12 +90,17 @@ class PermissionService:
         *,
         queries: PermissionQueryRepository | None = None,
         system_settings: SystemSettingsRepository | None = None,
+        settings_cache: SystemSettingsCache | None = None,
         clock: Callable[[], datetime] = _utcnow,
     ) -> None:
+        """``settings_cache`` (DI wiring) supplies ``iam_cache_ttl_seconds`` from the Redis
+        settings snapshot; without it the TTL is read from ``system_settings`` in the request
+        session (CLI / tests building the service by hand)."""
         self._session = session
         self._cache = cache
         self._queries = queries or PermissionQueryRepository(session)
         self._system_settings = system_settings or SystemSettingsRepository(session)
+        self._settings_cache = settings_cache
         self._clock = clock
         self._snapshots: dict[int, PermissionSnapshot] = {}
 
@@ -214,11 +220,15 @@ class PermissionService:
     async def _ttl_for(self, snapshot: PermissionSnapshot, now: datetime) -> int:
         if not snapshot.exists:
             return NEGATIVE_CACHE_TTL_SECONDS
-        try:
-            ttl = (await self._system_settings.get()).iam_cache_ttl_seconds
-        except (EntityNotFoundError, SQLAlchemyError):
-            _log.warning("iam_cache_ttl_fallback", ttl=DEFAULT_IAM_CACHE_TTL_SECONDS)
-            ttl = DEFAULT_IAM_CACHE_TTL_SECONDS
+        if self._settings_cache is not None:
+            # Never raises: Redis -> PostgreSQL -> last known -> default.
+            ttl = (await self._settings_cache.get()).iam_cache_ttl_seconds
+        else:
+            try:
+                ttl = (await self._system_settings.get()).iam_cache_ttl_seconds
+            except (EntityNotFoundError, SQLAlchemyError):
+                _log.warning("iam_cache_ttl_fallback", ttl=DEFAULT_IAM_CACHE_TTL_SECONDS)
+                ttl = DEFAULT_IAM_CACHE_TTL_SECONDS
         if snapshot.next_expiry is not None:
             ttl = min(ttl, math.ceil((snapshot.next_expiry - now).total_seconds()))
         return max(1, ttl)

@@ -16,8 +16,10 @@ from app.modules.iam.presentation.tg_master.common import NOTICE_KEY
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.system.presentation.tg_master.settings import (
     FIELDS,
+    RETENTION_KEY,
     SettingsSG,
     _on_confirm,
+    _on_retention_confirm,
     parse_value,
 )
 from app.modules.system.service import RETENTION_CONFIG_ERROR, RETENTION_GUARD, SETTINGS_BUSY
@@ -170,6 +172,93 @@ async def test_ttl_and_file_logs_input() -> None:
     assert not any(c[0] == "set_file_logs_retention_days" for c in env.system.calls)
     await env.send("30")
     assert ("set_file_logs_retention_days", ACTOR, 30) in env.system.calls
+
+
+def _retention_calls(env: Env) -> list[tuple[Any, ...]]:
+    return [call for call in env.system.calls if call[0] == "set_retention"]
+
+
+async def test_retention_decrease_requires_confirmation() -> None:
+    env = Env(SETTINGS_ADMIN)
+    await _open(env)
+    await env.press("Хранение audit_logs (мес.)")
+    await env.send("12")
+    assert "audit_logs старше 12 мес. будут отсоединены и архивированы" in env.text()
+    assert _retention_calls(env) == []
+    await env.press("Да")
+    assert ("set_retention", ACTOR, 12) in env.system.calls
+    assert "Хранение audit_logs (мес.): 12" in env.text()
+    await env.press("Хранение user_activity (мес.)")
+    await env.send("2")
+    assert "user_activity старше 2 мес. будут удалены безвозвратно" in env.text()
+    await env.press("Да")
+    assert ("set_retention", ACTOR, 2) in env.system.calls
+
+
+async def test_retention_decrease_cancelled() -> None:
+    env = Env(SETTINGS_ADMIN)
+    await _open(env)
+    await env.press("Хранение user_activity (мес.)")
+    await env.send("1")
+    assert "будут удалены безвозвратно" in env.text()
+    await env.press("Нет")
+    assert _retention_calls(env) == []
+    assert env.system_settings.user_activity_retention_months == 3
+    assert "Системные настройки" in env.text()
+
+
+async def test_retention_increase_or_equal_without_confirmation() -> None:
+    env = Env(SETTINGS_ADMIN)
+    await _open(env)
+    await env.press("Хранение user_activity (мес.)")
+    await env.send("3")  # equal
+    assert "безвозвратно" not in env.text()
+    assert ("set_retention", ACTOR, 3) in env.system.calls
+    await env.press("Хранение audit_logs (мес.)")
+    await env.send("36")  # increase
+    assert "архивированы" not in env.text()
+    assert ("set_retention", ACTOR, 36) in env.system.calls
+
+
+@pytest.mark.parametrize(
+    "pending",
+    [
+        None,
+        {"field": "ua"},
+        {"field": "ua", "value": "2"},
+        {"field": "ttl", "value": 2},
+        {"field": "ua", "value": True},
+        {"field": "ua", "value": 0},
+        "ua:2",
+    ],
+)
+async def test_forged_retention_yes_does_not_call_service(pending: Any) -> None:
+    container = AsyncMock()
+    data: dict[str, Any] = {} if pending is None else {RETENTION_KEY: pending}
+    manager = SimpleNamespace(
+        dialog_data=data,
+        middleware_data={
+            SNAPSHOT_KEY: SUPER,
+            "event_from_user": SimpleNamespace(id=ACTOR),
+            CONTAINER_NAME: container,
+        },
+        switch_to=AsyncMock(),
+    )
+    await _on_retention_confirm(AsyncMock(), cast(Any, None), cast(Any, manager))
+    container.get.assert_not_called()
+    manager.switch_to.assert_awaited_once_with(SettingsSG.main)
+    assert "Некорректное действие" in manager.dialog_data[NOTICE_KEY]
+    assert RETENTION_KEY not in manager.dialog_data
+
+
+async def test_retention_yes_rechecks_permission() -> None:
+    env = Env(SETTINGS_ADMIN)
+    await _open(env)
+    await env.press("Хранение user_activity (мес.)")
+    await env.send("1")
+    env.snapshot = VIEWER
+    await env.forge("ret_yes", "ret_yes", "ret_yes")
+    assert _retention_calls(env) == []
 
 
 async def test_guard_error_shows_message() -> None:

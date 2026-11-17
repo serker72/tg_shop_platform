@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-17 12:35+0300\n"
+"POT-Creation-Date: 2026-11-17 13:25+0300\n"
 "PO-Revision-Date: 2026-11-15 20:44+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -342,6 +342,18 @@ msgid "Отзывы"
 msgstr ""
 
 msgid "Панель управления платформой"
+msgstr ""
+
+#, python-brace-format
+msgid ""
+"Партиции audit_logs старше {n} мес. будут отсоединены и архивированы. "
+"Продолжить?"
+msgstr ""
+
+#, python-brace-format
+msgid ""
+"Партиции user_activity старше {n} мес. будут удалены безвозвратно. "
+"Продолжить?"
 msgstr ""
 
 msgid "Переименовать"
