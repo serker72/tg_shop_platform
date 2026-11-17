@@ -24,7 +24,6 @@ from typing import Any, Final, Literal, Protocol
 from uuid import UUID
 
 import structlog
-from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +50,7 @@ from app.shared_kernel.domain.exceptions import (
     EntityNotFoundError,
     ValidationError,
 )
+from app.shared_kernel.infrastructure.generational_cache import REDIS_ERRORS
 
 __all__ = [
     "BOT_NOT_FOUND",
@@ -289,7 +289,7 @@ class ProxyPoolService:
         reason = type(exc).__name__ if exc is not None else "failure"
         try:
             verdict = await self._decide(proxy_id, reason)
-        except (RedisError, OSError, SQLAlchemyError) as error:
+        except (*REDIS_ERRORS, SQLAlchemyError) as error:
             _log.warning(
                 "proxy_failure_verdict_error", proxy_id=str(proxy_id), error=type(error).__name__
             )
@@ -336,7 +336,7 @@ class ProxyPoolService:
         token: str | None = None
         try:
             token = await self._tracker.try_acquire_strike(proxy_id)
-        except (RedisError, OSError) as error:
+        except REDIS_ERRORS as error:
             if not allow_fallback:
                 raise
             _log.warning("proxy_strike_dedup_fallback", error=type(error).__name__)

@@ -140,14 +140,6 @@ async def test_invalidate_returns_incr_value_ignored_but_snapshot_removed() -> N
     assert (await PermissionCache(redis).invalidate(5)).ok is True
 
 
-async def test_incr_helper_awaits_coroutine() -> None:
-    redis = MagicMock()
-    redis.incr = AsyncMock(return_value=4)
-    cache = PermissionCache(redis)
-    assert await cache._incr("perms:gen") == 4
-    assert isinstance(await cache._incr("perms:gen"), int)
-
-
 async def test_invalidate_all_bumps_global_generation() -> None:
     redis = MagicMock()
     redis.incr = AsyncMock(return_value=2)

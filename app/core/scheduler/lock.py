@@ -7,15 +7,12 @@ from datetime import datetime
 from typing import Any, Final
 
 import structlog
-from redis.exceptions import RedisError
 
 from app.core.scheduler.schedule import slot_label
+from app.shared_kernel.infrastructure.generational_cache import REDIS_ERRORS
+from app.shared_kernel.infrastructure.redis_scripts import compare_and_delete
 
 LOCK_KEY_PREFIX: Final = "sched:lock"
-# Compare-and-delete: never remove a key re-taken by someone else after expiry.
-_RELEASE_LUA: Final = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
-)
 
 _log = structlog.get_logger(__name__)
 
@@ -44,8 +41,9 @@ class SlotLock:
     async def release(self, task: str, slot: datetime, token: str) -> bool:
         """Best effort: drop the lock while it still holds ``token``."""
         try:
-            return bool(await self._redis.eval(_RELEASE_LUA, 1, lock_key(task, slot), token))
-        except (RedisError, OSError) as error:
+            # Compare-and-delete: never remove a key re-taken by someone else after expiry.
+            return await compare_and_delete(self._redis, lock_key(task, slot), token)
+        except REDIS_ERRORS as error:
             _log.warning(
                 "scheduler_lock_release_failed",
                 task=task,

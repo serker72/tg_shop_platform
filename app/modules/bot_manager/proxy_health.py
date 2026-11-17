@@ -22,7 +22,6 @@ from typing import Any, Final, Literal
 from uuid import UUID
 
 import structlog
-from redis.exceptions import RedisError
 
 from app.modules.bot_manager.metrics import (
     OUTAGE_KEY,
@@ -31,6 +30,8 @@ from app.modules.bot_manager.metrics import (
     OutageState,
     proxy_probe_total,
 )
+from app.shared_kernel.infrastructure.generational_cache import REDIS_ERRORS
+from app.shared_kernel.infrastructure.redis_scripts import compare_and_delete
 
 __all__ = [
     "OUTAGE_KEY",
@@ -48,10 +49,7 @@ __all__ = [
 TELEGRAM_API_HOST: Final = "api.telegram.org"
 DEFAULT_OK_THROTTLE_SECONDS: Final = 30.0
 _log = structlog.get_logger(__name__)
-#: Delete the strike key only if it still holds our token (compare-and-delete).
-_RELEASE_STRIKE_LUA: Final = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
-)
+
 #: Timeout of one ``EXISTS proxy:outage`` of :class:`OutageMonitor`, seconds.
 OUTAGE_CHECK_TIMEOUT_SECONDS: Final = 2.0
 
@@ -116,7 +114,7 @@ class ProxyHealthTracker:
             await self._redis.set(ok_key(proxy_id), f"{now:.6f}", ex=self._window)
             if await self._redis.delete(OUTAGE_KEY):
                 _log.info("telegram_outage_cleared", proxy_id=str(proxy_id))
-        except (RedisError, OSError) as error:
+        except REDIS_ERRORS as error:
             _log.warning("proxy_mark_ok_failed", proxy_id=str(proxy_id), error=type(error).__name__)
             return False
         self._last_ok[proxy_id] = now
@@ -128,7 +126,7 @@ class ProxyHealthTracker:
         self._last_ok.pop(proxy_id, None)
         try:
             await self._redis.set(fail_key(proxy_id), f"{now:.6f}", ex=self._window)
-        except (RedisError, OSError) as error:
+        except REDIS_ERRORS as error:
             _log.warning(
                 "proxy_mark_fail_failed", proxy_id=str(proxy_id), error=type(error).__name__
             )
@@ -168,8 +166,8 @@ class ProxyHealthTracker:
         """Best effort: free the dedup key of a strike whose transaction failed - only while
         it still holds ``token`` (a key re-taken after expiry is never removed)."""
         try:
-            return bool(await self._redis.eval(_RELEASE_STRIKE_LUA, 1, strike_key(proxy_id), token))
-        except (RedisError, OSError) as error:
+            return await compare_and_delete(self._redis, strike_key(proxy_id), token)
+        except REDIS_ERRORS as error:
             _log.warning(
                 "proxy_strike_release_failed", proxy_id=str(proxy_id), error=type(error).__name__
             )
@@ -202,7 +200,7 @@ class OutageMonitor:
         try:
             async with asyncio.timeout(self._timeout):
                 active = bool(await self._redis.exists(OUTAGE_KEY))
-        except (RedisError, OSError, TimeoutError) as error:
+        except REDIS_ERRORS as error:
             _log.warning("telegram_outage_check_failed", error=type(error).__name__)
             return False
         self._state.update(active)

@@ -25,12 +25,12 @@ import aio_pika
 import structlog
 from opentelemetry.instrumentation.utils import suppress_instrumentation
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.core.config import Settings
 from app.shared_kernel.domain.storage import StorageService
+from app.shared_kernel.infrastructure.generational_cache import REDIS_ERRORS
 
 __all__ = [
     "HEARTBEAT_KEY_PREFIX",
@@ -260,7 +260,7 @@ async def publish_heartbeat(
             pipe.zremrangebyscore(key, "-inf", ts - ttl)
             pipe.expire(key, ttl)
             await pipe.execute()
-    except RedisError as exc:
+    except REDIS_ERRORS as exc:
         _heartbeat_log.warning(
             "heartbeat_write_failed",
             component=component,
