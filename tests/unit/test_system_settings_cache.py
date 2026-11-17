@@ -25,6 +25,7 @@ from app.modules.system.cache import (
 from app.modules.system.maintenance import MaintenanceGate
 from app.modules.system.models import DEFAULT_IAM_CACHE_TTL_SECONDS
 from app.shared_kernel.domain.exceptions import EntityNotFoundError
+from app.shared_kernel.infrastructure.redis_scripts import COMPARE_AND_DELETE_LUA
 
 pytestmark = pytest.mark.req("R-II.5")
 
@@ -138,6 +139,10 @@ async def test_missing_row_caches_defaults_in_redis(monkeypatch: pytest.MonkeyPa
     assert db.reads == 1  # second call served by Redis
 
 
+def row_snapshot() -> SettingsSnapshot:
+    return SettingsSnapshot.from_model(cast(Any, row()))
+
+
 def test_snapshot_ttl_is_60_seconds() -> None:
     assert SNAPSHOT_TTL_SECONDS == 60
     assert PG_FALLBACK_SECONDS == 5.0
@@ -172,16 +177,84 @@ async def test_redis_up_never_uses_in_process_snapshot(monkeypatch: pytest.Monke
     assert db.reads == 3  # Redis reachable -> no reuse of the PostgreSQL snapshot
 
 
-async def test_corrupted_generation_is_a_miss_without_write(
+async def test_corrupted_generation_deleted_and_restarted_from_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = FakeDb(monkeypatch)
     redis = redis_mock([SettingsSnapshot().to_json(0), b"not-an-int"])
     cache = make(redis, db)
-    assert (await cache.get()).iam_cache_ttl_seconds == 600
-    assert (await cache.get()).iam_cache_ttl_seconds == 600
-    assert db.reads == 2  # every call reads PostgreSQL until the key is repaired
-    redis.eval.assert_not_awaited()
+    assert (await cache.get()).iam_cache_ttl_seconds == 600  # stale gen-0 snapshot ignored
+    repair, write = redis.eval.await_args_list
+    assert repair.args == (COMPARE_AND_DELETE_LUA, 1, GENERATION_KEY, b"not-an-int")
+    assert write.args[1:4] == (2, SNAPSHOT_KEY, GENERATION_KEY)
+    assert SettingsSnapshot.from_json(write.args[4]) == (row_snapshot(), 0)
+    assert write.args[-1] == "0"  # guard: missing settings:gen reads as '0' in Lua
+    redis.mget.return_value = [write.args[4], None]  # what Redis now holds
+    await cache.get()
+    assert db.reads == 1  # repaired: no PostgreSQL read per call
+
+
+async def test_corrupted_generation_changed_meanwhile_is_a_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = FakeDb(monkeypatch)
+    redis = redis_mock([None, b"bad"])
+    redis.eval.return_value = 0  # compare_and_delete: value no longer the bad one
+    assert (await make(redis, db).get()).iam_cache_ttl_seconds == 600
+    assert redis.eval.await_count == 1  # no guarded write with an unknown generation
+
+
+async def test_corrupted_generation_repair_error_is_redis_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    db = FakeDb(monkeypatch)
+    redis = redis_mock([None, b"bad"])
+    redis.eval.side_effect = RedisConnectionError("down")
+    cache = make(redis, db, now)
+    assert (await cache.get()).iam_cache_ttl_seconds == 600  # PostgreSQL
+    assert redis.eval.await_count == 1
+    await cache.get()  # within 5 s: Redis-down path reuses the reserve snapshot
+    assert db.reads == 1
+
+
+async def test_redis_hit_refreshes_reserve_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [0.0]
+    db = FakeDb(monkeypatch)
+    from_redis = SettingsSnapshot(is_maintenance_mode=True, iam_cache_ttl_seconds=42)
+    redis = redis_mock([from_redis.to_json(3), b"3"])
+    cache = make(redis, db, now)
+    assert await cache.get() == from_redis
+    redis.mget.side_effect = RedisConnectionError("down")
+    now[0] += 4.0
+    assert await cache.get() == from_redis  # last seen value, no PostgreSQL
+    assert db.reads == 0
+    now[0] += 1.0
+    assert (await cache.get()).iam_cache_ttl_seconds == 600  # window over -> PostgreSQL
+    assert db.reads == 1
+
+
+async def test_failed_postgres_read_opens_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [0.0]
+    db = FakeDb(monkeypatch)
+    db.result = OperationalError("SELECT", {}, Exception("down"))
+    redis = redis_mock()
+    redis.mget.side_effect = RedisConnectionError("down")
+    cache = make(redis, db, now)
+    assert await cache.get() == DEFAULT_SETTINGS
+    now[0] += 4.9
+    assert await cache.get() == DEFAULT_SETTINGS
+    assert db.reads == 1  # no PostgreSQL timeout on every call
+    now[0] += 0.1
+    db.result = row(is_maintenance_mode=True)
+    assert (await cache.get()).is_maintenance_mode is True
+    assert db.reads == 2
+    db.result = OperationalError("SELECT", {}, Exception("down"))
+    now[0] += 5.0
+    assert (await cache.get()).is_maintenance_mode is True  # failed read -> last known
+    now[0] += 1.0
+    assert (await cache.get()).is_maintenance_mode is True
+    assert db.reads == 3
 
 
 async def test_connection_error_of_session_factory_is_swallowed() -> None:
