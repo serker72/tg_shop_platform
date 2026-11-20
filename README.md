@@ -23,8 +23,9 @@
 - Linux-сервер, Docker Engine и плагин Docker Compose v2 (`docker compose`).
 - GNU make, bash, coreutils (`realpath`, `mktemp`, `stat`, `install`, `timeout`).
 - `openssl` (пароли и `ENCRYPTION_KEY` в `make env`), git.
-- `python3` на хосте: UUID в `make obs-up` и настройка срока хранения urgentry в
-  `make obs-bootstrap` (PUT в API urgentry; в образе нет клиента с PUT).
+- `python3` на хосте мониторинга: разбор ответов API urgentry и настройка срока хранения
+  (PUT в API urgentry; в образе нет клиента с PUT) в `make obs-up` / `make obs-bootstrap`
+  (`ops/scripts/obs_bootstrap.sh`), проверка IP в `make obs-bans UNBAN=<ip>`.
 - [uv](https://docs.astral.sh/uv/) нужен **только для разработки**: `make install`, `make check-dev`,
   `make test-unit-dev`, `make lint`, `make env-test`, `make test-integration`, `make test-report`.
   Для развёртывания и `make check` / `make test-unit` (unit-тесты в Docker) uv не нужен.
