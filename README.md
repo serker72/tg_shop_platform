@@ -298,8 +298,9 @@ Caddy/CrowdSec (баны, смена ключа bouncer, проверка Caddyf
 | `make test-report` | unit + интеграционные тесты + promtool → отчёт `build/reports/milestone-I-tests.md` |
 
 Отчёты о сдаче этапов — [docs/reports/](docs/reports/): результаты автотестов вехи I
-([milestone-I-tests.md](docs/reports/milestone-I-tests.md)) и сценарий демонстрации
-([milestone-I-demo.md](docs/reports/milestone-I-demo.md)). Отчёт для сдачи: закоммитить код,
+([milestone-I-tests.md](docs/reports/milestone-I-tests.md)), сценарий демонстрации
+([milestone-I-demo.md](docs/reports/milestone-I-demo.md)) и исправленные замечания повторной сдачи
+([milestone-I-fixes.md](docs/reports/milestone-I-fixes.md)). Отчёт для сдачи: закоммитить код,
 на чистом дереве выполнить `make test-report REPORT_MD=docs/reports/milestone-I-tests.md` и закоммитить
 отчёт отдельным коммитом (в отчёте указан проверенный коммит).
 
