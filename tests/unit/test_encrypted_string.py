@@ -86,8 +86,14 @@ def isolated_settings() -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def test_round_trip_encrypts_and_decrypts(session: Session, keys: list[str]) -> None:
+def test_round_trip_encrypts_and_decrypts(
+    session: Session, keys: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The value stored in the DB differs from the plaintext and decrypts back."""
+    # The model column has no explicit keys -> they come from get_settings(); pin them so the
+    # test never depends on the developer's .env (env vars win over the dotenv file).
+    monkeypatch.setenv("ENCRYPTION_KEY", keys[0])
+    monkeypatch.setenv("ENCRYPTION_KEYS_OLD", "")
     model_type = EncryptedString(keys=[keys[0]])
 
     ciphertext = _bind(model_type)
