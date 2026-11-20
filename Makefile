@@ -11,9 +11,10 @@ COMPOSE := docker compose
 # Services started by `test-integration` (db_update/master_bot/bot_worker join after Stage 1 wave 2)
 TEST_SERVICES ?= postgres redis rabbitmq minio
 WAIT_TIMEOUT ?= 300
-# Unit tests: image of the Dockerfile stage `test` (make test-unit), paths and pytest args
-# (e.g. make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v)
-TEST_IMAGE ?= tg_shop_platform-test
+# Unit tests: label of the Dockerfile stage `test` images (make test-unit runs the image by id,
+# so several clones on one host never race on a shared tag; make clean prunes them by label),
+# paths and pytest args (e.g. make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v)
+TEST_IMAGE_LABEL := tg_shop_platform.role=unit-test
 UNIT_TESTS ?= tests/unit
 PYTEST_ARGS ?= -q
 # Extra pytest args of test-integration (test-report passes --req-report/--junitxml)
@@ -252,15 +253,17 @@ check: test-unit ## Unit tests in Docker (uv not needed on the host)
 
 check-dev: lint format-check test-unit-dev ## Lint + format check + unit tests via uv (development)
 
-test-unit: ## Unit tests in Docker (Dockerfile stage `test`, code bind-mounted; uv not needed)
-	docker build --target test -t $(TEST_IMAGE) .
-	docker run --rm --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/app" -w /app \
-		$(TEST_IMAGE) python -m pytest $(UNIT_TESTS) $(PYTEST_ARGS) -p no:cacheprovider
+# --iidfile instead of `build -q`: the build log (and the reason of a failed build) stays visible.
+test-unit: ## Unit tests in Docker (Dockerfile stage `test`, code mounted read-only; uv not needed)
+	@iid=$$(mktemp) && trap 'rm -f "$$iid"' EXIT && \
+	docker build --target test --label $(TEST_IMAGE_LABEL) --iidfile "$$iid" . && \
+	docker run --rm --init --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/app:ro" -w /app \
+		"$$(cat "$$iid")" python -m pytest $(UNIT_TESTS) $(PYTEST_ARGS) -p no:cacheprovider
 
 test-unit-dev: ## Unit tests on the host via uv (make install first)
 	uv run pytest $(UNIT_TESTS) $(PYTEST_ARGS)
 
-test: test-unit-dev ## Alias of test-unit-dev (compatibility)
+test: test-unit ## Alias of test-unit (compatibility; uv not needed)
 
 test-integration: env-test ## Start test infra (TEST_SERVICES) and run integration tests; stack stays up
 	@$(MAKE) --no-print-directory init-dirs ENV_FILE=$(TEST_ENV_FILE)
@@ -322,6 +325,10 @@ clean: ## Stop test stack, remove test data dir and caches
 	else echo "$(TEST_ENV_FILE) not found, skipping test stack cleanup"; fi
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
+	@if command -v docker >/dev/null 2>&1; then \
+		docker image prune -af --filter label=$(TEST_IMAGE_LABEL) \
+			|| echo "WARN: unit-test images ($(TEST_IMAGE_LABEL)) not removed" >&2; \
+	fi
 
 obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (CADDY_MODE/VPS_IP/domains/OBS_AUTH_*/CROWDSEC_BOUNCER_KEY + compose config)
 	@$(call obs_env,--check); \

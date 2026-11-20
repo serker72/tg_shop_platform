@@ -276,9 +276,9 @@ Caddy/CrowdSec (баны, смена ключа bouncer, проверка Caddyf
 | Команда | Что делает | Нужен uv |
 |---|---|---|
 | `make check` | unit-тесты в Docker (`make test-unit`) | нет |
-| `make test-unit` | unit-тесты в Docker: стадия `test` Dockerfile, код монтируется в контейнер; файлы создаются от текущего пользователя | нет |
+| `make test-unit` | unit-тесты в Docker: стадия `test` Dockerfile, код монтируется в контейнер только для чтения; `make test` — её алиас | нет |
 | `make check-dev` | линтеры (`make lint`) + проверка форматирования (`make format-check`) + unit-тесты (`make test-unit-dev`) | да |
-| `make test-unit-dev` | unit-тесты на хосте (`uv run pytest tests/unit`); `make test` — её алиас | да |
+| `make test-unit-dev` | unit-тесты на хосте (`uv run pytest tests/unit`) | да |
 
 Отдельный файл или аргументы pytest: `make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v`
 (так же для `make test-unit-dev`).
