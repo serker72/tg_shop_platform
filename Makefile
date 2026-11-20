@@ -183,17 +183,28 @@ INIT_DIRS_DEPS := $(if $(filter $(abspath .env),$(abspath $(ENV_FILE))),env)
 
 # Service dirs (db, redis, ...) are re-owned by their containers; the logs dir is written by
 # app containers running as APP_UID, so it must be writable by us or owned by APP_UID.
-# A permission problem ends with a chown hint instead of a raw `mkdir: Permission denied`.
+# A permission problem ends with a fix hint for the failing dir only (`deny <dir> [-R]`; -R only
+# for dirs of APP_UID processes: LOGS_DATA_DIR, OBS_APP_UID_DIRS) instead of a raw
+# `mkdir: Permission denied`. Never chown -R the whole PROJECT_DATA_DIR: db/redis/rabbitmq/minio/
+# crowdsec re-own their dirs, urgentry/Tempo are 10001 (README.md, "Если установка выполнена под root").
 init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE (.env is generated if missing)
 	@$(root_guard)
 	@bash ops/scripts/env_check.sh --warn .env.example "$(ENV_FILE)"
 	@$(call load_env,$(ENV_FILE)); \
 	deny() { \
-		owner="$${APP_UID:-$$(id -u)}:$${APP_GID:-$$(id -g)}"; root="$${PROJECT_DATA_DIR%/}"; \
-		case "$$1" in "$$root"|"$$root"/*) [ -n "$$root" ] || root="$$1";; *) root="$$1";; esac; \
+		d="$${1%/}"; rec="$${2:-}"; uid="$${APP_UID:-$$(id -u)}"; gid="$${APP_GID:-$$(id -g)}"; \
+		root="$${PROJECT_DATA_DIR%/}"; \
+		if [ -e "$$d" ]; then fix="sudo chown $${rec:+$$rec }$$uid:$$gid $$d"; \
+		elif [ -n "$$root" ] && [ ! -e "$$root" ]; then fix="sudo install -d -o $$uid -g $$gid $$root"; \
+		else \
+			p="$$d"; while [ ! -e "$$p" ] && [ "$$p" != / ] && [ "$$p" != . ]; do p=$$(dirname -- "$$p"); done; \
+			fix="sudo install -d -o $$uid -g $$gid $$d"; \
+			if [ -n "$$root" ]; then case "$$p" in "$$root"|"$$root"/*) fix="sudo chown $$uid:$$gid $$p";; esac; fi; \
+		fi; \
 		echo "ERROR: $$1 is not writable for uid=$$(id -u) gid=$$(id -g)." >&2; \
-		echo "       Host data dirs must belong to APP_UID:APP_GID. Fix once on the host:" >&2; \
-		echo "       sudo mkdir -p $$root && sudo chown -R $$owner $$root && make init-dirs" >&2; \
+		echo "       Fix once on the host (this dir only; never chown -R the whole data dir):" >&2; \
+		echo "       $$fix && make init-dirs" >&2; \
+		echo "       Installed as root? See README.md, section \"Если установка выполнена под root\"." >&2; \
 		exit 1; \
 	}; \
 	for var in POSTGRES_DATA_DIR REDIS_DATA_DIR RABBITMQ_DATA_DIR MINIO_DATA_DIR LOGS_DATA_DIR; do \
@@ -202,10 +213,10 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 		echo "OK $$var=$${!var}"; \
 	done; \
 	if [ ! -w "$$LOGS_DATA_DIR" ] && [ "$$(stat -c %u "$$LOGS_DATA_DIR")" != "$${APP_UID:-}" ]; then \
-		deny "$$LOGS_DATA_DIR"; \
+		deny "$$LOGS_DATA_DIR" -R; \
 	fi; \
 	for sub in users bots system system/tmp; do \
-		mkdir -p "$$LOGS_DATA_DIR/$$sub" 2>/dev/null || deny "$$LOGS_DATA_DIR"; \
+		mkdir -p "$$LOGS_DATA_DIR/$$sub" 2>/dev/null || deny "$$LOGS_DATA_DIR" -R; \
 	done; \
 	if [ -n "$${ALLOY_DATA_DIR:-}" ]; then \
 		mkdir -p "$$ALLOY_DATA_DIR" 2>/dev/null || deny "$$ALLOY_DATA_DIR"; \
@@ -228,7 +239,7 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 		[ -n "$${!var:-}" ] || continue; \
 		probe="$${!var}/.init-dirs-probe"; \
 		{ touch "$$probe" 2>/dev/null && rm -f "$$probe"; } \
-			|| [ "$$(stat -c %u "$${!var}")" = "$${APP_UID:-}" ] || deny "$${!var}"; \
+			|| [ "$$(stat -c %u "$${!var}")" = "$${APP_UID:-}" ] || deny "$${!var}" -R; \
 	done; \
 	for var in $(OBS_10001_DIRS); do \
 		[ -n "$${!var:-}" ] || continue; d="$${!var}"; \

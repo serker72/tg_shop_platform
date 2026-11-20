@@ -142,7 +142,8 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    ```
 
    Создаёт bind-mount каталоги из `PROJECT_DATA_DIR` (по умолчанию `/opt/tg_shop_platform_data`).
-   Если не хватает прав, команда печатает нужные `sudo mkdir`/`chown` — выполните и повторите.
+   Если не хватает прав, команда печатает команду для **одного** проблемного каталога
+   (`sudo install -d …` или `sudo chown [-R] …`) — выполните и повторите.
    Каталоги urgentry/Tempo (`10001:10001`) `make init-dirs` переназначает сам (через контейнер
    alpine, sudo не нужен).
 
@@ -283,7 +284,10 @@ make agent-up
 
 Признаки: `make init-dirs`/`make env` под root, каталоги данных `root:root`, Loki/Prometheus/
 Grafana/Alertmanager перезапускаются с `permission denied`. Исправление (от root; `tgshop` —
-пользователь из [Подготовки хоста](#подготовка-хоста-от-root-один-раз), каталоги — по умолчанию):
+пользователь из [Подготовки хоста](#подготовка-хоста-от-root-один-раз)). Пути даны для значений
+по умолчанию из `.env.example` (`PROJECT_DATA_DIR`, `LOGS_DATA_DIR`, `OBS_LOKI_DATA_DIR`,
+`OBS_PROMETHEUS_DATA_DIR`, `OBS_GRAFANA_DATA_DIR`, `OBS_ALERTMANAGER_DATA_DIR`); если в `.env` они
+другие — подставьте свои:
 
 ```bash
 cd /opt/tg_shop_platform
@@ -298,9 +302,10 @@ for D in /opt/tg_shop_platform_data /opt/tg_shop_platform_data_test; do
 done
 ```
 
-`chown -R` всего каталога данных **не делайте**: `db`, `redis`, `rabbitmq`, `minio`, `alloy`,
-`obs/caddy*`, `obs/crowdsec` контейнеры переназначают себе сами, `obs/urgentry` и `obs/tempo`
-принадлежат `10001:10001`. Затем под `tgshop` (`su - tgshop`):
+`chown -R` всего каталога данных **не делайте**: внутри `db`, `redis`, `rabbitmq`, `minio` файлы
+принадлежат uid сервисов (их контейнеры назначают владельца сами), `alloy`, `obs/caddy*`,
+`obs/crowdsec` используются контейнерами под root, `obs/urgentry` и `obs/tempo` принадлежат
+`10001:10001`. Затем под `tgshop` (`su - tgshop`):
 
 ```bash
 cd /opt/tg_shop_platform

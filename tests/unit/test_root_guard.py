@@ -147,3 +147,64 @@ def test_non_root_init_dirs_is_not_blocked(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stdout + res.stderr
     assert "as root" not in res.stderr
     assert (data / "logs" / "system" / "tmp").is_dir()
+
+
+@pytest.mark.parametrize(("sub", "recursive"), [("obs/loki", True), ("redis", False)])
+def test_init_dirs_hint_chowns_only_failing_dir(tmp_path: Path, sub: str, recursive: bool) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    data = tmp_path / "data"
+    dirs = {"POSTGRES_DATA_DIR": "db", "REDIS_DATA_DIR": "redis/x", "RABBITMQ_DATA_DIR": "rabbitmq"}
+    dirs |= {"MINIO_DATA_DIR": "minio", "LOGS_DATA_DIR": "logs", "OBS_LOKI_DATA_DIR": "obs/loki"}
+    env_file = tmp_path / "x.env"
+    env_file.write_text(
+        f"APP_UID={os.getuid() + 1}\nAPP_GID={os.getgid()}\nPROJECT_DATA_DIR={data}\n"
+        + "".join(f"{k}={data}/{d}\n" for k, d in dirs.items()),
+        encoding="utf-8",
+    )
+    locked = data / sub
+    locked.mkdir(parents=True)
+    locked.chmod(0o555)  # like root:root 755 for a non-root user
+    try:
+        res = _make(tmp_path, "init-dirs", f"ENV_FILE={env_file}", root=False)
+    finally:
+        locked.chmod(0o755)
+    assert res.returncode != 0
+    flag = "-R " if recursive else ""
+    assert (
+        f"sudo chown {flag}{os.getuid() + 1}:{os.getgid()} {locked} && make init-dirs" in res.stderr
+    )
+    assert f"chown -R {os.getuid() + 1}:{os.getgid()} {data} " not in res.stderr
+    assert "Если установка выполнена под root" in res.stderr
+
+
+def test_init_dirs_hint_creates_missing_data_root(tmp_path: Path) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    parent = tmp_path / "opt"
+    parent.mkdir()
+    parent.chmod(0o555)  # like /opt for a non-root user
+    data = parent / "data"
+    env_file = tmp_path / "x.env"
+    env_file.write_text(
+        f"APP_UID={os.getuid()}\nAPP_GID={os.getgid()}\nPROJECT_DATA_DIR={data}\n"
+        + "".join(
+            f"{k}={data}/{k.lower()}\n"
+            for k in (
+                "POSTGRES_DATA_DIR",
+                "REDIS_DATA_DIR",
+                "RABBITMQ_DATA_DIR",
+                "MINIO_DATA_DIR",
+                "LOGS_DATA_DIR",
+            )
+        ),
+        encoding="utf-8",
+    )
+    try:
+        res = _make(tmp_path, "init-dirs", f"ENV_FILE={env_file}", root=False)
+    finally:
+        parent.chmod(0o755)
+    assert res.returncode != 0
+    assert (
+        f"sudo install -d -o {os.getuid()} -g {os.getgid()} {data} && make init-dirs" in res.stderr
+    )
