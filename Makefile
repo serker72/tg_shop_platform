@@ -1,4 +1,8 @@
 SHELL := /bin/bash
+# Must precede any $(shell): GNU make >= 4.4 passes exported variables to $(shell) and
+# command-line variables are expanded on export, so `make obs-bans UNBAN='$(shell cmd)'`
+# would run cmd at parse time (TEMPO_IMAGE_DEFAULT := $(shell ...)). See obs-bans.
+unexport UNBAN
 .DEFAULT_GOAL := help
 
 ENV_FILE ?= .env
@@ -355,10 +359,10 @@ obs-auth: ## Set Caddy Basic Auth (OBS_AUTH_USER/OBS_AUTH_HASH in ENV_FILE), rec
 obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
 	@$(call obs_env,--lenient); $(OBS_COMPOSE) down
 
-# UNBAN: GNU make exports command-line variables to recipe environments and EXPANDS them on
-# export (`UNBAN='$(shell ...)'` would run), so it is unexported; the recipe reads the raw text
-# via $(value) inside single quotes (no shell expansion) and validates it as an IP before use.
-unexport UNBAN
+# UNBAN: GNU make exports command-line variables and EXPANDS them on export
+# (`UNBAN='$(shell ...)'` would run), so it is unexported at the top of this file (before any
+# $(shell)); the recipe reads the raw text via $(value) inside single quotes (no shell
+# expansion) and validates it as an IP before use.
 UNBAN_SQ = '$(subst ','\'',$(value UNBAN))'
 obs-bans: ## CrowdSec decisions (bans) of the public Caddy; UNBAN=<ip> removes the ban of one IP
 	@unban=$(UNBAN_SQ); \
