@@ -23,10 +23,12 @@
 - Linux-сервер, Docker Engine и плагин Docker Compose v2 (`docker compose`).
 - GNU make, bash, coreutils (`realpath`, `mktemp`, `stat`, `install`).
 - `openssl` (пароли и `ENCRYPTION_KEY` в `make env`), git.
-- `python3` на хосте: UUID в `make obs-up` и настройка срока хранения urgentry в
-  `make obs-bootstrap` (PUT в API urgentry; в образе нет клиента с PUT).
-- Только для разработки: [uv](https://docs.astral.sh/uv/) — `make install`, `make check`,
-  `make env-test`, `make test-integration`. Для развёртывания uv не нужен.
+- `python3` на хосте мониторинга: разбор ответов API urgentry и настройка срока хранения
+  (PUT в API urgentry; в образе нет клиента с PUT) в `make obs-up` / `make obs-bootstrap`
+  (`ops/scripts/obs_bootstrap.sh`), проверка IP в `make obs-bans UNBAN=<ip>`.
+- [uv](https://docs.astral.sh/uv/) нужен **только для разработки**: `make install`, `make check-dev`,
+  `make test-unit-dev`, `make lint`, `make env-test`, `make test-integration`, `make test-report`.
+  Для развёртывания и `make check` / `make test` / `make test-unit` (unit-тесты в Docker) uv не нужен.
 
 ## Требования к серверам
 
@@ -55,6 +57,7 @@
 - Docker Engine + плагин `docker compose` v2, `make`, `git`, `openssl` (генерация секретов в `make env`);
 - `python3` — на хосте мониторинга (`make obs-up`/`obs-bootstrap`: проверка `URGENTRY_INTERNAL_URL`
   и настройка retention urgentry; `make obs-bans UNBAN=<ip>`); приложению на хосте Python не нужен;
+- uv — только для разработки (см. [Требования](#требования));
 - синхронизация времени (chrony) и swap.
 
 Пароли в `.env` — только hex (Makefile читает файл через `source`, символ `$` не поддерживается).
@@ -329,7 +332,19 @@ ready — поллинг aiogram сам повторяет запросы. Не�
 `/home/<user>/tg_shop_platform_data` — иначе `make env-test`/`make test-integration` создадут
 `/opt/tg_shop_platform_data_test` и потребуют `sudo`), `VPS_IP=127.0.0.1` и single-host значения
 из шага 4 сценария 1. Дальше — как в сценарии 1 (`make init-dirs` → `make obs-up` → `make agent-up`).
-Тесты: `make check`, `make test-integration`.
+Тесты: `make check-dev`, `make test-integration`.
+
+## Тесты
+
+| Команда | Что делает | Нужен uv |
+|---|---|---|
+| `make check` | unit-тесты в Docker (`make test-unit`) | нет |
+| `make test-unit` | unit-тесты в Docker: стадия `test` Dockerfile, код монтируется в контейнер только для чтения; `make test` — её алиас | нет |
+| `make check-dev` | линтеры (`make lint`) + проверка форматирования (`make format-check`) + unit-тесты (`make test-unit-dev`) | да |
+| `make test-unit-dev` | unit-тесты на хосте (`uv run pytest tests/unit`) | да |
+
+Отдельный файл или аргументы pytest: `make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v`
+(так же для `make test-unit-dev`).
 
 ## Полезные команды
 
@@ -341,7 +356,7 @@ ready — поллинг aiogram сам повторяет запросы. Не�
 | `make superuser TG_ID=… [TG_USERNAME=…] [ACTION=create\|revoke] [FORCE=1]` | создать/восстановить суперпользователя (`ACTION=revoke` снимает флаг, последнего — только с `FORCE=1`); на поднятом стеке, идемпотентно; образ не пересобирает (сначала `make agent-up`); rc 0 или 2, причина в выводе |
 | `make env-test` | сгенерировать `.env.test` (изолированные данные, порты +20000) |
 | `make test-integration` | поднять тестовую инфраструктуру и прогнать интеграционные тесты |
-| `make check` | линтеры + проверка форматирования + unit-тесты |
+| `make check` / `make check-dev` | unit-тесты в Docker / линтеры + форматирование + unit-тесты через uv (см. [Тесты](#тесты)) |
 | `make test-alerts` | проверить правила алертов Prometheus (promtool в Docker) |
 | `make test-report` | unit + интеграционные тесты + promtool → отчёт `build/reports/milestone-I-tests.md` |
 

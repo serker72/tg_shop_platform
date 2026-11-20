@@ -4,8 +4,8 @@
 
 1. Чистый хост (или чистый каталог данных); установлены Docker, `make`, `openssl`, `python3`, git.
    Шаги с `pytest`/`uv` — подготовка п. 5 (`make test-report`), демонстрация шаги 2
-   (`make test-integration`) и 6 (`uv run pytest ...`): нужны [uv](https://docs.astral.sh/uv/)
-   и dev-зависимости — `make install`.
+   (`make test-integration`): нужны [uv](https://docs.astral.sh/uv/) и dev-зависимости —
+   `make install`. Шаг 6 (`make test-unit ...`) выполняется в Docker, uv не нужен.
 2. `make env` — сгенерировать `.env` (секреты случайные), заполнить `MASTER_BOT_TOKEN`.
    **Пароль Basic Auth мониторинга `make env` выводит один раз — сразу сохранить** в менеджер
    паролей. `make obs-auth` — только если пароль потерян (задаёт новый, пересоздаёт Caddy).
@@ -112,7 +112,8 @@
 
 ### 6. Безопасность (3 мин)
 - **Токены зашифрованы:** таблицы ботов появятся на Этапе II, поэтому показываем механизм тестом:
-  `uv run pytest tests/unit/test_encrypted_string.py -v` — после смены ключа старые значения
+  `make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v` (в Docker, uv не
+  нужен; с uv — `uv run pytest tests/unit/test_encrypted_string.py -v`) — после смены ключа старые значения
   читаются, новые пишутся новым ключом. «В БД не открытый текст» показывает
   `test_round_trip_encrypts_and_decrypts`: он читает сырое значение из таблицы в обход ORM и
   проверяет, что открытого текста там нет. Колонка `Bot.encrypted_token` появится на Этапе II —

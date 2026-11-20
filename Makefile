@@ -1,4 +1,8 @@
 SHELL := /bin/bash
+# Must precede any $(shell): GNU make >= 4.4 passes exported variables to $(shell) and
+# command-line variables are expanded on export, so `make obs-bans UNBAN='$(shell cmd)'`
+# would run cmd at parse time (TEMPO_IMAGE_DEFAULT := $(shell ...)). See obs-bans.
+unexport UNBAN
 .DEFAULT_GOAL := help
 
 ENV_FILE ?= .env
@@ -7,6 +11,12 @@ COMPOSE := docker compose
 # Services started by `test-integration` (db_update/master_bot/bot_worker join after Stage 1 wave 2)
 TEST_SERVICES ?= postgres redis rabbitmq minio
 WAIT_TIMEOUT ?= 300
+# Unit tests: label of the Dockerfile stage `test` images (make test-unit runs the image by id,
+# so several clones on one host never race on a shared tag; make clean prunes them by label),
+# paths and pytest args (e.g. make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v)
+TEST_IMAGE_LABEL := tg_shop_platform.role=unit-test
+UNIT_TESTS ?= tests/unit
+PYTEST_ARGS ?= -q
 # Extra pytest args of test-integration (test-report passes --req-report/--junitxml)
 INTEGRATION_PYTEST_ARGS ?=
 # test-report: raw results (git-ignored build/) and the customer report (Markdown)
@@ -81,7 +91,8 @@ vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
 endef
 
-.PHONY: help install env env-check env-role init-dirs env-test version up ready down migrate lint format format-check check test \
+.PHONY: help install env env-check env-role init-dirs env-test version up ready down migrate lint format format-check check \
+	check-dev test test-unit test-unit-dev \
 	test-integration test-integration-down test-alerts test-report clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-auth obs-bans obs-validate obs-crowdsec-rekey \
 	agent-config agent-up agent-down agent-logs
@@ -281,10 +292,21 @@ format: ## Format code with ruff
 format-check: ## Check formatting (no changes)
 	uv run ruff format --check .
 
-check: lint format-check test ## Lint + format check + unit tests
+check: test-unit ## Unit tests in Docker (uv not needed on the host)
 
-test: ## Run unit tests
-	uv run pytest tests/unit -q
+check-dev: lint format-check test-unit-dev ## Lint + format check + unit tests via uv (development)
+
+# --iidfile instead of `build -q`: the build log (and the reason of a failed build) stays visible.
+test-unit: ## Unit tests in Docker (Dockerfile stage `test`, code mounted read-only; uv not needed)
+	@iid=$$(mktemp) && trap 'rm -f "$$iid"' EXIT && \
+	docker build --target test --label $(TEST_IMAGE_LABEL) --iidfile "$$iid" . && \
+	docker run --rm --init --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/app:ro" -w /app \
+		"$$(cat "$$iid")" python -m pytest $(UNIT_TESTS) $(PYTEST_ARGS) -p no:cacheprovider
+
+test-unit-dev: ## Unit tests on the host via uv (make install first)
+	uv run pytest $(UNIT_TESTS) $(PYTEST_ARGS)
+
+test: test-unit ## Alias of test-unit (compatibility; uv not needed)
 
 test-integration: env-test ## Start test infra (TEST_SERVICES) and run integration tests; stack stays up
 	@$(MAKE) --no-print-directory init-dirs ENV_FILE=$(TEST_ENV_FILE)
@@ -346,6 +368,12 @@ clean: ## Stop test stack, remove test data dir and caches
 	else echo "$(TEST_ENV_FILE) not found, skipping test stack cleanup"; fi
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
+	@# The label is shared by all clones on the host: unit-test images of every clone are pruned
+	@# (the BuildKit cache is kept, so the next make test-unit rebuilds quickly).
+	@if command -v docker >/dev/null 2>&1; then \
+		docker image prune -af --filter label=$(TEST_IMAGE_LABEL) \
+			|| echo "WARN: unit-test images ($(TEST_IMAGE_LABEL)) not removed" >&2; \
+	fi
 
 obs-config: ## Validate docker-compose.obs.yml with ENV_FILE (CADDY_MODE/VPS_IP/domains/OBS_AUTH_*/CROWDSEC_BOUNCER_KEY + compose config)
 	@$(call obs_env,--check); \
@@ -398,10 +426,10 @@ obs-auth: ## Set Caddy Basic Auth (OBS_AUTH_USER/OBS_AUTH_HASH in ENV_FILE), rec
 obs-down: ## Stop observability stack (data in OBS_*_DATA_DIR is kept)
 	@$(call obs_env,--lenient); $(OBS_COMPOSE) down
 
-# UNBAN: GNU make exports command-line variables to recipe environments and EXPANDS them on
-# export (`UNBAN='$(shell ...)'` would run), so it is unexported; the recipe reads the raw text
-# via $(value) inside single quotes (no shell expansion) and validates it as an IP before use.
-unexport UNBAN
+# UNBAN: GNU make exports command-line variables and EXPANDS them on export
+# (`UNBAN='$(shell ...)'` would run), so it is unexported at the top of this file (before any
+# $(shell)); the recipe reads the raw text via $(value) inside single quotes (no shell
+# expansion) and validates it as an IP before use.
 UNBAN_SQ = '$(subst ','\'',$(value UNBAN))'
 obs-bans: ## CrowdSec decisions (bans) of the public Caddy; UNBAN=<ip> removes the ban of one IP
 	@unban=$(UNBAN_SQ); \
