@@ -33,7 +33,11 @@ deadline=$((SECONDS + timeout_s))
 while :; do
     pending=()
     for svc in "${services[@]}"; do
-        if out=$(timeout 15 docker compose "$@" exec -T "$svc" python -c "$probe" 2>&1); then
+        # </dev/null: `timeout` runs the command in a background process group; with stdin on a
+        # TTY `docker compose exec` (even -T) reads it, gets SIGTTIN and stops, SIGTERM does not
+        # wake it and the outer `timeout` of `make ready` fails with 124 (make: rc 2).
+        # -k 5: SIGKILL if the probe ignores SIGTERM.
+        if out=$(timeout -k 5 15 docker compose "$@" exec -T "$svc" python -c "$probe" </dev/null 2>&1); then
             last[$svc]=""
         else
             last[$svc]=$out
