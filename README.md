@@ -58,20 +58,51 @@
 - `python3` — на хосте мониторинга (`make obs-up`/`obs-bootstrap`: проверка `URGENTRY_INTERNAL_URL`
   и настройка retention urgentry; `make obs-bans UNBAN=<ip>`); приложению на хосте Python не нужен;
 - uv — только для разработки (см. [Требования](#требования));
-- синхронизация времени (chrony) и swap.
+- синхронизация времени (chrony) и swap;
+- **пользователь не root, в группе `docker`** (см. [Подготовка хоста](#подготовка-хоста-от-root-один-раз));
+  `sudo`/root нужен только для подготовки хоста.
 
 Пароли в `.env` — только hex (Makefile читает файл через `source`, символ `$` не поддерживается).
 
+### Подготовка хоста (от root, один раз)
+
+Выполняется на каждом хосте (в сценарии 2 — на VPS 1 и VPS 2) после установки Docker, make, git,
+openssl, python3, chrony, swap. Имя `tgshop` — пример:
+
+```bash
+adduser tgshop                      # или useradd -m -s /bin/bash tgshop
+usermod -aG docker tgshop
+install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data /opt/tg_shop_platform_data_test
+```
+
+- Все дальнейшие шаги — **под `tgshop`**: `su - tgshop` (членство в группе `docker` применяется
+  только после нового входа). Контейнеры Loki, Prometheus, Grafana, Alertmanager и приложение
+  работают под `APP_UID:APP_GID` = uid/gid этого пользователя (`make env` подставляет их из
+  `id -u`/`id -g`) и должны писать в каталоги данных.
+- `make env`, `make env-test`, `make init-dirs` (и цели, которые его вызывают: `migrate`, `obs-up`,
+  `agent-up`, `test-integration`) **под root завершаются ошибкой**: каталоги, созданные root
+  (`root:root 755`), контейнерам недоступны. Обход `ALLOW_ROOT=1` не рекомендуется.
+- Группа `docker` даёт права, эквивалентные root (официальная документация Docker,
+  [post-install](https://docs.docker.com/engine/install/linux-postinstall/)).
+- Другой `PROJECT_DATA_DIR` в `.env` — создайте его так же (`install -d -o tgshop -g tgshop …`).
+  `/opt/tg_shop_platform_data_test` нужен только для `make env-test`/интеграционных тестов
+  (`<PROJECT_DATA_DIR>_test`); если тесты на сервере не запускаются — необязателен.
+
+Уже установили под root — см. [Если установка выполнена под root](#если-установка-выполнена-под-root).
+
 ### Сценарий 1 — всё на одном хосте
 
-1. **Подготовка хоста** — Docker, make, git, openssl, python3, chrony, swap (см. выше).
+1. **Подготовка хоста** — Docker, make, git, openssl, python3, chrony, swap (см. выше) и
+   [выделенный пользователь](#подготовка-хоста-от-root-один-раз); дальше — под ним.
 
 2. **Код и теги версий:**
 
    ```bash
-   git clone <URL репозитория> && cd tg_shop_platform
-   git fetch --tags
+   cd /opt/tg_shop_platform && git clone <URL репозитория> . && git fetch --tags
    ```
+
+   Точка в конце `git clone` — клон в уже созданный пустой каталог (в непустой каталог `git clone`
+   не клонирует).
 
    Без тега майлстоуна сборка образа (`make up`/`make agent-up`) падает — см.
    [docs/ops/versioning.md](docs/ops/versioning.md).
@@ -95,7 +126,7 @@
    |---|---|
    | `MASTER_BOT_TOKEN` | токен мастер-бота (обязательно) |
    | `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | бот и чат для алертов (без них алерты не отправляются) |
-   | `APP_UID`, `APP_GID` | `id -u` / `id -g` владельца каталога данных |
+   | `APP_UID`, `APP_GID` | уже заполнены `make env` (`id -u` / `id -g`); менять, только если каталоги данных принадлежат другому пользователю |
    | `ALLOY_SINGLE_HOST` | `1` |
    | `OBS_LOKI_PUSH_URL` | `http://loki:3100/loki/api/v1/push` |
    | `OBS_PROMETHEUS_REMOTE_WRITE_URL` | `http://prometheus:9090/api/v1/write` |
@@ -112,6 +143,8 @@
 
    Создаёт bind-mount каталоги из `PROJECT_DATA_DIR` (по умолчанию `/opt/tg_shop_platform_data`).
    Если не хватает прав, команда печатает нужные `sudo mkdir`/`chown` — выполните и повторите.
+   Каталоги urgentry/Tempo (`10001:10001`) `make init-dirs` переназначает сам (через контейнер
+   alpine, sudo не нужен).
 
 6. **Стек мониторинга:**
 
@@ -153,13 +186,15 @@
 (бэкап `make obs-up`); ключи остаются, `SENTRY_DSN` не трогается. Исходный файл сохраняется в
 `.env.bak.<ts>` (права 600) — он нужен для отката ошибочной роли и удаляется на шаге 7.
 
-0. **Оба хоста**: WireGuard, firewall, chrony, swap — [docs/ops/network.md](docs/ops/network.md).
+0. **Оба хоста**: WireGuard, firewall, chrony, swap — [docs/ops/network.md](docs/ops/network.md);
+   [подготовка хоста](#подготовка-хоста-от-root-один-раз) (выделенный пользователь, каталоги `/opt`).
+   Все команды ниже — под этим пользователем.
    Ниже `<VPN-IP VPS 2>` — адрес VPS 2 в туннеле (в примерах `10.10.0.2`).
 
 1. **VPS 2: код и `.env`:**
 
    ```bash
-   git clone <URL репозитория> && cd tg_shop_platform && git fetch --tags
+   cd /opt/tg_shop_platform && git clone <URL репозитория> . && git fetch --tags
    make env            # сохраните пароль Basic Auth
    ```
 
@@ -183,7 +218,7 @@
    (`scp -3` передаёт файл через машину оператора, локальной копии не остаётся):
 
    ```bash
-   scp -3 -p <user>@<VPS 2>:tg_shop_platform/.env <user>@<VPS 1>:tg_shop_platform.env
+   scp -3 -p <user>@<VPS 2>:/opt/tg_shop_platform/.env <user>@<VPS 1>:tg_shop_platform.env
    ssh <user>@<VPS 1> chmod 600 tg_shop_platform.env
    ```
 
@@ -192,7 +227,7 @@
 4. **VPS 1: приложение:**
 
    ```bash
-   git clone <URL репозитория> && cd tg_shop_platform && git fetch --tags
+   cd /opt/tg_shop_platform && git clone <URL репозитория> . && git fetch --tags
    install -m 600 ~/tg_shop_platform.env .env && shred -u ~/tg_shop_platform.env
    make env-role ROLE=app   # очищает секреты мониторинга
    make agent-config        # проверка .env и compose после очистки
@@ -201,8 +236,8 @@
    make superuser TG_ID=<ваш Telegram id>   # первый суперпользователь (вход в Master Bot)
    ```
 
-   Если на VPS 1 другие `APP_UID`/`APP_GID` или `PROJECT_DATA_DIR` — исправьте их в `.env`
-   **до** `make init-dirs`.
+   `.env` сделан на VPS 2: если `id -u`/`id -g` пользователя на VPS 1 другие (или другой
+   `PROJECT_DATA_DIR`) — исправьте `APP_UID`/`APP_GID` в `.env` **до** `make init-dirs`.
 
 5. **VPS 2: убрать секреты приложения:**
 
@@ -243,6 +278,42 @@ sed -n 's/^SENTRY_DSN=//p' .env      # VPS 2: печатает только зн
 sed -i 's|^SENTRY_DSN=.*|SENTRY_DSN=<значение>|' .env
 make agent-up
 ```
+
+### Если установка выполнена под root
+
+Признаки: `make init-dirs`/`make env` под root, каталоги данных `root:root`, Loki/Prometheus/
+Grafana/Alertmanager перезапускаются с `permission denied`. Исправление (от root; `tgshop` —
+пользователь из [Подготовки хоста](#подготовка-хоста-от-root-один-раз), каталоги — по умолчанию):
+
+```bash
+cd /opt/tg_shop_platform
+make down; make obs-down                 # остановить стеки (на VPS 1 — make down, на VPS 2 — make obs-down)
+chown -R tgshop:tgshop /opt/tg_shop_platform          # весь репозиторий, включая .git и .env
+for D in /opt/tg_shop_platform_data /opt/tg_shop_platform_data_test; do
+  [ -d "$D" ] || continue
+  chown tgshop:tgshop "$D"; [ -d "$D/obs" ] && chown tgshop:tgshop "$D/obs"   # только верхний уровень
+  for d in logs obs/loki obs/prometheus obs/grafana obs/alertmanager; do
+    [ -d "$D/$d" ] && chown -R tgshop:tgshop "$D/$d"   # каталоги процессов APP_UID:APP_GID
+  done
+done
+```
+
+`chown -R` всего каталога данных **не делайте**: `db`, `redis`, `rabbitmq`, `minio`, `alloy`,
+`obs/caddy*`, `obs/crowdsec` контейнеры переназначают себе сами, `obs/urgentry` и `obs/tempo`
+принадлежат `10001:10001`. Затем под `tgshop` (`su - tgshop`):
+
+```bash
+cd /opt/tg_shop_platform
+sed -i "s/^APP_UID=.*/APP_UID=$(id -u)/; s/^APP_GID=.*/APP_GID=$(id -g)/" .env   # и в .env.test, если есть
+make init-dirs                           # проверит права, вернёт urgentry/tempo владельцу 10001
+make obs-up                              # и/или make agent-up — как в сценарии
+```
+
+**git: `fatal: detected dubious ownership in repository at '…'`** (git ≥ 2.35.2) — репозиторий
+принадлежит не тому пользователю, который запускает git. Решение — сменить владельца **целиком**
+(`chown -R tgshop:tgshop /opt/tg_shop_platform`, включая `.git`); `git config --global --add
+safe.directory /opt/tg_shop_platform` — только если сменить владельца нельзя
+([документация git](https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory)).
 
 ### Режим `CADDY_MODE=domain`
 

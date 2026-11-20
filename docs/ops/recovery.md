@@ -46,14 +46,20 @@ sudo apt-get update && sudo apt-get install -y ca-certificates curl git make chr
 # ... установка docker-ce docker-ce-cli containerd.io docker-compose-plugin по инструкции
 sudo systemctl enable --now docker chrony
 
-git clone <repo> tg_shop_platform && cd tg_shop_platform
+# выделенный пользователь и каталоги /opt — README.md, «Подготовка хоста (от root, один раз)»
+sudo adduser tgshop && sudo usermod -aG docker tgshop
+sudo install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data
+su - tgshop                             # дальше — не root (make env/init-dirs под root запрещены)
+
+cd /opt/tg_shop_platform && git clone <repo> . && git fetch --tags
 git checkout <тег/коммит, из которого сделан backup>
-cp /secure/location/.env .env           # восстановленный .env, права 600
+install -m 600 /secure/location/.env .env   # восстановленный .env
 make init-dirs                          # каталоги *_DATA_DIR, LOGS_DATA_DIR (+ system/tmp)
 ```
 
-Владелец каталогов данных — `APP_UID:APP_GID` из `.env` (при ошибке `init-dirs` выводит
-готовую команду `chown`). Сеть/VPN/firewall/NTP — см. [network.md](network.md).
+Владелец каталогов данных — `APP_UID:APP_GID` из `.env`: должны совпадать с `id -u`/`id -g`
+пользователя `tgshop` (иначе исправьте в `.env`; при ошибке `init-dirs` выводит готовую команду
+`chown`). Сеть/VPN/firewall/NTP — см. [network.md](network.md).
 
 ## 2. Восстановление PostgreSQL
 
