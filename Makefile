@@ -3,6 +3,9 @@ SHELL := /bin/bash
 # command-line variables are expanded on export, so `make obs-bans UNBAN='$(shell cmd)'`
 # would run cmd at parse time (TEMPO_IMAGE_DEFAULT := $(shell ...)). See obs-bans.
 unexport UNBAN
+# ALLOW_ROOT (command-line only, never in .env): the same expand-on-export trap, compared by
+# $(value ...) (no expansion) in root_guard.
+unexport ALLOW_ROOT
 .DEFAULT_GOAL := help
 
 ENV_FILE ?= .env
@@ -86,6 +89,25 @@ $(call load_env,$(ENV_FILE)); \
 test -n "$${OBS_TEMPO_OTLP_ENDPOINT:-}" || { echo "ERROR: OBS_TEMPO_OTLP_ENDPOINT is empty in $(ENV_FILE): set tempo:4317 (one host) or <VPN IP of VPS 2>:4317" >&2; exit 1; }
 endef
 
+# env/env-test/init-dirs refuse to run as root: loki/prometheus/grafana/alertmanager and the app
+# run as APP_UID:APP_GID and cannot write root-owned data dirs (root also passes the writability
+# probes of init-dirs). `id` is resolved via PATH (unit tests stub it). ALLOW_ROOT=1 overrides.
+ROOT_ALLOWED := $(if $(filter-out 1,$(value ALLOW_ROOT)),0,$(if $(value ALLOW_ROOT),1,0))
+define root_guard
+if [ "$$(id -u)" = 0 ]; then \
+	if [ "$(ROOT_ALLOWED)" = 1 ]; then \
+		echo "WARN: running as root (ALLOW_ROOT=1): data dirs will be owned by root; containers loki/prometheus/grafana/alertmanager and the app run as APP_UID:APP_GID and may fail to write them" >&2; \
+	else \
+		echo "ERROR: do not run make $@ as root." >&2; \
+		echo "       Containers loki/prometheus/grafana/alertmanager and the app run as APP_UID:APP_GID (the uid of the user running the stack);" >&2; \
+		echo "       data dirs created by root (root:root 755) are not writable for them." >&2; \
+		echo "       Use a dedicated non-root user in the docker group: README.md, section \"Подготовка хоста\"." >&2; \
+		echo "       Override (not recommended): make $@ ALLOW_ROOT=1" >&2; \
+		exit 1; \
+	fi; \
+fi
+endef
+
 define version_env
 vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
@@ -141,6 +163,7 @@ install: ## Install dependencies (uv sync) and pre-commit hooks
 # FORCE=1: the new file is generated into <file>.new first; only after success the old one is
 # backed up to <file>.bak.<timestamp> (mode 600, never overwritten) and replaced.
 env: ## Generate ENV_FILE from .env.example with random secrets (SKIP if exists; FORCE=1 regenerates, backup .bak.<ts>)
+	@$(root_guard)
 	@set -e; f="$(ENV_FILE)"; \
 	if [ -e "$$f" ] && [ "$(FORCE)" != "1" ]; then echo "SKIP: $$f exists (FORCE=1 to regenerate)"; exit 0; fi; \
 	if [ ! -e "$$f" ]; then \
@@ -162,6 +185,7 @@ INIT_DIRS_DEPS := $(if $(filter $(abspath .env),$(abspath $(ENV_FILE))),env)
 # app containers running as APP_UID, so it must be writable by us or owned by APP_UID.
 # A permission problem ends with a chown hint instead of a raw `mkdir: Permission denied`.
 init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE (.env is generated if missing)
+	@$(root_guard)
 	@bash ops/scripts/env_check.sh --warn .env.example "$(ENV_FILE)"
 	@$(call load_env,$(ENV_FILE)); \
 	deny() { \
@@ -225,6 +249,7 @@ env-role: ## Clear secrets of the other host in ENV_FILE: ROLE=app (VPS 1) | ROL
 	sh ops/scripts/env_role.sh "$(ROLE)" "$(ENV_FILE)"
 
 env-test: ## Generate .env.test from .env (isolated data dirs, shifted ports, mock token, stable key)
+	@$(root_guard)
 	@bash ops/scripts/env_test.sh "$(ENV_FILE)" "$(TEST_ENV_FILE)"
 
 version: ## Print the application version (0.1.<milestone>.<commit>[+dirty])
