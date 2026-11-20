@@ -248,7 +248,7 @@ def render(suites: list[Suite], prom: Promtool, now: datetime, output: Path) -> 
         "make test-report REPORT_MD=docs/reports/milestone-I-tests.md",
         "# и закоммитить отчёт отдельным коммитом (поле Git = проверенный коммит)",
         "# по отдельности:",
-        "make check             # линтеры + unit-тесты",
+        "make check             # unit-тесты в Docker (линтеры + unit через uv: make check-dev)",
         "make test-integration  # тестовый стек + интеграционные тесты",
         "make test-alerts       # promtool check/test rules",
         "```",

@@ -11,6 +11,11 @@ COMPOSE := docker compose
 # Services started by `test-integration` (db_update/master_bot/bot_worker join after Stage 1 wave 2)
 TEST_SERVICES ?= postgres redis rabbitmq minio
 WAIT_TIMEOUT ?= 300
+# Unit tests: image of the Dockerfile stage `test` (make test-unit), paths and pytest args
+# (e.g. make test-unit UNIT_TESTS=tests/unit/test_encrypted_string.py PYTEST_ARGS=-v)
+TEST_IMAGE ?= tg_shop_platform-test
+UNIT_TESTS ?= tests/unit
+PYTEST_ARGS ?= -q
 # Extra pytest args of test-integration (test-report passes --req-report/--junitxml)
 INTEGRATION_PYTEST_ARGS ?=
 # test-report: raw results (git-ignored build/) and the customer report (Markdown)
@@ -85,7 +90,8 @@ vars=$$(sh ops/scripts/version.sh --env) || exit 1; eval "$$vars"; \
 export APP_VERSION APP_COMMIT APP_BUILD_TIME; echo "App version: $$APP_VERSION ($$APP_COMMIT)"
 endef
 
-.PHONY: help install env env-check init-dirs env-test version up ready down migrate lint format format-check check test \
+.PHONY: help install env env-check init-dirs env-test version up ready down migrate lint format format-check check \
+	check-dev test test-unit test-unit-dev \
 	test-integration test-integration-down test-alerts test-report clean archive-audit \
 	obs-config obs-up obs-down obs-ps obs-logs obs-bootstrap obs-auth obs-bans obs-validate obs-crowdsec-rekey \
 	agent-config agent-up agent-down agent-logs
@@ -242,10 +248,19 @@ format: ## Format code with ruff
 format-check: ## Check formatting (no changes)
 	uv run ruff format --check .
 
-check: lint format-check test ## Lint + format check + unit tests
+check: test-unit ## Unit tests in Docker (uv not needed on the host)
 
-test: ## Run unit tests
-	uv run pytest tests/unit -q
+check-dev: lint format-check test-unit-dev ## Lint + format check + unit tests via uv (development)
+
+test-unit: ## Unit tests in Docker (Dockerfile stage `test`, code bind-mounted; uv not needed)
+	docker build --target test -t $(TEST_IMAGE) .
+	docker run --rm --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR):/app" -w /app \
+		$(TEST_IMAGE) python -m pytest $(UNIT_TESTS) $(PYTEST_ARGS) -p no:cacheprovider
+
+test-unit-dev: ## Unit tests on the host via uv (make install first)
+	uv run pytest $(UNIT_TESTS) $(PYTEST_ARGS)
+
+test: test-unit-dev ## Alias of test-unit-dev (compatibility)
 
 test-integration: env-test ## Start test infra (TEST_SERVICES) and run integration tests; stack stays up
 	@$(MAKE) --no-print-directory init-dirs ENV_FILE=$(TEST_ENV_FILE)
