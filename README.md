@@ -105,6 +105,10 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    Точка в конце `git clone` — клон в уже созданный пустой каталог (в непустой каталог `git clone`
    не клонирует).
 
+   Конкретная версия: `git checkout <тег или ветка>` — production разворачивается из `master`
+   ([docs/ops/git-workflow.md](docs/ops/git-workflow.md)), теги сдачи `v…` —
+   [docs/ops/versioning.md](docs/ops/versioning.md).
+
    Без тега майлстоуна сборка образа (`make up`/`make agent-up`) падает — см.
    [docs/ops/versioning.md](docs/ops/versioning.md).
 
@@ -126,6 +130,7 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    | Переменная | Значение |
    |---|---|
    | `MASTER_BOT_TOKEN` | токен мастер-бота (обязательно) |
+   | `MASTER_BOT_USE_PROXY`, `MASTER_BOT_PROXY_URL` | если с хоста нет прямого доступа к `api.telegram.org`: `true` и `socks5://[user:pass@]host:port` (также `socks4://`, `http://`; `https://` не поддерживается) — см. [Master Bot](#master-bot) |
    | `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | бот и чат для алертов (без них алерты не отправляются) |
    | `APP_UID`, `APP_GID` | уже заполнены `make env` (`id -u` / `id -g`); менять, только если каталоги данных принадлежат другому пользователю |
    | `ALLOY_SINGLE_HOST` | `1` |
@@ -165,7 +170,10 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    ```
 
    Собирает образ, поднимает основной стек и Alloy (профиль `observability`), подключает их к
-   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен. `make superuser` выполняется один раз: создаёт первого суперпользователя (без него вход в Master Bot невозможен; повтор безопасен).
+   сети мониторинга и вызывает `make ready`. Отдельный `make up` не нужен. Если `make ready` падает
+   с `not ready … master_bot`, а в логах master_bot `master_bot_get_me_failed` с
+   `error=TelegramNetworkError` — нет доступа к Telegram: задайте прокси (`MASTER_BOT_USE_PROXY`,
+   `MASTER_BOT_PROXY_URL` в таблице шага 4) и повторите `make agent-up`. `make superuser` выполняется один раз: создаёт первого суперпользователя (без него вход в Master Bot невозможен; повтор безопасен).
 
    `make superuser` образ не пересобирает: после обновления кода сначала `make agent-up` (или,
    если боты поднимать не нужно, только сборка образа с версией, как в Makefile:
@@ -207,7 +215,8 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
      `ALERT_TELEGRAM_*`, `APP_UID`/`APP_GID`;
    - для VPS 1: `ALLOY_SINGLE_HOST=0`, `OBS_LOKI_PUSH_URL`, `OBS_PROMETHEUS_REMOTE_WRITE_URL`,
      `OBS_TEMPO_OTLP_ENDPOINT` на `<VPN-IP VPS 2>`, `MASTER_BOT_TOKEN`, `PROJECT_ENVIRONMENT`,
-     `ALLOY_HOST_LABEL`.
+     `ALLOY_HOST_LABEL`; без прямого доступа VPS 1 к Telegram — `MASTER_BOT_USE_PROXY=true`,
+     `MASTER_BOT_PROXY_URL` ([Master Bot](#master-bot)).
 
 2. **VPS 2: мониторинг:**
 
@@ -308,10 +317,15 @@ for D in /opt/tg_shop_platform_data /opt/tg_shop_platform_data_test; do
 done
 ```
 
-`chown -R` всего каталога данных **не делайте**: внутри `db`, `redis`, `rabbitmq`, `minio` файлы
-принадлежат uid сервисов (их контейнеры назначают владельца сами), `alloy`, `obs/caddy*`,
-`obs/crowdsec` используются контейнерами под root, `obs/urgentry` и `obs/tempo` принадлежат
-`10001:10001`. Затем под `tgshop` (`sudo -iu tgshop`):
+`chown -R` всего каталога данных **не делайте** (владельцы после `make init-dirs` и работы стека):
+- `db`, `redis`, `rabbitmq` — uid сервисов (999 в образах): их контейнеры назначают владельца сами;
+- `alloy`, `minio`, `obs/caddy*`, `obs/crowdsec` — сами каталоги создаёт `make init-dirs` от
+  пользователя, а содержимое создают контейнеры под root;
+- `obs/urgentry`, `obs/tempo` — `10001:10001`;
+- `logs`, `obs/loki`, `obs/prometheus`, `obs/grafana`, `obs/alertmanager` — `APP_UID:APP_GID`
+  (только их команда выше меняет рекурсивно; у `$D` и `$D/obs` — только верхний уровень).
+
+Затем под `tgshop` (`sudo -iu tgshop`):
 
 ```bash
 cd /opt/tg_shop_platform
@@ -340,6 +354,7 @@ safe.directory /opt/tg_shop_platform` — только если сменить �
 | `PROJECT_ENVIRONMENT` | `stage` | как на VPS 1 | `prod` / `stage` |
 | `APP_UID`, `APP_GID`, `PROJECT_DATA_DIR` | свои | свои | свои (проверить после копирования) |
 | `MASTER_BOT_TOKEN` | задать | очищается `env-role` | задать |
+| `MASTER_BOT_USE_PROXY`, `MASTER_BOT_PROXY_URL` | если нет прямого доступа к Telegram | URL очищается `env-role` | если нет прямого доступа к Telegram |
 | Пароли БД/Redis/RabbitMQ/MinIO, `ENCRYPTION_KEY` | `make env` | очищаются `env-role` | `make env` (с VPS 2) |
 | `OBS_AUTH_HASH`, `GRAFANA_ADMIN_PASSWORD`, `CROWDSEC_BOUNCER_KEY`, `URGENTRY_BOOTSTRAP_*` | `make env` / `make obs-up` | `make env` / `make obs-up` | очищаются `env-role` |
 | `ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` | задать | задать | токен очищается `env-role` |
