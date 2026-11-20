@@ -148,11 +148,11 @@ app/modules/catalog/
 * Реализовать цель `make test-integration`: запуск интеграционных тестов в изолированном окружении (`make env-test`, затем `docker compose --env-file .env.test up --build --abort-on-container-exit`).
 * Реализовать цель `make test-integration-down`: Снести тестовый стек (down -v); PURGE=1 — удалить и $(TEST_DATA_DIR).
 * Реализовать цель `make clean`: удаление контейнеров, сетей и тестовых директорий (`docker compose --env-file .env.test down -v` и `rm -rf /data/tg_shop_platform_test`).
-* Реализовать цель `make test`: запуск unit-тесты на хосте (без внешних сервисов).
+* Реализовать цель `make test-unit`: unit-тесты в Docker (стадия `test` Dockerfile, uv на хосте не нужен; `make test` — её алиас); `make test-unit-dev` — те же тесты на хосте через uv.
 * Реализовать цель `make install`: Установить все зависимости монорепозитория через uv и pre-commit.
 * Реализовать цель `make lint`: Проверить код линтером Ruff и MyPy.
 * Реализовать цель `make format`: Отформатировать код через Ruff.
-* Реализовать цель `make check`: Полный прогон: форматирование, линтинг и тесты.
+* Реализовать цель `make check`: unit-тесты в Docker (`make test-unit`, без uv); `make check-dev` — полный прогон для разработки: линтинг, проверка форматирования и unit-тесты через uv.
 
 ---
 

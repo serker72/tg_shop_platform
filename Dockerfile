@@ -1,8 +1,44 @@
 # syntax=docker/dockerfile:1
 # Based on the official uv Docker guide: https://docs.astral.sh/uv/guides/integration/docker/
-FROM python:3.13.18-slim
 
-COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
+# Base images shared by both stages (one place to bump the versions)
+ARG PYTHON_IMAGE=python:3.13.18-slim
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.5
+
+# `COPY --from` does not expand ARG: the uv image is referenced through a named stage
+FROM ${UV_IMAGE} AS uv
+
+# Stage `test` (make test-unit): dev dependencies in /opt/venv, the code is bind-mounted into /app.
+# Only pyproject.toml + uv.lock are used, so the layer is cached until they change. Not part of
+# the production image: the last stage below stays the default build target (docker-compose.yml).
+FROM ${PYTHON_IMAGE} AS test
+
+COPY --from=uv /uv /uvx /bin/
+
+# Unit tests call make/git/openssl/bash; safe.directory: /app belongs to the host uid
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends make git openssl bash \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory /app
+
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-install-project
+
+# Production image (default target: the last stage)
+FROM ${PYTHON_IMAGE}
+
+COPY --from=uv /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
