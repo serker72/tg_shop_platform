@@ -325,6 +325,8 @@ clean: ## Stop test stack, remove test data dir and caches
 	else echo "$(TEST_ENV_FILE) not found, skipping test stack cleanup"; fi
 	rm -rf .ruff_cache .mypy_cache .pytest_cache .coverage htmlcov
 	find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
+	@# The label is shared by all clones on the host: unit-test images of every clone are pruned
+	@# (the BuildKit cache is kept, so the next make test-unit rebuilds quickly).
 	@if command -v docker >/dev/null 2>&1; then \
 		docker image prune -af --filter label=$(TEST_IMAGE_LABEL) \
 			|| echo "WARN: unit-test images ($(TEST_IMAGE_LABEL)) not removed" >&2; \

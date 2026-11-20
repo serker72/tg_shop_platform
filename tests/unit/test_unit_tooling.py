@@ -21,6 +21,8 @@ _needs_bash = pytest.mark.skipif(
     reason="bash and timeout are required",
 )
 _needs_proc = pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="/proc is required")
+# FROM [--platform=...] <image> [AS <name>]
+_FROM_RE = re.compile(r"^FROM\s+(?:--\S+\s+)*\S+(?:\s+AS\s+(\S+))?", re.IGNORECASE)
 
 # Stub of `docker`: the probe of wait_ready.sh must get stdin=/dev/null. An inherited TTY stdin
 # makes `docker compose exec` (run by `timeout` in a background process group) stop on SIGTTIN.
@@ -112,17 +114,21 @@ def test_dev_targets_use_uv(target: str, tmp_path: Path) -> None:
 def test_unexport_unban_precedes_any_shell_call() -> None:
     """GNU make >= 4.4 passes exported (expanded) command-line vars to every $(shell)."""
     code = _code_lines(MAKEFILE)
-    unexport = code.index("unexport UNBAN")
+    unexport = next(
+        (i for i, line in enumerate(code) if line.split()[:2] == ["unexport", "UNBAN"]), None
+    )
+    assert unexport is not None, "`unexport UNBAN` not found in Makefile"
     first_shell = next(i for i, line in enumerate(code) if "$(shell" in line)
-    assert unexport < first_shell
+    assert unexport < first_shell, "`unexport UNBAN` must precede the first $(shell ...)"
 
 
 def test_dockerfile_production_stage_is_last() -> None:
     """The default build target (docker-compose.yml has no `target`) is the production stage."""
     code = _code_lines(DOCKERFILE)
-    froms = [i for i, line in enumerate(code) if line.upper().startswith("FROM ")]
-    stages = [code[i].split() for i in froms]
-    names = [s[3].lower() if len(s) >= 4 and s[2].upper() == "AS" else None for s in stages]
+    matches = [(i, _FROM_RE.match(line)) for i, line in enumerate(code)]
+    stages = [(i, m) for i, m in matches if m is not None]
+    froms = [i for i, _ in stages]
+    names = [m.group(1).lower() if m.group(1) else None for _, m in stages]
     assert "test" in names
     assert names[-1] is None
     production = "\n".join(code[froms[-1] :])
