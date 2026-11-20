@@ -94,16 +94,26 @@ endef
 # probes of init-dirs). `id` is resolved via PATH (unit tests stub it). ALLOW_ROOT=1 overrides.
 # Exactly `1` (x1x): empty, `1 1`, `yes` are rejected; $(value) never expands the value.
 ROOT_ALLOWED := $(if $(filter-out x1x,x$(value ALLOW_ROOT)x),0,1)
+# Goal(s) the user asked for, named in the message instead of $@ (init-dirs runs env first;
+# test-integration/obs-up/agent-up reach init-dirs as a prerequisite or via $(MAKE)). Set only by
+# the top-level make and exported to sub-makes. `$` is stripped and the value is simple (:=), so
+# neither the export nor a sub-make can expand `$(shell ...)` given as a goal name; the recipe
+# reads it only as a shell variable.
+ifeq ($(MAKELEVEL),0)
+ROOT_GUARD_GOAL := $(subst $$,,$(or $(MAKECMDGOALS),$(.DEFAULT_GOAL)))
+export ROOT_GUARD_GOAL
+endif
 define root_guard
+goal="$${ROOT_GUARD_GOAL:-$@}"; \
 if [ "$$(id -u)" = 0 ]; then \
 	if [ "$(ROOT_ALLOWED)" = 1 ]; then \
 		echo "WARN: running as root (ALLOW_ROOT=1): data dirs will be owned by root; containers loki/prometheus/grafana/alertmanager and the app run as APP_UID:APP_GID and may fail to write them" >&2; \
 	else \
-		echo "ERROR: do not run make $@ as root." >&2; \
+		echo "ERROR: do not run make $$goal as root." >&2; \
 		echo "       Containers loki/prometheus/grafana/alertmanager and the app run as APP_UID:APP_GID (the uid of the user running the stack);" >&2; \
 		echo "       data dirs created by root (root:root 755) are not writable for them." >&2; \
 		echo "       Use a dedicated non-root user in the docker group: README.md, section \"Подготовка хоста\"." >&2; \
-		echo "       Override (not recommended): make $@ ALLOW_ROOT=1" >&2; \
+		echo "       Override (not recommended): make $$goal ALLOW_ROOT=1" >&2; \
 		exit 1; \
 	fi; \
 fi

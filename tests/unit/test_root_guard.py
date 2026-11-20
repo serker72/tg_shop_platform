@@ -237,3 +237,51 @@ def test_init_dirs_hint_quotes_path_with_spaces(tmp_path: Path) -> None:
     quoted = str(logs).replace(" ", "\\ ")
     assert f"sudo chown -R {os.getuid()}:{os.getgid()} {quoted}\n" in res.stderr
     assert "Run as root/administrator (sudo)" in res.stderr
+
+
+def test_init_dirs_names_requested_goal_not_env(tmp_path: Path) -> None:
+    # default ENV_FILE=.env: init-dirs runs the env prerequisite first; the guard stops there
+    # (before touching .env) but must name the goal the user asked for
+    res = _make(tmp_path, "init-dirs", root=True)
+    assert res.returncode != 0
+    assert "ERROR: do not run make init-dirs as root" in res.stderr
+    assert "make init-dirs ALLOW_ROOT=1" in res.stderr
+    assert "make env as root" not in res.stderr
+
+
+def test_top_level_goal_is_named_for_prerequisite(tmp_path: Path) -> None:
+    # test-integration -> env-test prerequisite: fails at once on the guard (no infrastructure)
+    res = _make(
+        tmp_path,
+        "test-integration",
+        f"ENV_FILE={tmp_path / 'x.env'}",
+        f"TEST_ENV_FILE={tmp_path / 'x.env.test'}",
+        root=True,
+    )
+    assert res.returncode != 0
+    assert "ERROR: do not run make test-integration as root" in res.stderr
+    assert "make test-integration ALLOW_ROOT=1" in res.stderr
+
+
+def test_sub_make_keeps_top_level_goal(tmp_path: Path) -> None:
+    # what `$(MAKE) init-dirs ENV_FILE=.env.test` of test-integration sees: inherited goal
+    env = _env(tmp_path, root=True) | {"MAKELEVEL": "1", "ROOT_GUARD_GOAL": "test-integration"}
+    res = subprocess.run(  # noqa: S603
+        ["make", "-s", "-C", str(ROOT), "init-dirs", f"ENV_FILE={tmp_path / 'x.env.test'}"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        check=False,
+        timeout=120,
+    )
+    assert res.returncode != 0
+    assert "ERROR: do not run make test-integration as root" in res.stderr
+
+
+def test_goal_name_with_shell_is_not_executed(tmp_path: Path) -> None:
+    marker = tmp_path / "MARK"
+    res = _make(tmp_path, "init-dirs", f"$(shell touch {marker})", root=True)
+    assert res.returncode != 0
+    assert "ERROR: do not run make init-dirs (shell touch" in res.stderr
+    assert not marker.exists()
