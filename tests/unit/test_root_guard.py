@@ -26,8 +26,8 @@ _REAL_ID = shutil.which("id") or "/usr/bin/id"
 def _env(tmp_path: Path, *, root: bool) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("MAKE")}
     env.pop("ALLOW_ROOT", None)
+    bin_dir = tmp_path / "bin"
     if root:
-        bin_dir = tmp_path / "bin"
         bin_dir.mkdir(exist_ok=True)
         stub = bin_dir / "id"
         stub.write_text(
@@ -35,7 +35,12 @@ def _env(tmp_path: Path, *, root: bool) -> dict[str, str]:
             encoding="utf-8",
         )
         stub.chmod(0o755)
-        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    # stub docker (exit 1): make env never reaches docker/network (obs_auth.sh: empty hash)
+    bin_dir.mkdir(exist_ok=True)
+    docker = bin_dir / "docker"
+    docker.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    docker.chmod(0o755)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
@@ -77,7 +82,7 @@ def test_root_is_refused(tmp_path: Path, target: str) -> None:
     assert not (tmp_path / "x.env.test").exists()
 
 
-@pytest.mark.parametrize("value", ["0", "yes", "11", "$(shell touch MARK)"])
+@pytest.mark.parametrize("value", ["0", "yes", "11", "1 1", " 1 ", "$(shell touch MARK)"])
 def test_root_override_is_strict(tmp_path: Path, value: str) -> None:
     res = _make(tmp_path, "env", f"ENV_FILE={tmp_path / 'x.env'}", f"ALLOW_ROOT={value}", root=True)
     assert res.returncode != 0
@@ -103,8 +108,11 @@ def test_allow_root_warns_and_continues(tmp_path: Path) -> None:
         "ALLOW_ROOT=1",
         root=True,
     )
+    assert res.returncode == 0, res.stderr
     assert "ERROR: do not run make" not in res.stderr
     assert "WARN: running as root (ALLOW_ROOT=1)" in res.stderr
+    test_values = _values(test_file)
+    assert (test_values["APP_UID"], test_values["APP_GID"]) == ("0", "0")
 
 
 def test_non_root_env_fills_app_uid_gid(tmp_path: Path) -> None:
@@ -171,9 +179,7 @@ def test_init_dirs_hint_chowns_only_failing_dir(tmp_path: Path, sub: str, recurs
         locked.chmod(0o755)
     assert res.returncode != 0
     flag = "-R " if recursive else ""
-    assert (
-        f"sudo chown {flag}{os.getuid() + 1}:{os.getgid()} {locked} && make init-dirs" in res.stderr
-    )
+    assert f"sudo chown {flag}{os.getuid() + 1}:{os.getgid()} {locked}" in res.stderr
     assert f"chown -R {os.getuid() + 1}:{os.getgid()} {data} " not in res.stderr
     assert "Если установка выполнена под root" in res.stderr
 
@@ -205,6 +211,29 @@ def test_init_dirs_hint_creates_missing_data_root(tmp_path: Path) -> None:
     finally:
         parent.chmod(0o755)
     assert res.returncode != 0
-    assert (
-        f"sudo install -d -o {os.getuid()} -g {os.getgid()} {data} && make init-dirs" in res.stderr
+    assert f"sudo install -d -o {os.getuid()} -g {os.getgid()} {data}" in res.stderr
+
+
+def test_init_dirs_hint_quotes_path_with_spaces(tmp_path: Path) -> None:
+    if os.getuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    data = tmp_path / "my data"
+    env_file = tmp_path / "x.env"
+    dirs = ("POSTGRES_DATA_DIR", "REDIS_DATA_DIR", "RABBITMQ_DATA_DIR", "MINIO_DATA_DIR")
+    env_file.write_text(
+        f"APP_UID={os.getuid()}\nAPP_GID={os.getgid()}\nPROJECT_DATA_DIR='{data}'\n"
+        + "".join(f"{k}='{data}/{k.lower()}'\n" for k in dirs)
+        + f"LOGS_DATA_DIR='{data}/logs'\n",
+        encoding="utf-8",
     )
+    logs = data / "logs"
+    logs.mkdir(parents=True)
+    logs.chmod(0o555)
+    try:
+        res = _make(tmp_path, "init-dirs", f"ENV_FILE={env_file}", root=False)
+    finally:
+        logs.chmod(0o755)
+    assert res.returncode != 0
+    quoted = str(logs).replace(" ", "\\ ")
+    assert f"sudo chown -R {os.getuid()}:{os.getgid()} {quoted}\n" in res.stderr
+    assert "Run as root/administrator (sudo)" in res.stderr

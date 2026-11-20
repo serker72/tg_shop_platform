@@ -92,7 +92,8 @@ endef
 # env/env-test/init-dirs refuse to run as root: loki/prometheus/grafana/alertmanager and the app
 # run as APP_UID:APP_GID and cannot write root-owned data dirs (root also passes the writability
 # probes of init-dirs). `id` is resolved via PATH (unit tests stub it). ALLOW_ROOT=1 overrides.
-ROOT_ALLOWED := $(if $(filter-out 1,$(value ALLOW_ROOT)),0,$(if $(value ALLOW_ROOT),1,0))
+# Exactly `1` (x1x): empty, `1 1`, `yes` are rejected; $(value) never expands the value.
+ROOT_ALLOWED := $(if $(filter-out x1x,x$(value ALLOW_ROOT)x),0,1)
 define root_guard
 if [ "$$(id -u)" = 0 ]; then \
 	if [ "$(ROOT_ALLOWED)" = 1 ]; then \
@@ -194,16 +195,17 @@ init-dirs: $(INIT_DIRS_DEPS) ## Create bind-mount data directories from ENV_FILE
 	deny() { \
 		d="$${1%/}"; rec="$${2:-}"; uid="$${APP_UID:-$$(id -u)}"; gid="$${APP_GID:-$$(id -g)}"; \
 		root="$${PROJECT_DATA_DIR%/}"; \
-		if [ -e "$$d" ]; then fix="sudo chown $${rec:+$$rec }$$uid:$$gid $$d"; \
-		elif [ -n "$$root" ] && [ ! -e "$$root" ]; then fix="sudo install -d -o $$uid -g $$gid $$root"; \
+		if [ -e "$$d" ]; then fix="sudo chown $${rec:+$$rec }$$uid:$$gid $$(printf %q "$$d")"; \
+		elif [ -n "$$root" ] && [ ! -e "$$root" ]; then fix="sudo install -d -o $$uid -g $$gid $$(printf %q "$$root")"; \
 		else \
 			p="$$d"; while [ ! -e "$$p" ] && [ "$$p" != / ] && [ "$$p" != . ]; do p=$$(dirname -- "$$p"); done; \
-			fix="sudo install -d -o $$uid -g $$gid $$d"; \
-			if [ -n "$$root" ]; then case "$$p" in "$$root"|"$$root"/*) fix="sudo chown $$uid:$$gid $$p";; esac; fi; \
+			fix="sudo install -d -o $$uid -g $$gid $$(printf %q "$$d")"; \
+			if [ -n "$$root" ]; then case "$$p" in "$$root"|"$$root"/*) fix="sudo chown $$uid:$$gid $$(printf %q "$$p")";; esac; fi; \
 		fi; \
 		echo "ERROR: $$1 is not writable for uid=$$(id -u) gid=$$(id -g)." >&2; \
-		echo "       Fix once on the host (this dir only; never chown -R the whole data dir):" >&2; \
-		echo "       $$fix && make init-dirs" >&2; \
+		echo "       Fix once on the host (this dir only; never chown -R the whole data dir)." >&2; \
+		echo "       Run as root/administrator (sudo), then as this user: make init-dirs" >&2; \
+		echo "       $$fix" >&2; \
 		echo "       Installed as root? See README.md, section \"Если установка выполнена под root\"." >&2; \
 		exit 1; \
 	}; \

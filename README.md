@@ -75,8 +75,9 @@ usermod -aG docker tgshop
 install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data /opt/tg_shop_platform_data_test
 ```
 
-- Все дальнейшие шаги — **под `tgshop`**: `su - tgshop` (членство в группе `docker` применяется
-  только после нового входа). Контейнеры Loki, Prometheus, Grafana, Alertmanager и приложение
+- Все дальнейшие шаги — **под `tgshop`**: `sudo -iu tgshop` (или вход по SSH под `tgshop`).
+  Членство в группе `docker` применяется только в новой сессии: `sudo -iu` открывает новую
+  login-сессию с актуальными группами, а в уже открытой сессии `tgshop` нужно перелогиниться. Контейнеры Loki, Prometheus, Grafana, Alertmanager и приложение
   работают под `APP_UID:APP_GID` = uid/gid этого пользователя (`make env` подставляет их из
   `id -u`/`id -g`) и должны писать в каталоги данных.
 - `make env`, `make env-test`, `make init-dirs` (и цели, которые его вызывают: `migrate`, `obs-up`,
@@ -216,11 +217,12 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    ```
 
 3. **Скопировать `.env` на VPS 1** — с машины оператора, не давая VPS 2 SSH-доступа к VPS 1
-   (`scp -3` передаёт файл через машину оператора, локальной копии не остаётся):
+   (`scp -3` передаёт файл через машину оператора, локальной копии не остаётся; `tgshop` —
+   пользователь из [Подготовки хоста](#подготовка-хоста-от-root-один-раз)):
 
    ```bash
-   scp -3 -p <user>@<VPS 2>:/opt/tg_shop_platform/.env <user>@<VPS 1>:tg_shop_platform.env
-   ssh <user>@<VPS 1> chmod 600 tg_shop_platform.env
+   scp -3 -p tgshop@<VPS 2>:/opt/tg_shop_platform/.env tgshop@<VPS 1>:tg_shop_platform.env
+   ssh tgshop@<VPS 1> chmod 600 tg_shop_platform.env
    ```
 
    Если `scp -3` недоступен — два `scp` через локальный файл, затем `shred -u` локальной копии.
@@ -291,7 +293,11 @@ Grafana/Alertmanager перезапускаются с `permission denied`. Ис
 
 ```bash
 cd /opt/tg_shop_platform
-make down; make obs-down                 # остановить стеки (на VPS 1 — make down, на VPS 2 — make obs-down)
+make agent-down                          # если поднимали make agent-up (Alloy и агенты)
+make down                                # основной стек (VPS 1 / один хост)
+make obs-down                            # мониторинг (VPS 2 / один хост)
+make test-integration-down               # если поднимались тестовые стеки (make test-integration)
+make obs-down ENV_FILE=.env.test         # если поднимали тестовый мониторинг
 chown -R tgshop:tgshop /opt/tg_shop_platform          # весь репозиторий, включая .git и .env
 for D in /opt/tg_shop_platform_data /opt/tg_shop_platform_data_test; do
   [ -d "$D" ] || continue
@@ -305,11 +311,12 @@ done
 `chown -R` всего каталога данных **не делайте**: внутри `db`, `redis`, `rabbitmq`, `minio` файлы
 принадлежат uid сервисов (их контейнеры назначают владельца сами), `alloy`, `obs/caddy*`,
 `obs/crowdsec` используются контейнерами под root, `obs/urgentry` и `obs/tempo` принадлежат
-`10001:10001`. Затем под `tgshop` (`su - tgshop`):
+`10001:10001`. Затем под `tgshop` (`sudo -iu tgshop`):
 
 ```bash
 cd /opt/tg_shop_platform
-sed -i "s/^APP_UID=.*/APP_UID=$(id -u)/; s/^APP_GID=.*/APP_GID=$(id -g)/" .env   # и в .env.test, если есть
+sed -i "s/^APP_UID=.*/APP_UID=$(id -u)/; s/^APP_GID=.*/APP_GID=$(id -g)/" .env
+[ -f .env.test ] && make env-test         # пересоздаёт .env.test из .env (ENCRYPTION_KEY и пароли urgentry сохраняются)
 make init-dirs                           # проверит права, вернёт urgentry/tempo владельцу 10001
 make obs-up                              # и/или make agent-up — как в сценарии
 ```

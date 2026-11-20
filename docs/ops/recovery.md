@@ -49,11 +49,12 @@ sudo systemctl enable --now docker chrony
 # выделенный пользователь и каталоги /opt — README.md, «Подготовка хоста (от root, один раз)»
 sudo adduser tgshop && sudo usermod -aG docker tgshop
 sudo install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data
-su - tgshop                             # дальше — не root (make env/init-dirs под root запрещены)
+sudo install -o tgshop -g tgshop -m 600 /secure/location/.env /opt/tg_shop_platform.env   # копия .env, доступная tgshop
+sudo -iu tgshop                         # новая сессия (группа docker); дальше — не root
 
 cd /opt/tg_shop_platform && git clone <repo> . && git fetch --tags
 git checkout <тег/коммит, из которого сделан backup>
-install -m 600 /secure/location/.env .env   # восстановленный .env
+install -m 600 /opt/tg_shop_platform.env .env && shred -u /opt/tg_shop_platform.env   # восстановленный .env
 make init-dirs                          # каталоги *_DATA_DIR, LOGS_DATA_DIR (+ system/tmp)
 ```
 
