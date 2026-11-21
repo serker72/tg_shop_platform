@@ -302,6 +302,15 @@ class SystemSettingsService:
                     result="success",
                 ),
             )
+        if not self._noop and before != after:
+            changed = [key for key in values if before[key] != after[key]]
+            _log.info(
+                "system_settings_changed",
+                action=action,
+                actor_id=actor_telegram_id,
+                before={key: before[key] for key in changed},
+                after={key: after[key] for key in changed},
+            )
         return settings
 
     async def _lock_part_config(self) -> list[retention.PartConfigRow]:

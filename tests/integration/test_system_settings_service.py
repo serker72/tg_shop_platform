@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import itertools
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from sqlalchemy import func, select, text
+import yaml
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from app.modules.iam.cache import PermissionCache
 from app.modules.iam.models import Role, User, UserRole
@@ -138,7 +141,19 @@ async def test_partial_retention_keeps_other_column(
 ) -> None:
     admin = await make_user(session, superuser=True)
     await service.set_retention(admin, 4, 30)
-    await service.set_retention(admin, audit_logs_months=48)
+    with capture_logs() as logs:
+        await service.set_retention(admin, 4, 48)  # explicitly supplied UA did not change
+        await service.set_retention(admin, 4, 48)  # repeated request is a no-op
+    assert [log for log in logs if log["event"] == "system_settings_changed"] == [
+        {
+            "event": "system_settings_changed",
+            "log_level": "info",
+            "action": "system.settings.retention",
+            "actor_id": admin,
+            "before": {"audit_logs_retention_months": 30},
+            "after": {"audit_logs_retention_months": 48},
+        }
+    ]
     assert (await current(session))[:2] == (4, 48)
     assert await retention_synced(session, 4, 48)
     await service.set_retention(admin, user_activity_months=6)
@@ -176,8 +191,9 @@ async def test_guard_error_rolls_back(
         text("ALTER TABLE partman.part_config ENABLE TRIGGER guard_audit_part_config")
     )
     await session.commit()
-    with pytest.raises(DomainError) as info:
+    with capture_logs() as logs, pytest.raises(DomainError) as info:
         await service.set_retention(admin, 7, 48)
+    assert not any(log["event"] == "system_settings_changed" for log in logs)
     assert info.value.code == svc.RETENTION_GUARD
     assert "retention_keep_table" in str(info.value)
     assert await current(session) == before
@@ -428,7 +444,78 @@ async def test_maintenance_noop_keeps_settings_cache(
         return SimpleNamespace(ok=True)
 
     monkeypatch.setattr(settings_cache, "invalidate", invalidate)
-    await service.set_maintenance(admin, False)
+    with capture_logs() as logs:
+        await service.set_maintenance(admin, False)
+    assert not any(log["event"] == "system_settings_changed" for log in logs)
     assert service._noop is True
     assert calls == []
     assert await audit_count(session, "system.settings.maintenance", admin) == 0
+
+
+@pytest.mark.parametrize("commit_fails", [False, True])
+async def test_settings_log_only_after_commit(
+    session: AsyncSession,
+    service: SystemSettingsService,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_fails: bool,
+) -> None:
+    actor = await make_user(session, superuser=True)
+    commit = session.commit
+    action = "system.settings.maintenance"
+
+    with capture_logs() as logs:
+
+        async def checked_commit() -> None:
+            assert not any(log["event"] == "system_settings_changed" for log in logs)
+            if commit_fails:
+                raise RuntimeError("commit failed")
+            await commit()
+            assert not any(log["event"] == "system_settings_changed" for log in logs)
+
+        monkeypatch.setattr(session, "commit", checked_commit)
+        if commit_fails:
+            with pytest.raises(RuntimeError, match="commit failed"):
+                await service.set_maintenance(actor, True)
+        else:
+            await service.set_maintenance(actor, True)
+
+    changes = [log for log in logs if log["event"] == "system_settings_changed"]
+    if commit_fails:
+        assert changes == []
+        assert (await service.get()).is_maintenance_mode is False
+        assert await audit_count(session, action, actor) == 0
+    else:
+        assert changes == [
+            {
+                "event": "system_settings_changed",
+                "log_level": "info",
+                "action": action,
+                "actor_id": actor,
+                "before": {"is_maintenance_mode": False},
+                "after": {"is_maintenance_mode": True},
+            }
+        ]
+        assert (await service.get()).is_maintenance_mode is True
+        assert await audit_count(session, action, actor) == 1
+
+
+@pytest.fixture
+def maintenance_metric_sql() -> str:
+    path = Path(__file__).resolve().parents[2] / "ops/observability/alloy/postgres_queries.yml"
+    query = yaml.safe_load(path.read_text(encoding="utf-8"))["system"]["query"]
+    assert isinstance(query, str)
+    return query
+
+
+async def test_maintenance_metric_queries_postgres_without_fabricating_zero(
+    session: AsyncSession, maintenance_metric_sql: str
+) -> None:
+    query = text(maintenance_metric_sql)
+    for enabled, expected in [(False, 0), (True, 1)]:
+        await session.execute(update(SystemSettings).values(is_maintenance_mode=enabled))
+        rows = (await session.execute(query)).mappings().all()
+        assert [dict(row) for row in rows] == [{"maintenance_mode": expected}]
+
+    # The integration fixture rolls back the outer transaction, including this deletion.
+    await session.execute(delete(SystemSettings))
+    assert (await session.execute(query)).all() == []

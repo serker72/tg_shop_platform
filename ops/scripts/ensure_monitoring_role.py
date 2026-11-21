@@ -8,7 +8,8 @@ Env: ``POSTGRES_MONITORING_USER`` (default ``monitoring``), ``POSTGRES_MONITORIN
 (empty = step skipped with a warning; placeholders like ``change_me`` are rejected),
 connection as ``POSTGRES_*`` (owner/superuser of the cluster).
 Idempotent: CREATE ROLE on first run, ALTER ROLE (password sync) on every next run.
-Also grants read access to ``partman.part_config`` (pg_partman health metrics of Alloy).
+Also grants read access to ``partman.part_config`` and the maintenance flag column of
+``public.system_settings`` (custom Alloy metrics).
 The password never reaches the server or the logs in plain text: a SCRAM-SHA-256 verifier
 is computed locally and sent instead (PostgreSQL stores verifiers as is).
 The role is cluster-wide, so it is managed here and not in an Alembic migration
@@ -123,6 +124,18 @@ def main() -> int:
                 conn.execute(sql.SQL("GRANT SELECT ON partman.part_config TO {}").format(ident))
             else:
                 _log("schema partman not found: pg_partman metrics grants skipped")
+            settings_exists = conn.execute(
+                "SELECT to_regclass('public.system_settings') IS NOT NULL"
+            ).fetchone()
+            if settings_exists == (True,):
+                conn.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(ident))
+                conn.execute(
+                    sql.SQL(
+                        "GRANT SELECT (is_maintenance_mode) ON public.system_settings TO {}"
+                    ).format(ident)
+                )
+            else:
+                _log("table public.system_settings not found: maintenance metric grant skipped")
     except psycopg.Error as error:
         # no statement text / DSN in the message: only the error class and SQLSTATE
         _log(f"monitoring role: {type(error).__name__} (SQLSTATE {error.sqlstate})")

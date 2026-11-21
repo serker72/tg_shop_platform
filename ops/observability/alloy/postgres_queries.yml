@@ -52,3 +52,13 @@ pg_partman_partitions:
     - horizon_seconds:
         usage: "GAUGE"
         description: "Seconds from now to the upper bound of the last partition (0 = none)"
+
+# The table allows only id = 1. Read just the flag column; a missing row yields no sample.
+system:
+  query: |
+    SELECT is_maintenance_mode::int AS maintenance_mode
+    FROM public.system_settings
+  metrics:
+    - maintenance_mode:
+        usage: "GAUGE"
+        description: "Platform maintenance mode (1 = on, 0 = off)"

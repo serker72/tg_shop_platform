@@ -9,9 +9,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
-from aiogram.enums import ContentType
+from aiogram.enums import ContentType, ParseMode
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.markdown import hbold
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import MessageInput
 from aiogram_dialog.widgets.kbd import Button, Cancel, Column, Row, SwitchTo
@@ -58,6 +59,12 @@ FIELDS: Final[dict[str, tuple[int, int]]] = {
     "ua": (RETENTION_MONTHS_MIN, RETENTION_MONTHS_MAX),
     "audit": (RETENTION_MONTHS_MIN, RETENTION_MONTHS_MAX),
     "files": (FILE_LOGS_RETENTION_DAYS_MIN, FILE_LOGS_RETENTION_DAYS_MAX),
+}
+_FIELD_ATTRIBUTES: Final = {
+    "ttl": "iam_cache_ttl_seconds",
+    "ua": "user_activity_retention_months",
+    "audit": "audit_logs_retention_months",
+    "files": "file_logs_retention_days",
 }
 
 
@@ -199,11 +206,19 @@ async def edit_getter(dialog_manager: DialogManager, **_kw: Any) -> dict[str, An
     field = dialog_manager.dialog_data.get(FIELD_KEY)
     if not _allowed(dialog_manager) or field not in FIELDS:
         return {**data, "text": compose(dialog_manager, denied_text())}
+    try:
+        settings = await (await resolve(dialog_manager, SystemSettingsService)).get()
+    except DomainError as error:
+        return {**data, "text": compose(dialog_manager, error_text(error.code))}
     low, high = FIELDS[field]
-    prompt = _("Введите новое значение «{title}» — целое число от {low} до {high}.").format(
-        title=_field_title(field), low=low, high=high
+    current = _("Текущее значение: {value}").format(
+        value=getattr(settings, _FIELD_ATTRIBUTES[field])
     )
-    return {**data, "text": compose(dialog_manager, prompt)}
+    title = _field_title(field)
+    prompt = _("Введите новое значение — целое число от {low} до {high}.").format(
+        low=low, high=high
+    )
+    return {**data, "text": compose(dialog_manager, hbold(title), current, prompt)}
 
 
 async def _deny(callback: CallbackQuery) -> None:
@@ -357,6 +372,7 @@ def settings_dialog() -> Dialog:
             SwitchTo(Format("{btn_back}"), id="back", state=SettingsSG.main),
             state=SettingsSG.edit,
             getter=edit_getter,
+            parse_mode=ParseMode.HTML,
         ),
         Window(
             Format("{text}"),

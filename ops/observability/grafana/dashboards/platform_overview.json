@@ -26,7 +26,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 24,
+        "w": 18,
         "h": 5
       },
       "fieldConfig": {
@@ -85,6 +85,55 @@
           "expr": "up{env=~\"$env\", host=~\"$host\", job=~\"node|postgres|redis|rabbitmq|app\"}",
           "legendFormat": "{{job}} {{instance}}",
           "instant": true
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Maintenance mode at range end",
+      "description": "PostgreSQL maintenance mode at the end of the selected time range. Use a range ending at now for live status. Flag and health samples must be within 45 seconds of the range end (15-second scrape). No data means the flag could not be observed at that time.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No data",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "OFF", "color": "green" },
+                "1": { "text": "ON", "color": "orange" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(system_maintenance_mode{env=~\"$env\", host=~\"$host\", job=\"postgres\"} and (time() - timestamp(system_maintenance_mode{env=~\"$env\", host=~\"$host\", job=\"postgres\"}) <= 45)) and on (env, host, job, instance) ((pg_up{job=\"postgres\"} == 1) and (time() - timestamp(pg_up{job=\"postgres\"}) <= 45)) and on (env, host, job, instance) ((up{job=\"postgres\"} == 1) and (time() - timestamp(up{job=\"postgres\"}) <= 45))",
+          "legendFormat": "{{env}} / {{host}}",
+          "instant": true,
+          "range": false
         }
       ]
     },

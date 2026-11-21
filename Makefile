@@ -371,12 +371,13 @@ test-integration: env-test ## Start test infra (TEST_SERVICES) and run integrati
 	echo "Test stack is left running; stop it with: make test-integration-down [PURGE=1]"; \
 	exit $$rc
 
-test-alerts: ## Validate Prometheus alert rules and run their unit tests (promtool in Docker)
+test-alerts: ## Validate Prometheus alert rules and test rule and dashboard queries (promtool in Docker)
 	@test -n "$(PROMTOOL_IMAGE)" || { echo "ERROR: Prometheus image not found in docker-compose.obs.yml"; exit 1; }
 	docker run --rm --entrypoint promtool -v "$(CURDIR)/$(PROM_DIR):/p:ro" -w /p/tests $(PROMTOOL_IMAGE) \
 		check rules $(patsubst $(PROM_DIR)/%,/p/%,$(wildcard $(PROM_DIR)/rules/*.yml))
 	docker run --rm --entrypoint promtool -v "$(CURDIR)/$(PROM_DIR):/p:ro" -w /p/tests $(PROMTOOL_IMAGE) \
 		test rules rules_test.yml
+	python3 ops/scripts/check_maintenance_observability.py --promql-only --promtool-image "$(PROMTOOL_IMAGE)"
 
 # $(SUBMAKE) instead of $(MAKE): GNU make runs lines that mention $(MAKE) even under `make -n`,
 # which would start the test stack; an indirect reference keeps `make -n test-report` a dry run.

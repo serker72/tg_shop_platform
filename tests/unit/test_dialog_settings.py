@@ -14,12 +14,15 @@ from app.entrypoints.master_bot.middlewares import SNAPSHOT_KEY
 from app.modules.iam.permissions import SETTINGS_MANAGE
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.system.presentation.tg_master.settings import (
+    FIELD_KEY,
     FIELDS,
     RETENTION_KEY,
     SettingsSG,
     _on_confirm,
     _on_retention_confirm,
+    edit_getter,
     parse_value,
+    settings_dialog,
 )
 from app.modules.system.service import RETENTION_CONFIG_ERROR, RETENTION_GUARD, SETTINGS_BUSY
 from app.shared_kernel.domain.exceptions import DomainError, EntityNotFoundError
@@ -168,6 +171,57 @@ async def test_maintenance_requires_confirmation() -> None:
     assert "Готово." in env.text()
     assert "Технические работы: включены" in env.text()
     assert "Выключить техработы" in env.buttons()
+
+
+@pytest.mark.parametrize(
+    ("title", "attribute", "current", "low", "high"),
+    [
+        ("TTL кэша прав (сек.)", "iam_cache_ttl_seconds", 600, 1, 2_592_000),
+        ("Хранение user_activity (мес.)", "user_activity_retention_months", 7, 1, 120),
+        ("Хранение audit_logs (мес.)", "audit_logs_retention_months", 36, 1, 120),
+        ("Хранение файловых логов (дн.)", "file_logs_retention_days", 40, 1, 3650),
+    ],
+)
+async def test_edit_window_reads_current_value(
+    title: str, attribute: str, current: int, low: int, high: int
+) -> None:
+    env = Env(SETTINGS_ADMIN)
+    await _open(env)
+    setattr(env.system_settings, attribute, current)  # changed after rendering the overview
+    await env.press(title)
+    assert title in env.text()
+    assert f"Текущее значение: {current}" in env.text().splitlines()
+    assert f"от {low} до {high}" in env.text()
+
+
+def test_edit_window_uses_html_parse_mode_for_bold_title() -> None:
+    dialog = settings_dialog()
+    window = dialog.windows[SettingsSG.edit]
+    assert cast(Any, window).parse_mode == "HTML"
+
+
+async def test_ttl_edit_window_uses_bold_title_and_exact_prompt() -> None:
+    env = Env(SETTINGS_ADMIN)
+    await _open(env)
+    env.system_settings.iam_cache_ttl_seconds = 86400
+    await env.press("TTL кэша прав (сек.)")
+
+    assert env.text().splitlines() == [
+        "<b>TTL кэша прав (сек.)</b>",
+        "Текущее значение: 86400",
+        "Введите новое значение — целое число от 1 до 2592000.",
+    ]
+
+
+async def test_edit_window_does_not_read_without_permission() -> None:
+    container = AsyncMock()
+    manager = SimpleNamespace(
+        dialog_data={FIELD_KEY: "ttl"},
+        middleware_data={SNAPSHOT_KEY: VIEWER, CONTAINER_NAME: container},
+    )
+    result = await edit_getter(cast(Any, manager))
+    container.get.assert_not_called()
+    assert result["text"] == "Нет доступа."
 
 
 async def test_invalid_input_keeps_value() -> None:

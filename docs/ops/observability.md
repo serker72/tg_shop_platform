@@ -274,7 +274,91 @@ JSON в `ops/observability/grafana/dashboards/` (правки только в ф
 - `tgsp-datastores` «PostgreSQL / Redis / RabbitMQ» — `pg_up`, xact commit/rollback, соединения
   по state, deadlocks, cache hit, `redis_connected_clients`, `rabbitmq_queues`/`rabbitmq_connections`;
 - `tgsp-logs` «Logs» — объём логов по `service`, ошибки (`detected_level=~"error|critical|fatal"`),
-  `logs_dropped_total` по reason, поток ошибок.
+  `logs_dropped_total` по reason, поток ошибок;
+- панель **System settings changed events** — последние `system_settings_changed` из
+  structlog JSON с полями `event`, `action`, `actor_id`, `before`, `after`. Она находится в
+  dashboard `tgsp-logs` «Logs» (нижняя строковая панель, после «Error logs»).
+
+### Фильтры событий system_settings_changed
+
+Базовый запрос панели (переменные `$env`, `$host` и `$service` — существующие Loki labels):
+
+```logql
+{env=~"$env", host=~"$host", service=~"$service"}
+  | json
+  | event="system_settings_changed"
+  | line_format "{{.event}} action={{.action}} actor_id={{.actor_id}} {{__line__}}"
+```
+
+`| json` разбирает JSON-строку и делает `event`, `action`, `actor_id`, `before` и `after`
+доступными как поля пайплайна. Поэтому фильтры по простым значениям добавляются после
+`| json`, например:
+
+```logql
+# по действию
+{service=~"$service"} | json | event="system_settings_changed" | action="update_retention"
+
+# по Telegram actor_id
+{service=~"$service"} | json | event="system_settings_changed" | actor_id="123456789"
+
+# по нескольким значениям
+{service=~"$service"} | json | event="system_settings_changed" | action=~"update_.*|reset"
+```
+
+`before` и `after` — вложенные JSON-поля (объекты), а **не Loki labels**: их нельзя
+добавить в селектор `{...}` и нельзя фильтровать как `before="..."` до `| json`.
+В Loki 3.5.5 nested objects flatten-ятся в scalar-поля вида
+`before_<key>`/`after_<key>`; object-valued поля `{{.before}}` и `{{.after}}` в
+`line_format` не сериализуются и дают пустую строку. Поэтому панель добавляет к
+разобранным scalar-полям исходную строку через `{{__line__}}`: полные непустые
+`before` и `after` остаются видимыми в исходном JSON, без `toJson` и без изменения
+production logging. Для поиска значения внутри объекта сначала примените обычный
+line filter, например:
+
+```logql
+{service=~"$service"}
+  | json
+  | event="system_settings_changed"
+  | line_format "before={{.before}} after={{.after}}"
+  |= "\"retention_days\":30"
+```
+
+Для фильтра по конкретному ключу вложенного объекта используется JSON expression syntax
+Loki: выражение слева от `=` — имя extracted field, справа в кавычках — путь к JSON-полю.
+`before` и `after` фильтруются симметрично, отдельными extracted fields:
+
+```logql
+# retention_days в объекте before равно 90
+{service=~"$service"}
+  | json before_retention_days="before.retention_days"
+  | event="system_settings_changed"
+  | before_retention_days="90"
+
+# retention_days в объекте after равно 30
+{service=~"$service"}
+  | json after_retention_days="after.retention_days"
+  | event="system_settings_changed"
+  | after_retention_days="30"
+```
+
+Если нужен один запрос, можно извлечь обе стороны и сравнить каждую независимо:
+
+```logql
+{service=~"$service"}
+  | json before_retention_days="before.retention_days", after_retention_days="after.retention_days"
+  | event="system_settings_changed"
+  | before_retention_days="90"
+  | after_retention_days="30"
+```
+
+Если ключ отсутствует в событии, соответствующее extracted field не совпадёт. `event`,
+`action` и `actor_id` после `| json` — простые extracted fields, поэтому их можно
+фильтровать pipeline-операторами `=`, `!=`, `=~` и `!~`. В Loki 3.5.5 nested objects
+нельзя вывести целиком через object template в `line_format`; для фильтра используйте
+`before_<key>`/`after_<key>` или explicit extraction пути, как в примерах выше. Для
+отображения полных объектов используйте `{{__line__}}`, как делает панель.
+`line_format` — pipeline stage Loki 3.5.x, используемый панелью, а не изменение logging
+semantics приложения.
 
 Ожидание порта в скриптах: `ops/scripts/wait_for_it.sh host:port [-t 30] [-q] [-- cmd ...]`
 (POSIX sh; коды 0 — доступен, 1 — таймаут, 2 — ошибка аргументов).
@@ -444,6 +528,43 @@ SCRAM-SHA-256 verifier (в логи PostgreSQL и `db_update` открытый �
 `db_update`: `alembic upgrade` → platform setup → роль мониторинга → sync retention
 pg_partman. Смена пароля: изменить `.env`,
 `make migrate`, затем перезапустить `alloy`.
+
+`system_maintenance_mode` читает флаг из `public.system_settings` через Alloy:
+`0` — OFF, `1` — ON. **Platform overview → Maintenance mode at range end** показывает
+состояние **на конец выбранного периода**, а не на текущее время. Для живого состояния
+выберите диапазон, заканчивающийся на `now` (например, **Last 15 minutes**).
+При скрейпе каждые 15 с панель принимает образцы `system_maintenance_mode`, `pg_up`
+и `up` не старше 45 с относительно конца периода. Отсутствие строки, метрики или
+доступного PostgreSQL на этот момент не отображается как OFF. В диапазоне с концом
+`now` при обрыве remote write старое значение исчезает из результата запроса после
+45 с от последнего образца; открытая панель покажет это при следующем обновлении
+Grafana (раз в 30 с). Новое значение появится после успешного скрейпа, доставки
+в Prometheus и обновления панели.
+
+На существующей установке на VPS1 (сервер приложения) обновите образ `db_update` (например,
+`docker compose build db_update` при сборке на хосте), выполните `make migrate`
+и перезапустите Alloy, чтобы перечитать custom queries. Новая Alembic-ревизия не нужна:
+скрипт выдаёт гранты и существующей роли. Для проверки войдите в БД как пользователь
+`POSTGRES_MONITORING_USER` и выполните:
+
+```sql
+SELECT is_maintenance_mode::int AS maintenance_mode FROM public.system_settings;
+SELECT has_column_privilege(current_user, 'public.system_settings', 'extra_config', 'SELECT');
+```
+
+Первый запрос должен вернуть текущее значение, второй — `false`. После очередного
+скрейпа проверьте `system_maintenance_mode{job="postgres"}` в Prometheus.
+На VPS2 (сервер наблюдаемости) обновите checkout с
+`ops/observability/grafana/dashboards/platform_overview.json`: каталог смонтирован
+в Grafana как `/etc/grafana/dashboards`. Дождитесь файлового provisioning (до 60 с),
+затем обновите **Platform overview** и проверьте **Maintenance mode at range end**.
+Если оба стека на одном хосте, выполните оба шага на нём.
+
+`make test-alerts` проверяет правила и фактический PromQL панели через Docker promtool
+без запуска PostgreSQL или Alloy. Полный smoke PostgreSQL → Alloy → Prometheus:
+`uv run python ops/scripts/check_maintenance_observability.py`. Нужен локальный Docker
+с образами PostgreSQL 17, Alloy и Prometheus (версии указаны в скрипте);
+проверка поднимает временные контейнеры и не читает настройки рабочей БД.
 
 ### Запуск на одном хосте (dev/test)
 

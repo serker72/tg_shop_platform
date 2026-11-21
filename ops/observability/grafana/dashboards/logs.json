@@ -205,6 +205,39 @@
           "queryType": "range"
         }
       ]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "System settings changed events",
+      "description": "Recent system_settings_changed events. Parsed scalar fields are prefixed to the original JSON line, so complete non-empty before/after objects remain visible.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 12
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{env=~\"$env\", host=~\"$host\", service=~\"$service\"} | json | event=\"system_settings_changed\" | line_format \"{{.event}} action={{.action}} actor_id={{.actor_id}} {{__line__}}\"",
+          "queryType": "range"
+        }
+      ]
     }
   ],
   "templating": {
