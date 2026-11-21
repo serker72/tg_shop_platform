@@ -72,6 +72,10 @@ msgstr ""
 msgid "Введите новое значение — целое число от {low} до {high}."
 msgstr ""
 
+#, python-brace-format
+msgid "Текущее значение: {value}"
+msgstr ""
+
 msgid "Введите новое название магазина (до 128 символов)"
 msgstr ""
 
@@ -752,4 +756,95 @@ msgstr ""
 #~ "партиций выключено). Обратитесь к "
 #~ "администратору БД."
 #~ msgstr ""
+
+msgid "Логи активности"
+msgstr "Логи активности"
+
+msgid "Диапазон по умолчанию: последние 24 часа"
+msgstr "Диапазон по умолчанию: последние 24 часа"
+
+msgid "Master Bot"
+msgstr "Master Bot"
+
+msgid "Master Bot недоступен"
+msgstr "Master Bot недоступен"
+
+msgid "Master Bot выбран"
+msgstr "Master Bot выбран"
+
+msgid "Некорректный фильтр"
+msgstr "Некорректный фильтр"
+
+#, python-brace-format
+msgid "Введите значение: {field}"
+msgstr "Введите значение: {field}"
+
+msgid "Сначала выберите фильтр"
+msgstr "Сначала выберите фильтр"
+
+msgid "Фильтр сохранён"
+msgstr "Фильтр сохранён"
+
+msgid "Некорректное значение фильтра"
+msgstr "Некорректное значение фильтра"
+
+msgid "Экспорт логов"
+msgstr "Экспорт логов"
+
+msgid "Сортировка"
+msgstr "Сортировка"
+
+msgid "Экспорт TXT"
+msgstr "Экспорт TXT"
+
+msgid "Пользователь"
+msgstr "Пользователь"
+
+msgid "Telegram ID пользователя"
+msgstr "Telegram ID пользователя"
+
+msgid "Username"
+msgstr "Username"
+
+msgid "Бот"
+msgstr "Бот"
+
+msgid "Магазин"
+msgstr "Магазин"
+
+msgid "Начало периода"
+msgstr "Начало периода"
+
+msgid "Конец периода"
+msgstr "Конец периода"
+
+msgid "Тип действия"
+msgstr "Тип действия"
+
+msgid "Тип сущности"
+msgstr "Тип сущности"
+
+msgid "ID сущности"
+msgstr "ID сущности"
+
+msgid "Товар"
+msgstr "Товар"
+
+msgid "Категория"
+msgstr "Категория"
+
+msgid "Подкатегория"
+msgstr "Подкатегория"
+
+msgid "Заказ"
+msgstr "Заказ"
+
+msgid "Обращение"
+msgstr "Обращение"
+
+msgid "Предзаказ"
+msgstr "Предзаказ"
+
+msgid "Модератор"
+msgstr "Модератор"
 

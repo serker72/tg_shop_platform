@@ -37,6 +37,7 @@ from app.modules.iam.presentation.tg_master import (
 )
 from app.modules.iam.presentation.tg_master.common import STAFF_VIEW_PERMISSIONS
 from app.modules.iam.snapshot import PermissionSnapshot
+from app.modules.logging.presentation.tg_master import LogsSG, logs_dialog
 from app.modules.system.presentation.tg_master import SettingsSG, settings_dialog
 
 __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_getter"]
@@ -59,6 +60,7 @@ _SECTION_DIALOGS: Final[dict[str, State]] = {
     "staff": StaffSG.list,
     "roles": RolesSG.list,
     "settings": SettingsSG.main,
+    "logs": LogsSG.list,
 }
 
 
@@ -139,4 +141,5 @@ def build_menu_router() -> Router:
     router.include_router(overrides_dialog())
     router.include_router(effective_dialog())
     router.include_router(settings_dialog())
+    router.include_router(logs_dialog())
     return router

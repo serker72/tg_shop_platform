@@ -726,3 +726,94 @@ msgstr ""
 msgid "🔒 — системная роль (набор прав только для просмотра), ⏸ — деактивирована."
 msgstr ""
 
+msgid "Логи активности"
+msgstr ""
+
+msgid "Диапазон по умолчанию: последние 24 часа"
+msgstr ""
+
+msgid "Master Bot"
+msgstr ""
+
+msgid "Master Bot недоступен"
+msgstr ""
+
+msgid "Master Bot выбран"
+msgstr ""
+
+msgid "Некорректный фильтр"
+msgstr ""
+
+#, python-brace-format
+msgid "Введите значение: {field}"
+msgstr ""
+
+msgid "Сначала выберите фильтр"
+msgstr ""
+
+msgid "Фильтр сохранён"
+msgstr ""
+
+msgid "Некорректное значение фильтра"
+msgstr ""
+
+msgid "Экспорт логов"
+msgstr ""
+
+msgid "Сортировка"
+msgstr ""
+
+msgid "Экспорт TXT"
+msgstr ""
+
+msgid "Пользователь"
+msgstr ""
+
+msgid "Telegram ID пользователя"
+msgstr ""
+
+msgid "Username"
+msgstr ""
+
+msgid "Бот"
+msgstr ""
+
+msgid "Магазин"
+msgstr ""
+
+msgid "Начало периода"
+msgstr ""
+
+msgid "Конец периода"
+msgstr ""
+
+msgid "Тип действия"
+msgstr ""
+
+msgid "Тип сущности"
+msgstr ""
+
+msgid "ID сущности"
+msgstr ""
+
+msgid "Товар"
+msgstr ""
+
+msgid "Категория"
+msgstr ""
+
+msgid "Подкатегория"
+msgstr ""
+
+msgid "Заказ"
+msgstr ""
+
+msgid "Обращение"
+msgstr ""
+
+msgid "Предзаказ"
+msgstr ""
+
+msgid "Модератор"
+msgstr ""
+

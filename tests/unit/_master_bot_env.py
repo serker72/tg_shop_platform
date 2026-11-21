@@ -39,6 +39,8 @@ from app.modules.iam.permissions import (
 from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
+from app.modules.logging.export import ExportService
+from app.modules.logging.query import ActivityQueryRepository
 from app.modules.system.service import SystemSettingsService
 from app.shared_kernel.domain.exceptions import DomainError
 from app.shared_kernel.presentation.tg_master.common import CONTAINER_NAME
@@ -202,10 +204,18 @@ class FakePermissionService:
     def __init__(self, env: Env) -> None:
         self.env = env
         self.calls: list[int] = []
+        self.require_calls: list[tuple[int, str]] = []
 
     async def effective_permissions(self, telegram_user_id: int) -> Any:
         self.calls.append(telegram_user_id)
         return self.env.reports[telegram_user_id]
+
+    async def require(self, telegram_user_id: int, slug: str, tenant_id: UUID | None = None) -> Any:
+        self.require_calls.append((telegram_user_id, slug))
+        decision = self.env.snapshot.decide(slug, tenant_id)
+        if not decision.allowed:
+            raise PermissionError(slug)
+        return decision
 
 
 class FakeContainer:
@@ -235,6 +245,8 @@ class Env:
         visible: list[SimpleNamespace] | None = None,
         users: list[SimpleNamespace] | None = None,
         roles: list[SimpleNamespace] | None = None,
+        activity_repository: Any | None = None,
+        export_service: Any | None = None,
     ) -> None:
         self.snapshot = snapshot
         self.store: dict[UUID, SimpleNamespace] = {t.id: t for t in tenants or []}
@@ -295,6 +307,8 @@ class Env:
                 PermissionService: self.permissions,
                 IamAdminQueries: self.queries,
                 SystemSettingsService: self.system,
+                ActivityQueryRepository: activity_repository,
+                ExportService: export_service,
             }
         )
 
