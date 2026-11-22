@@ -40,6 +40,7 @@ from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.service import PermissionService
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.export import ExportService
+from app.modules.logging.filter_options import ActivityFilterOptions
 from app.modules.logging.query import ActivityQueryRepository
 from app.modules.system.service import SystemSettingsService
 from app.shared_kernel.domain.exceptions import DomainError
@@ -206,6 +207,9 @@ class FakePermissionService:
         self.calls: list[int] = []
         self.require_calls: list[tuple[int, str]] = []
 
+    async def get_snapshot(self, telegram_user_id: int) -> PermissionSnapshot:
+        return self.env.snapshot
+
     async def effective_permissions(self, telegram_user_id: int) -> Any:
         self.calls.append(telegram_user_id)
         return self.env.reports[telegram_user_id]
@@ -247,6 +251,8 @@ class Env:
         roles: list[SimpleNamespace] | None = None,
         activity_repository: Any | None = None,
         export_service: Any | None = None,
+        filter_options: Any | None = None,
+        master_telegram_bot_id: int | None = None,
     ) -> None:
         self.snapshot = snapshot
         self.store: dict[UUID, SimpleNamespace] = {t.id: t for t in tenants or []}
@@ -309,6 +315,7 @@ class Env:
                 SystemSettingsService: self.system,
                 ActivityQueryRepository: activity_repository,
                 ExportService: export_service,
+                ActivityFilterOptions: filter_options,
             }
         )
 
@@ -319,6 +326,7 @@ class Env:
         ) -> Any:
             data[SNAPSHOT_KEY] = self.snapshot
             data[CONTAINER_NAME] = container
+            data["master_telegram_bot_id"] = master_telegram_bot_id
             return await handler(event, data)
 
         dispatcher = Dispatcher(storage=MemoryStorage())

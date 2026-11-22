@@ -1,328 +1,706 @@
-"""Master Bot activity viewer with server-side validation on every operation."""
+"""Master Bot activity viewer: draft edits never change applied queries."""
 
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from html import escape
+from typing import Any, cast
 from uuid import UUID
 
 from aiogram import Router
+from aiogram.enums import ContentType, ParseMode
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import MessageInput
-from aiogram_dialog.widgets.kbd import Button, Column, Row
-from aiogram_dialog.widgets.text import Const, Format
+from aiogram_dialog.widgets.kbd import Button, Column, Row, Select
+from aiogram_dialog.widgets.text import Format
 
 from app.core.i18n import gettext as _
 from app.modules.iam.permissions import LOGS_VIEW, TENANTS_VIEW_ALL
-from app.modules.iam.presentation.tg_master.common import snapshot_of
 from app.modules.iam.service import PermissionService
 from app.modules.logging.export import ExportService
-from app.modules.logging.query import ActivityFilter, ActivityQueryRepository, ActivityScope
+from app.modules.logging.filter_options import OPTION_PAGE_SIZE, ActivityFilterOptions, OptionKind
+from app.modules.logging.query import (
+    UI_PAGE_SIZE,
+    ActivityFilter,
+    ActivityQueryRepository,
+    ActivityRow,
+    ActivityScope,
+    Order,
+)
 from app.shared_kernel.presentation.tg_master.common import actor_id, resolve
 
 from .states import LogsSG
 
-FILTER_FIELDS = (
-    "user_id",
-    "telegram_user_id",
-    "username",
-    "bot_id",
-    "tenant_id",
-    "start_at",
-    "end_at",
-    "action_type",
-    "entity_type",
-    "entity_id",
-    "product_id",
-    "category_id",
-    "subcategory_id",
-    "order_id",
-    "case_id",
-    "preorder_id",
-    "moderator",
-)
-FIELD_TITLES = {
-    "user_id": "Пользователь",
-    "telegram_user_id": "Telegram ID пользователя",
-    "username": "Username",
-    "bot_id": "Бот",
-    "tenant_id": "Магазин",
-    "start_at": "Начало периода",
-    "end_at": "Конец периода",
-    "action_type": "Тип действия",
-    "entity_type": "Тип сущности",
-    "entity_id": "ID сущности",
-    "product_id": "Товар",
-    "category_id": "Категория",
-    "subcategory_id": "Подкатегория",
-    "order_id": "Заказ",
-    "case_id": "Обращение",
-    "preorder_id": "Предзаказ",
-    "moderator": "Модератор",
+CATEGORIES = {
+    "bots": ("shop", "bot", "bot_kind"),
+    "users": ("staff", "visitor", "uid", "username"),
+    "period": ("period", "start_at", "end_at"),
+    "actions": ("action_type",),
+    "moderators": ("moderator",),
 }
-
-
-def _field_titles() -> dict[str, str]:
-    """Translate labels at render/callback time, inside the active locale context."""
-    return {field: _(msgid) for field, msgid in FIELD_TITLES.items()}
-
-
-INT_FIELDS = {"telegram_user_id", "bot_id", "moderator"}
-UUID_FIELDS = {
-    "user_id",
-    "tenant_id",
-    "entity_id",
-    "product_id",
-    "category_id",
-    "subcategory_id",
-    "order_id",
-    "case_id",
-    "preorder_id",
+CHOICES = {"shop", "bot", "staff", "visitor", "moderator"}
+EXAMPLES = {
+    "uid": "123456789",
+    "username": "@example",
+    "start_at": "2026-11-21 00:00Z",
+    "end_at": "2026-11-22 00:00Z",
+    "action_type": "command",
 }
-TEXT_FIELDS = {"username", "action_type", "entity_type"}
-DATETIME_FIELDS = {"start_at", "end_at"}
+PERIODS = {"24h": 1, "7d": 7, "30d": 30}
 
 
-def _scope(manager: DialogManager) -> ActivityScope:
-    snapshot = snapshot_of(manager)
-    master_id = manager.middleware_data.get("master_telegram_bot_id")
-    return ActivityScope(
-        tenant_ids=frozenset(snapshot.tenants),
-        master_telegram_bot_id=master_id if isinstance(master_id, int) and master_id > 0 else None,
-        all_tenants=snapshot.decide(TENANTS_VIEW_ALL).allowed,
-    )
-
-
-def _filter(manager: DialogManager) -> ActivityFilter:
-    values = dict(manager.dialog_data.get("filter", {}))
-    master_id = manager.middleware_data.get("master_telegram_bot_id")
-    if isinstance(master_id, int) and master_id > 0:
-        values["master_telegram_bot_id"] = master_id
-    for field in UUID_FIELDS:
-        if isinstance(values.get(field), str):
-            values[field] = UUID(values[field])
-    for field in DATETIME_FIELDS:
-        if isinstance(values.get(field), str):
-            values[field] = datetime.fromisoformat(values[field])
-    now = datetime.now(UTC)
-    values.setdefault("start_at", now - timedelta(hours=24))
-    values.setdefault("end_at", now)
-    result = ActivityFilter(**values)
-    if result.start_at >= result.end_at:
-        raise ValueError("time range must be increasing")
-    return result
-
-
-def _cursor(manager: DialogManager) -> tuple[datetime, UUID] | None:
-    value = manager.dialog_data.get("cursor")
-    if not isinstance(value, str):
-        return None
-    try:
-        return ActivityQueryRepository.decode_cursor(value)
-    except (ValueError, TypeError):
-        raise ValueError("invalid cursor") from None
-
-
-async def _require(manager: DialogManager) -> None:
-    await (await resolve(manager, PermissionService)).require(actor_id(manager), LOGS_VIEW)
-
-
-async def logs_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
-    await _require(dialog_manager)
-    repository = await resolve(dialog_manager, ActivityQueryRepository)
-    page = await repository.search(
-        _filter(dialog_manager),
-        dialog_manager.dialog_data.get("order", "newest"),
-        _cursor(dialog_manager),
-        scope=_scope(dialog_manager),
-        backward=bool(dialog_manager.dialog_data.get("backward", False)),
-    )
-    was_backward = bool(dialog_manager.dialog_data.get("backward", False))
-    dialog_manager.dialog_data["next"] = page.next_cursor
-    if was_backward and not dialog_manager.dialog_data.get("stack"):
-        dialog_manager.dialog_data.pop("cursor", None)
-    dialog_manager.dialog_data["first"] = (
-        f"{page.items[0].activity.created_at.isoformat()}|{page.items[0].activity.id}"
-        if page.items
-        else None
-    )
-    dialog_manager.dialog_data.pop("backward", None)
+def _titles() -> dict[str, str]:
     return {
-        "title": _("Логи активности"),
-        "rows": "\n".join(str(row.activity.id) for row in page.items),
-        "has_next": bool(page.next_cursor),
-        "has_prev": bool(dialog_manager.dialog_data.get("stack")),
-        "filter_hint": _("Диапазон по умолчанию: последние 24 часа"),
-        **{f"filter_{field}": title for field, title in _field_titles().items()},
+        "bots": _("Боты"),
+        "users": _("Пользователи"),
+        "period": _("Период"),
+        "actions": _("Действие"),
+        "moderators": _("Модератор"),
+        "shop": _("Магазин"),
+        "bot": _("Бот магазина"),
+        "master": _("Master Bot"),
+        "staff": _("Сотрудник"),
+        "visitor": _("Посетитель"),
+        "uid": _("Telegram ID"),
+        "username": _("Username"),
+        "start_at": _("Начало периода"),
+        "end_at": _("Конец периода"),
+        "action_type": _("Тип действия"),
+        "moderator": _("Модератор"),
     }
 
 
-async def _select_master_bot(
-    callback: CallbackQuery, button: Button, manager: DialogManager
-) -> None:
-    await _require(manager)
-    master_id = manager.middleware_data.get("master_telegram_bot_id")
-    if not isinstance(master_id, int) or master_id <= 0:
-        await callback.answer(_("Master Bot недоступен"), show_alert=True)
-        return
-    values = dict(manager.dialog_data.get("filter", {}))
-    values["master_telegram_bot_id"] = master_id
-    values["bot_id"] = master_id
-    manager.dialog_data["filter"] = values
-    manager.dialog_data.pop("cursor", None)
-    manager.dialog_data["stack"] = []
-    await callback.answer(_("Master Bot выбран"))
+def _bounded(value: object, limit: int) -> str:
+    text = " ".join(str(value).split()).replace("|", "/")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-async def _select_filter(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    await _require(manager)
-    field = str(button.widget_id)
-    if field not in FILTER_FIELDS:
-        await callback.answer(_("Некорректный фильтр"), show_alert=True)
-        return
-    manager.dialog_data["pending_filter"] = field
-    await callback.answer(_("Введите значение: {field}").format(field=_field_titles()[field]))
+def _html(value: object, limit: int, encoded_limit: int) -> str:
+    parts: list[str] = []
+    size = 0
+    for char in _bounded(value, limit):
+        token = escape(char)
+        if size + len(token) > encoded_limit - 1:
+            parts.append("…")
+            break
+        size += len(token)
+        parts.append(token)
+    return "".join(parts)
 
 
-def _parse_value(field: str, raw: str) -> object:
+def _line(row: ActivityRow, master: int | None) -> str:
+    a = row.activity
+    bot = _("Master") if a.telegram_bot_id == master else row.bot_name or a.telegram_bot_id
+    user = ("@" + a.username.lstrip("@")) if a.username else a.telegram_user_id or "—"
+    action = f"cmd: {a.button}" if a.action_type == "command" and a.button else a.action_type
+    return " | ".join(
+        (
+            a.created_at.astimezone(UTC).strftime("%d.%m %H:%M"),
+            _html(bot, 32, 64),
+            _html(user, 32, 64),
+            _html(action, 48, 88),
+        )
+    )
+
+
+async def _require(manager: DialogManager) -> ActivityScope:
+    actor = actor_id(manager)
+    permissions = await resolve(manager, PermissionService)
+    await permissions.require(actor, LOGS_VIEW)
+    snapshot = await permissions.get_snapshot(actor)
+    master = manager.middleware_data.get("master_telegram_bot_id")
+    return ActivityScope(
+        frozenset(snapshot.tenants),
+        master if type(master) is int and master > 0 else None,
+        snapshot.decide(TENANTS_VIEW_ALL).allowed,
+        actor if actor > 0 else None,
+    )
+
+
+def _dates(values: dict[str, Any]) -> tuple[datetime, datetime]:
+    now = datetime.now(UTC)
+    if values.get("period") == "custom":
+        start, end = (datetime.fromisoformat(values[k]) for k in ("start_at", "end_at"))
+    else:
+        start, end = now - timedelta(days=PERIODS[values.get("period", "24h")]), now
+    if start >= end:
+        raise ValueError("invalid period")
+    return start, end
+
+
+def _freeze(values: dict[str, Any]) -> dict[str, Any]:
+    start, end = _dates(values)
+    return {**values, "start_at": start.isoformat(), "end_at": end.isoformat()}
+
+
+def _applied(manager: DialogManager) -> dict[str, Any]:
+    if "applied" not in manager.dialog_data:
+        manager.dialog_data["applied"] = _freeze({})
+    return cast(dict[str, Any], manager.dialog_data["applied"])
+
+
+def _draft(manager: DialogManager) -> dict[str, Any]:
+    return cast(dict[str, Any], manager.dialog_data.setdefault("draft", {}))
+
+
+def _nav_reset(data: dict[str, Any]) -> None:
+    for key in ("cursor", "backward", "next", "prev", "page", "reset_page"):
+        data.pop(key, None)
+
+
+async def _shop_scope(
+    values: dict[str, Any], options: ActivityFilterOptions, scope: ActivityScope
+) -> UUID | None:
+    if values.get("bot_kind") == "master":
+        return None
+    for kind in ("shop", "bot"):
+        if kind in values:
+            option = await options.get(cast(OptionKind, kind), scope, None, values[kind])
+            if option is None:
+                raise ValueError("invalid bot/shop")
+            return option.tenant_id
+    return None
+
+
+async def _filter(
+    manager: DialogManager, values: dict[str, Any], scope: ActivityScope
+) -> tuple[ActivityFilter, dict[str, str]]:
+    kwargs: dict[str, Any] = {}
+    labels: dict[str, str] = {}
+    visitor_tenant = UUID(values["visitor_tenant"]) if values.get("visitor") else None
+    bot_tenant = None
+    for kind, field in (
+        ("shop", "tenant_id"),
+        ("bot", "bot_id"),
+        ("staff", "user_id"),
+        ("visitor", "visitor"),
+        ("moderator", "moderator"),
+    ):
+        if kind not in values:
+            continue
+        options = await resolve(manager, ActivityFilterOptions)
+        option = await options.get(
+            cast(OptionKind, kind),
+            scope,
+            visitor_tenant if kind == "visitor" else None,
+            values[kind],
+        )
+        if option is None:
+            raise ValueError("invalid selection")
+        labels[kind] = option.label
+        if kind == "visitor":
+            if visitor_tenant is None or option.tenant_id != visitor_tenant:
+                raise ValueError("invalid visitor tenant")
+            shop = await options.get("shop", scope, None, str(visitor_tenant))
+            if shop is None:
+                raise ValueError("invalid visitor shop")
+            labels["visitor_shop"] = shop.label
+            kwargs[field] = (visitor_tenant, int(option.key))
+        else:
+            kwargs[field] = UUID(option.key) if kind in ("shop", "staff") else int(option.key)
+        if kind == "bot":
+            bot_tenant = option.tenant_id
+    if values.get("bot_kind") == "master":
+        if scope.master_telegram_bot_id is None or (
+            not scope.all_tenants and scope.actor_telegram_id is None
+        ):
+            raise ValueError("Master is unavailable")
+        kwargs["bot_id"] = scope.master_telegram_bot_id
+        labels["bot_kind"] = _("Master Bot")
+    for key, field in (
+        ("uid", "telegram_user_id"),
+        ("username", "username"),
+        ("action_type", "action_type"),
+    ):
+        if key in values:
+            labels[key] = str(values[key])
+            kwargs[field] = values[key]
+    if visitor_tenant is not None and bot_tenant is not None:
+        # A shop bot selection has a tenant too; do not match inconsistent historical rows.
+        kwargs["tenant_ids"] = frozenset({bot_tenant})
+    if visitor_tenant is not None and (
+        (bot_tenant is not None and visitor_tenant != bot_tenant)
+        or ("tenant_id" in kwargs and visitor_tenant != kwargs["tenant_id"])
+    ):
+        labels["conflict"] = _(
+            "Посетитель и выбранный бот или магазин относятся к разным магазинам: "
+            "пересечение пусто."
+        )
+    return ActivityFilter(
+        start_at=datetime.fromisoformat(values["start_at"]),
+        end_at=datetime.fromisoformat(values["end_at"]),
+        **kwargs,
+    ), labels
+
+
+def _period(values: dict[str, Any]) -> str:
+    if values.get("period") == "custom":
+        return (
+            " – ".join(str(values[k])[:16].replace("T", " ") for k in ("start_at", "end_at"))
+            + " UTC"
+        )
+    return {"24h": _("24 ч"), "7d": _("7 д"), "30d": _("30 д")}[values.get("period", "24h")]
+
+
+def _summary(values: dict[str, Any], labels: dict[str, str]) -> str:
+    titles = _titles()
+    entries = [(titles["period"], _period(values))]
+    titles.update(bot_kind=titles["bots"], visitor_shop=_("Магазин посетителя"))
+    entries.extend((titles[key], value) for key, value in labels.items() if key != "conflict")
+    lines = [f"{escape(title)}: {_html(value, 44, 90)}" for title, value in entries]
+    if "conflict" in labels:
+        lines.append(escape(labels["conflict"]))
+    return "\n".join(lines)
+
+
+def _buttons() -> dict[str, str]:
+    return {
+        **_titles(),
+        "filters": _("Фильтры"),
+        "export": _("Экспорт TXT"),
+        "close": _("В меню"),
+        "cancel": _("Отмена"),
+        "apply": _("Применить"),
+        "clear": _("Очистить"),
+        "return": _("Назад"),
+        "24h": _("24 ч"),
+        "7d": _("7 д"),
+        "30d": _("30 д"),
+        "prev": "←",
+        "next": "→",
+    }
+
+
+def _order(data: dict[str, Any]) -> Order:
+    return cast(Order, data.get("order", "newest"))
+
+
+def _opposite_order(order: Order) -> Order:
+    return "oldest" if order == "newest" else "newest"
+
+
+def _order_label(order: Order) -> str:
+    if order == "newest":
+        return _("Порядок по времени события: сначала новые")
+    return _("Порядок по времени события: сначала старые")
+
+
+def _sort_action(target_order: Order) -> str:
+    return _("Показать сначала новые") if target_order == "newest" else _("Показать сначала старые")
+
+
+async def logs_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    manager = dialog_manager
+    scope = await _require(manager)
+    data = manager.dialog_data
+    values = _applied(manager)
+    order = _order(data)
+    header = f"<b>{_title()}</b>\n{escape(_order_label(order))}\n"
+    sort_action = _sort_action(_opposite_order(order))
+    try:
+        f, labels = await _filter(manager, values, scope)
+    except ValueError:
+        _nav_reset(data)
+        return {
+            **_buttons(),
+            "screen": header + escape(_invalid()) + "\n0/0",
+            "has_prev": False,
+            "has_next": False,
+            "can_export": False,
+            "sort": sort_action,
+        }
+    repository = await resolve(manager, ActivityQueryRepository)
+    page_no = data.get("page", 1)
+    cursor = data.get("cursor")
+    backward = data.get("backward", False)
+    page = await repository.search(
+        f,
+        order,
+        repository.decode_cursor(cursor) if cursor else None,
+        scope=scope,
+        backward=backward,
+    )
+    incomplete = 0 < len(page.items) < min(UI_PAGE_SIZE, page.total)
+    if cursor and backward and page_no == 1 and (page.previous_cursor or incomplete):
+        # Inserts or deletions can make the backward window differ from the first page.
+        _nav_reset(data)
+        cursor = None
+        page = await repository.search(f, order, scope=scope)
+    pages = (page.total + UI_PAGE_SIZE - 1) // UI_PAGE_SIZE
+    stale = bool(cursor and (not page.items or page_no > pages))
+    data.update(
+        next=page.next_cursor, prev=page.previous_cursor if page_no > 1 else None, reset_page=stale
+    )
+    if stale:
+        data.update(next=None, prev=None)
+    rows = "\n".join(_line(row, scope.master_telegram_bot_id) for row in page.items) or _(
+        "Нет событий"
+    )
+    screen = f"{header}{_summary(values, labels)}\n\n"
+    screen += f"{min(page_no, pages)}/{pages}\n{rows}"
+    if stale:
+        screen += "\n" + escape(_("Список изменился. Вернитесь на первую страницу."))
+    return {
+        **_buttons(),
+        "screen": screen,
+        "can_export": True,
+        "sort": sort_action,
+        "has_next": bool(data["next"]),
+        "has_prev": bool(data["prev"]) or stale,
+    }
+
+
+def _title() -> str:
+    return escape(_("Логи активности"))
+
+
+def _invalid() -> str:
+    return _("Фильтр недоступен или содержит неверное значение")
+
+
+async def _editor_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    manager = dialog_manager
+    scope = await _require(manager)
+    values = _draft(manager)
+    data = manager.dialog_data
+    state = manager.current_context().state
+    buttons = _buttons()
+    category = data.get("category")
+    result: dict[str, Any] = {**buttons}
+    if state == LogsSG.filters:
+        for key, fields in CATEGORIES.items():
+            if key == "period" or any(field in values for field in fields):
+                result[key] = "✓ " + buttons[key]
+        result["screen"] = (
+            "<b>"
+            + escape(_("Фильтры логов"))
+            + "</b>\n"
+            + escape(_("Изменения вступят в силу после применения"))
+        )
+        return result
+    if state == LogsSG.input:
+        field = data["field"]
+        current = data.get("input_period", {}).get(field, values.get(field))
+        result["screen"] = escape(
+            _("Введите {field}\nТекущее: {current}\nПример: {example}").format(
+                field=_titles()[field],
+                current=_bounded(current, 60) if current is not None else "—",
+                example=EXAMPLES[field],
+            )
+        )
+        return result
+    tenant = None
+    if "shop" in values or "bot" in values:
+        options = await resolve(manager, ActivityFilterOptions)
+        try:
+            tenant = await _shop_scope(values, options, scope)
+        except ValueError:
+            pass
+    if state == LogsSG.choices:
+        options = await resolve(manager, ActivityFilterOptions)
+        kind = data["kind"]
+        owner = _choice_tenant(data, values, tenant)
+        offset = data.get("offset", 0)
+        rows, more = await options.page(kind, scope, owner, offset)
+        if not rows and offset:
+            data["offset"] = offset = 0
+            rows, more = await options.page(kind, scope, owner, offset)
+        result.update(
+            items=[(option.key, _bounded(option.label, 48)) for option in rows],
+            choice_prev=offset > 0,
+            choice_next=more,
+            screen=escape(_titles()[kind])
+            + f" · {offset // OPTION_PAGE_SIZE + 1}"
+            + ("" if rows else "\n" + escape(_("Нет вариантов"))),
+        )
+        data["choice_more"] = more
+        return result
+    if category not in CATEGORIES:
+        raise ValueError("invalid category")
+    result["screen"] = escape(_titles()[str(category)])
+    try:
+        _validated, labels = await _filter(manager, _freeze(values), scope)
+        result["screen"] += "\n" + _summary(values, labels)
+    except (ValueError, KeyError):
+        result["screen"] += "\n" + escape(_invalid())
+    result.update({f"cat_{key}": key == category for key in CATEGORIES})
+    if category == "users" and tenant is not None:
+        result["visitor"] = _("Посетители выбранного магазина")
+    result["can_master"] = category == "bots" and scope.master_telegram_bot_id is not None
+    return result
+
+
+def _choice_tenant(data: dict[str, Any], draft: dict[str, Any], tenant: UUID | None) -> UUID | None:
+    if data["kind"] == "visitor":
+        if data.get("visitor_shop"):
+            return UUID(data["visitor_shop"])
+        return tenant
+    if data["kind"] == "bot" and draft.get("shop"):
+        # Constrain even if the selected shop was revoked after rendering.
+        return UUID(draft["shop"])
+    return None
+
+
+def _parse_value(field: str, raw: str) -> str | int:
     value = raw.strip()
-    if not value:
-        raise ValueError("empty value")
-    if field in INT_FIELDS:
-        if not value.isascii() or not value.isdecimal() or int(value) <= 0:
-            raise ValueError("invalid integer")
+    if field == "uid" and re.fullmatch(r"[0-9]{1,19}", value) and 0 < int(value) < 2**63:
         return int(value)
-    if field in UUID_FIELDS:
-        return UUID(value)
-    if field in DATETIME_FIELDS:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            raise ValueError("datetime must include timezone")
-        return parsed.astimezone(UTC)
-    if field in TEXT_FIELDS:
-        return value[1:] if field == "username" and value.startswith("@") else value
-    raise ValueError("unknown filter")
+    if field == "username" and re.fullmatch(r"@?[A-Za-z0-9_]{1,32}", value):
+        return value.removeprefix("@").lower()
+    if field == "action_type" and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", value):
+        return value
+    if field in ("start_at", "end_at"):
+        parsed = datetime.fromisoformat(value)
+        if parsed.utcoffset() is not None:
+            return parsed.astimezone(UTC).isoformat()
+    raise ValueError("invalid filter value")
+
+
+def _clear(values: dict[str, Any], category: str) -> None:
+    for field in CATEGORIES[category]:
+        values.pop(field, None)
+    if category == "users":
+        values.pop("visitor_tenant", None)
 
 
 async def _input(message: Message, widget: MessageInput, manager: DialogManager) -> None:
     await _require(manager)
-    field = manager.dialog_data.get("pending_filter")
-    if not isinstance(field, str) or field not in FILTER_FIELDS:
-        await message.answer(_("Сначала выберите фильтр"))
-        return
+    field = manager.dialog_data["field"]
     try:
-        parsed = _parse_value(field, message.text or "")
-        values = dict(manager.dialog_data.get("filter", {}))
-        values[field] = str(parsed) if field in UUID_FIELDS | DATETIME_FIELDS else parsed
-        if field in DATETIME_FIELDS:
-            start = values.get("start_at")
-            end = values.get("end_at")
-            if start and end and start >= end:
-                raise ValueError("start_at must be before end_at")
-        manager.dialog_data["filter"] = values
-        manager.dialog_data.pop("pending_filter", None)
-        manager.dialog_data.pop("cursor", None)
-        manager.dialog_data["stack"] = []
-        await message.answer(_("Фильтр сохранён"))
-    except (ValueError, TypeError):
-        await message.answer(_("Некорректное значение фильтра"))
-
-
-async def _next(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    await _require(manager)
-    value = manager.dialog_data.get("next")
-    if not isinstance(value, str):
-        await callback.answer()
+        value = _parse_value(field, message.text or "")
+    except (ValueError, OverflowError):
+        await message.answer(_invalid())
         return
-    stack = manager.dialog_data.setdefault("stack", [])
-    if not isinstance(stack, list):
-        raise ValueError("invalid cursor stack")
-    stack.append(manager.dialog_data.get("cursor"))
-    manager.dialog_data["cursor"] = value
-    manager.dialog_data.pop("backward", None)
-    await manager.show()
+    draft = _draft(manager)
+    if field in ("start_at", "end_at"):
+        draft.update(manager.dialog_data.pop("input_period"))
+        draft["period"] = "custom"
+    draft[field] = value
+    await manager.switch_to(LogsSG.category)
 
 
-async def _back(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+async def _main(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
     await _require(manager)
-    stack = manager.dialog_data.get("stack", [])
-    if not isinstance(stack, list) or not stack:
-        await callback.answer()
-        return
-    first = manager.dialog_data.get("first")
-    if not isinstance(first, str):
-        await callback.answer()
-        return
-    ActivityQueryRepository.decode_cursor(first)
-    stack.pop()
-    manager.dialog_data["cursor"] = first
-    manager.dialog_data["backward"] = True
-    await manager.show()
+    data = manager.dialog_data
+    key = button.widget_id
+    if key == "close":
+        await manager.done()
+    elif key == "filters":
+        data["draft"] = dict(_applied(manager))
+        await manager.switch_to(LogsSG.filters)
+    elif key == "sort":
+        data["order"] = _opposite_order(_order(data))
+        _nav_reset(data)
+    elif key == "prev" and data.get("reset_page"):
+        _nav_reset(data)
+    elif key in ("prev", "next") and data.get(key):
+        data.update(
+            cursor=data[key],
+            backward=key == "prev",
+            page=data.get("page", 1) + (-1 if key == "prev" else 1),
+        )
 
 
-async def _sort(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    await _require(manager)
-    manager.dialog_data["order"] = (
-        "oldest" if manager.dialog_data.get("order", "newest") == "newest" else "newest"
-    )
-    manager.dialog_data.pop("cursor", None)
-    manager.dialog_data["stack"] = []
-    await manager.show()
+async def _edit(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    scope = await _require(manager)
+    data = manager.dialog_data
+    draft = _draft(manager)
+    key = button.widget_id
+    state = manager.current_context().state
+    if state == LogsSG.filters:
+        if key == "apply":
+            try:
+                applied = _freeze(draft)
+                await _filter(manager, applied, scope)
+            except (ValueError, KeyError, OverflowError):
+                await callback.answer(_invalid(), show_alert=True)
+                return
+            data["applied"] = applied
+            _nav_reset(data)
+        if key in ("apply", "cancel"):
+            data.pop("draft", None)
+            await manager.switch_to(LogsSG.list)
+        elif key == "clear":
+            data["draft"] = {}
+        elif key in CATEGORIES:
+            data["category"] = key
+            await manager.switch_to(LogsSG.category)
+        return
+    if key == "return":
+        data.pop("input_period", None)
+        await manager.switch_to(LogsSG.filters if state == LogsSG.category else LogsSG.category)
+        return
+    category = data["category"]
+    if state == LogsSG.choices:
+        offset = data.get("offset", 0)
+        if key == "prev" and offset:
+            data["offset"] = max(0, offset - OPTION_PAGE_SIZE)
+        if key == "next" and data.get("choice_more"):
+            data["offset"] = offset + OPTION_PAGE_SIZE
+        return
+    if key == "clear":
+        _clear(draft, category)
+    elif category == "bots" and key == "master":
+        if scope.master_telegram_bot_id is None or (
+            not scope.all_tenants and scope.actor_telegram_id is None
+        ):
+            await callback.answer(_invalid(), show_alert=True)
+            return
+        _clear(draft, "bots")
+        draft["bot_kind"] = "master"
+    elif category == "period" and key in PERIODS:
+        _clear(draft, "period")
+        draft["period"] = key
+    elif key in CATEGORIES[category] and key in EXAMPLES:
+        data["field"] = key
+        if key in ("start_at", "end_at"):
+            # Preserve the other bound exactly as displayed, without mutating draft on Cancel.
+            dates = draft if draft.get("period") == "custom" else _freeze(draft)
+            data["input_period"] = {k: dates[k] for k in ("start_at", "end_at")}
+        await manager.switch_to(LogsSG.input)
+    elif key in CATEGORIES[category] and key in CHOICES:
+        kind = key
+        if key == "visitor":
+            try:
+                tenant = None
+                if "shop" in draft or "bot" in draft:
+                    options = await resolve(manager, ActivityFilterOptions)
+                    tenant = await _shop_scope(draft, options, scope)
+            except ValueError:
+                await callback.answer(_invalid(), show_alert=True)
+                return
+            data["visitor_shop"] = str(tenant) if tenant else None
+            if tenant is None:
+                kind = "shop"
+        data.update(kind=kind, offset=0, choice_more=False)
+        await manager.switch_to(LogsSG.choices)
+
+
+async def _choose(
+    callback: CallbackQuery, widget: Any, manager: DialogManager, item_id: str
+) -> None:
+    scope = await _require(manager)
+    data = manager.dialog_data
+    draft = _draft(manager)
+    kind = data["kind"]
+    category = data["category"]
+    options = await resolve(manager, ActivityFilterOptions)
+    tenant = _choice_tenant(data, draft, None)
+    option = await options.get(kind, scope, tenant, item_id)
+    if option is None:
+        await callback.answer(_invalid(), show_alert=True)
+        return
+    if kind == "shop" and category == "users":
+        data.update(kind="visitor", visitor_shop=option.key, offset=0, choice_more=False)
+        return
+    if category != "users":
+        _clear(draft, category)
+    draft[kind] = option.key
+    if kind == "visitor":
+        draft["visitor_tenant"] = str(option.tenant_id)
+    await manager.switch_to(LogsSG.category)
 
 
 async def _export(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    await _require(manager)
-    service = await resolve(manager, ExportService)
-    path = None
+    scope = await _require(manager)
     try:
-        path = await service.export_txt(
-            actor_id(manager),
-            _filter(manager),
-            manager.dialog_data.get("order", "newest"),
-            scope=_scope(manager),
-        )
+        f, _labels = await _filter(manager, _applied(manager), scope)
+    except ValueError:
+        await callback.answer(_invalid(), show_alert=True)
+        return
+    service = await resolve(manager, ExportService)
+    actor = actor_id(manager)
+    path = await service.export_txt(actor, f, _order(manager.dialog_data), scope=scope)
+    try:
         try:
-            message = callback.message
-            if message is None:
+            if callback.message is None:
                 raise ValueError("callback has no message")
             await manager.middleware_data["bot"].send_document(
-                chat_id=message.chat.id, document=FSInputFile(path), caption=_("Экспорт логов")
+                chat_id=callback.message.chat.id,
+                document=FSInputFile(path),
+                caption=_("Экспорт логов"),
             )
         except Exception as error:
-            await service.record_delivery_failure(actor_id(manager), error)
+            await service.record_delivery_failure(actor, error)
             raise
-        await service.record_delivery_success(actor_id(manager))
+        await service.record_delivery_success(actor)
     finally:
-        if path is not None:
-            await asyncio.to_thread(path.unlink, missing_ok=True)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+def _button(key: str, *, main: bool = False, when: str | None = None) -> Button:
+    handler = _export if key == "export" else _main if main else _edit
+    return Button(Format("{" + key + "}"), id=key, on_click=handler, when=when)
 
 
 def logs_dialog() -> Dialog:
-    filter_buttons = [
-        Button(Format(f"{{filter_{field}}}"), id=field, on_click=_select_filter)
-        for field in FILTER_FIELDS
-    ]
     return Dialog(
         Window(
-            Format("{title}\n{filter_hint}\n{rows}"),
-            Column(
-                Button(Const(_("Master Bot")), id="master_bot", on_click=_select_master_bot),
-                *filter_buttons,
-            ),
-            MessageInput(_input),
+            Format("{screen}"),
             Row(
-                Button(Const("←"), id="back", on_click=_back),
-                Button(Const("→"), id="next", on_click=_next),
+                _button("prev", main=True, when="has_prev"),
+                _button("next", main=True, when="has_next"),
             ),
-            Row(
-                Button(Const(_("Сортировка")), id="sort", on_click=_sort),
-                Button(Const(_("Экспорт TXT")), id="export", on_click=_export),
-            ),
+            Row(_button("filters", main=True), _button("sort", main=True)),
+            Row(_button("export", main=True, when="can_export"), _button("close", main=True)),
             state=LogsSG.list,
             getter=logs_getter,
-        )
+            parse_mode=ParseMode.HTML,
+        ),
+        Window(
+            Format("{screen}"),
+            Row(_button("bots"), _button("users")),
+            Row(_button("period"), _button("actions")),
+            Row(_button("moderators")),
+            Row(_button("apply"), _button("cancel")),
+            Row(_button("clear")),
+            state=LogsSG.filters,
+            getter=_editor_getter,
+            parse_mode=ParseMode.HTML,
+        ),
+        Window(
+            Format("{screen}"),
+            Row(_button("shop"), _button("bot"), when="cat_bots"),
+            Row(_button("master", when="can_master")),
+            Row(_button("staff"), _button("visitor"), when="cat_users"),
+            Row(_button("uid"), _button("username"), when="cat_users"),
+            Row(_button("24h"), _button("7d"), _button("30d"), when="cat_period"),
+            Row(_button("start_at"), _button("end_at"), when="cat_period"),
+            Row(_button("action_type"), when="cat_actions"),
+            Row(_button("moderator"), when="cat_moderators"),
+            Row(_button("clear"), _button("return")),
+            state=LogsSG.category,
+            getter=_editor_getter,
+            parse_mode=ParseMode.HTML,
+        ),
+        Window(
+            Format("{screen}"),
+            Column(
+                Select(
+                    Format("{item[1]}"),
+                    id="pick",
+                    item_id_getter=lambda item: item[0],
+                    items="items",
+                    on_click=_choose,
+                )
+            ),
+            Row(_button("prev", when="choice_prev"), _button("next", when="choice_next")),
+            _button("return"),
+            state=LogsSG.choices,
+            getter=_editor_getter,
+            parse_mode=ParseMode.HTML,
+        ),
+        Window(
+            Format("{screen}"),
+            MessageInput(_input, content_types=ContentType.TEXT),
+            Button(Format("{cancel}"), id="return", on_click=_edit),
+            state=LogsSG.input,
+            getter=_editor_getter,
+            parse_mode=ParseMode.HTML,
+        ),
     )
 
 
@@ -332,4 +710,4 @@ def build_logs_router() -> Router:
     return router
 
 
-__all__ = ["FILTER_FIELDS", "LogsSG", "build_logs_router", "logs_dialog"]
+__all__ = ["LogsSG", "build_logs_router", "logs_dialog"]

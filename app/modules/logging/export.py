@@ -59,6 +59,10 @@ def _event(row: ActivityRow) -> ActivityEvent:
     )
 
 
+def format_export_line(row: ActivityRow) -> str:
+    return f"{format_line(_event(row))} | event_id={row.activity.id}"
+
+
 async def export_txt(
     filter: ActivityFilter,
     order: Order = "newest",
@@ -78,21 +82,17 @@ async def export_txt(
     await asyncio.to_thread(os.close, fd)
     raw = Path(raw_name)
     result = raw
-    count = 0
     try:
-        cursor = None
         stream = await asyncio.to_thread(raw.open, "w", encoding="utf-8", newline="\n")
         try:
-            while count < MAX_EXPORT_ROWS:
-                page = await repository.search(filter, order, cursor, scope=scope)
-                for row in page.items:
-                    if count >= MAX_EXPORT_ROWS:
-                        break
-                    await asyncio.to_thread(stream.write, format_line(_event(row)) + "\n")
-                    count += 1
-                if not page.next_cursor or not page.items:
-                    break
-                cursor = repository.decode_cursor(page.next_cursor)
+            async with repository.stream_export(
+                filter, order, scope=scope, limit=MAX_EXPORT_ROWS
+            ) as rows:
+                async for batch in rows.partitions():
+                    await asyncio.to_thread(
+                        stream.writelines,
+                        [format_export_line(ActivityRow(row)) + "\n" for row in batch],
+                    )
         finally:
             await asyncio.to_thread(stream.close)
         size = (await asyncio.to_thread(raw.stat)).st_size
@@ -104,7 +104,7 @@ async def export_txt(
         if audit:
             await audit()
         return result
-    except Exception:
+    except BaseException:
         await asyncio.to_thread(raw.unlink, missing_ok=True)
         if result != raw:
             await asyncio.to_thread(result.unlink, missing_ok=True)

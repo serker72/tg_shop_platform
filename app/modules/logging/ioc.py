@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.modules.logging.audit import SqlAuditLogger
 from app.modules.logging.buffer import LogBuffer
 from app.modules.logging.export import ExportService
+from app.modules.logging.filter_options import ActivityFilterOptions
 from app.modules.logging.metrics import LogsDroppedCounter, logs_dropped_total
 from app.modules.logging.ports import ActivityLogger, AuditLogger
 from app.modules.logging.query import ActivityQueryRepository
@@ -49,6 +50,8 @@ class LoggingProvider(Provider):
     @provide(scope=Scope.REQUEST)
     def provide_activity_query_repository(self, session: AsyncSession) -> ActivityQueryRepository:
         return ActivityQueryRepository(session)
+
+    filter_options = provide(ActivityFilterOptions, scope=Scope.REQUEST)
 
     @provide(scope=Scope.REQUEST)
     def provide_export_service(

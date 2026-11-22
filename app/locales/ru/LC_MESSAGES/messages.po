@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-17 14:47+0300\n"
+"POT-Creation-Date: 2026-11-22 11:33+0300\n"
 "PO-Revision-Date: 2026-11-15 20:44+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -19,12 +19,33 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
+msgid "24 ч"
+msgstr ""
+
+msgid "30 д"
+msgstr ""
+
+msgid "7 д"
+msgstr ""
+
+msgid "Master"
+msgstr ""
+
+msgid "Master Bot"
+msgstr "Master Bot"
+
 #, python-brace-format
 msgid "Slug: {slug}"
 msgstr ""
 
 msgid "TTL кэша прав (сек.)"
 msgstr ""
+
+msgid "Telegram ID"
+msgstr ""
+
+msgid "Username"
+msgstr "Username"
 
 msgid "« Назад"
 msgstr ""
@@ -38,10 +59,16 @@ msgstr ""
 msgid "Бессрочно"
 msgstr ""
 
+msgid "Бот магазина"
+msgstr ""
+
 msgid "Боты"
 msgstr ""
 
 msgid "Бухгалтерия"
+msgstr ""
+
+msgid "В меню"
 msgstr ""
 
 msgid ""
@@ -62,6 +89,13 @@ msgstr ""
 msgid "Введите slug: латиница в нижнем регистре, цифры и дефисы, до 64 символов"
 msgstr ""
 
+#, python-brace-format
+msgid ""
+"Введите {field}\n"
+"Текущее: {current}\n"
+"Пример: {example}"
+msgstr ""
+
 msgid "Введите название магазина (до 128 символов)"
 msgstr ""
 
@@ -70,10 +104,6 @@ msgstr ""
 
 #, python-brace-format
 msgid "Введите новое значение — целое число от {low} до {high}."
-msgstr ""
-
-#, python-brace-format
-msgid "Текущее значение: {value}"
 msgstr ""
 
 msgid "Введите новое название магазина (до 128 символов)"
@@ -156,6 +186,9 @@ msgstr ""
 msgid "Деактивировать сотрудника?"
 msgstr ""
 
+msgid "Действие"
+msgstr ""
+
 #, python-brace-format
 msgid "Действие: {effect}"
 msgstr ""
@@ -199,6 +232,9 @@ msgstr ""
 msgid "Изменение сохранено, но кэш прав обновится с задержкой."
 msgstr ""
 
+msgid "Изменения вступят в силу после применения"
+msgstr ""
+
 msgid "Изменить"
 msgstr ""
 
@@ -208,13 +244,25 @@ msgstr ""
 msgid "Истёкшие:"
 msgstr ""
 
+msgid "Конец периода"
+msgstr "Конец периода"
+
 msgid "Логи"
 msgstr ""
+
+msgid "Логи активности"
+msgstr "Логи активности"
+
+msgid "Магазин"
+msgstr "Магазин"
 
 msgid "Магазин не найден."
 msgstr ""
 
 msgid "Магазин открыт"
+msgstr ""
+
+msgid "Магазин посетителя"
 msgstr ""
 
 #, python-brace-format
@@ -238,6 +286,9 @@ msgstr ""
 msgid "Магазины: {count}"
 msgstr ""
 
+msgid "Модератор"
+msgstr "Модератор"
+
 msgid "Модераторы"
 msgstr ""
 
@@ -246,6 +297,9 @@ msgid "Модуль: {module}. Отметьте права и нажмите «�
 msgstr ""
 
 msgid "Нажмите на магазин, чтобы привязать или отвязать"
+msgstr ""
+
+msgid "Назад"
 msgstr ""
 
 msgid "Название должно содержать от 1 до 128 символов."
@@ -272,6 +326,9 @@ msgid ""
 "Настройки сохранены, но другие процессы увидят изменение с задержкой до 1"
 " мин."
 msgstr ""
+
+msgid "Начало периода"
+msgstr "Начало периода"
 
 msgid ""
 "Не редактируются здесь (неактивные или вне справочника), сохраняются как "
@@ -328,10 +385,16 @@ msgstr ""
 msgid "Нет"
 msgstr ""
 
+msgid "Нет вариантов"
+msgstr ""
+
 msgid "Нет доступа."
 msgstr ""
 
 msgid "Нет доступных магазинов"
+msgstr ""
+
+msgid "Нет событий"
 msgstr ""
 
 msgid "Нужен положительный числовой Telegram ID (до 19 цифр)."
@@ -353,6 +416,12 @@ msgstr ""
 msgid "Отзывы"
 msgstr ""
 
+msgid "Отмена"
+msgstr ""
+
+msgid "Очистить"
+msgstr ""
+
 msgid "Панель управления платформой"
 msgstr ""
 
@@ -371,6 +440,9 @@ msgstr ""
 msgid "Переименовать"
 msgstr ""
 
+msgid "Период"
+msgstr ""
+
 msgid "Персональное право не найдено."
 msgstr ""
 
@@ -381,6 +453,12 @@ msgstr ""
 msgid "Персональные права сотрудника {id}"
 msgstr ""
 
+msgid "Показать сначала новые"
+msgstr ""
+
+msgid "Показать сначала старые"
+msgstr ""
+
 msgid "Покупки включены"
 msgstr ""
 
@@ -388,6 +466,23 @@ msgid "Пользователи"
 msgstr ""
 
 msgid "Пополнение баланса"
+msgstr ""
+
+msgid "Порядок по времени события: сначала новые"
+msgstr ""
+
+msgid "Порядок по времени события: сначала старые"
+msgstr ""
+
+msgid "Посетители выбранного магазина"
+msgstr ""
+
+msgid "Посетитель"
+msgstr ""
+
+msgid ""
+"Посетитель и выбранный бот или магазин относятся к разным магазинам: "
+"пересечение пусто."
 msgstr ""
 
 #, python-brace-format
@@ -419,6 +514,9 @@ msgid "Предзаказы"
 msgstr ""
 
 msgid "Привязки к магазинам сняты: у роли доступ ко всем магазинам."
+msgstr ""
+
+msgid "Применить"
 msgstr ""
 
 #, python-brace-format
@@ -506,6 +604,9 @@ msgstr ""
 msgid "Создать роль"
 msgstr ""
 
+msgid "Сотрудник"
+msgstr ""
+
 msgid "Сотрудник не найден."
 msgstr ""
 
@@ -544,6 +645,9 @@ msgstr ""
 msgid "Сохранить персональное право?"
 msgstr ""
 
+msgid "Список изменился. Вернитесь на первую страницу."
+msgstr ""
+
 msgid "Срок действия должен быть в будущем."
 msgstr ""
 
@@ -572,8 +676,15 @@ msgid "Такой сотрудник уже есть."
 msgstr ""
 
 #, python-brace-format
+msgid "Текущее значение: {value}"
+msgstr ""
+
+#, python-brace-format
 msgid "Технические работы: {state}"
 msgstr ""
+
+msgid "Тип действия"
+msgstr "Тип действия"
 
 msgid "Товары"
 msgstr ""
@@ -610,6 +721,15 @@ msgstr ""
 msgid "Фактические права сотрудника {id}"
 msgstr ""
 
+msgid "Фильтр недоступен или содержит неверное значение"
+msgstr ""
+
+msgid "Фильтры"
+msgstr ""
+
+msgid "Фильтры логов"
+msgstr ""
+
 msgid "Хранение audit_logs (мес.)"
 msgstr ""
 
@@ -624,6 +744,12 @@ msgstr ""
 
 msgid "Чат поддержки"
 msgstr ""
+
+msgid "Экспорт TXT"
+msgstr "Экспорт TXT"
+
+msgid "Экспорт логов"
+msgstr "Экспорт логов"
 
 msgid "Этот slug роли уже занят."
 msgstr ""
@@ -757,94 +883,63 @@ msgstr ""
 #~ "администратору БД."
 #~ msgstr ""
 
-msgid "Логи активности"
-msgstr "Логи активности"
+#~ msgid "Диапазон по умолчанию: последние 24 часа"
+#~ msgstr "Диапазон по умолчанию: последние 24 часа"
 
-msgid "Диапазон по умолчанию: последние 24 часа"
-msgstr "Диапазон по умолчанию: последние 24 часа"
+#~ msgid "Master Bot недоступен"
+#~ msgstr "Master Bot недоступен"
 
-msgid "Master Bot"
-msgstr "Master Bot"
+#~ msgid "Master Bot выбран"
+#~ msgstr "Master Bot выбран"
 
-msgid "Master Bot недоступен"
-msgstr "Master Bot недоступен"
+#~ msgid "Некорректный фильтр"
+#~ msgstr "Некорректный фильтр"
 
-msgid "Master Bot выбран"
-msgstr "Master Bot выбран"
+#~ msgid "Введите значение: {field}"
+#~ msgstr "Введите значение: {field}"
 
-msgid "Некорректный фильтр"
-msgstr "Некорректный фильтр"
+#~ msgid "Сначала выберите фильтр"
+#~ msgstr "Сначала выберите фильтр"
 
-#, python-brace-format
-msgid "Введите значение: {field}"
-msgstr "Введите значение: {field}"
+#~ msgid "Фильтр сохранён"
+#~ msgstr "Фильтр сохранён"
 
-msgid "Сначала выберите фильтр"
-msgstr "Сначала выберите фильтр"
+#~ msgid "Некорректное значение фильтра"
+#~ msgstr "Некорректное значение фильтра"
 
-msgid "Фильтр сохранён"
-msgstr "Фильтр сохранён"
+#~ msgid "Сортировка"
+#~ msgstr "Сортировка"
 
-msgid "Некорректное значение фильтра"
-msgstr "Некорректное значение фильтра"
+#~ msgid "Пользователь"
+#~ msgstr "Пользователь"
 
-msgid "Экспорт логов"
-msgstr "Экспорт логов"
+#~ msgid "Telegram ID пользователя"
+#~ msgstr "Telegram ID пользователя"
 
-msgid "Сортировка"
-msgstr "Сортировка"
+#~ msgid "Бот"
+#~ msgstr "Бот"
 
-msgid "Экспорт TXT"
-msgstr "Экспорт TXT"
+#~ msgid "Тип сущности"
+#~ msgstr "Тип сущности"
 
-msgid "Пользователь"
-msgstr "Пользователь"
+#~ msgid "ID сущности"
+#~ msgstr "ID сущности"
 
-msgid "Telegram ID пользователя"
-msgstr "Telegram ID пользователя"
+#~ msgid "Товар"
+#~ msgstr "Товар"
 
-msgid "Username"
-msgstr "Username"
+#~ msgid "Категория"
+#~ msgstr "Категория"
 
-msgid "Бот"
-msgstr "Бот"
+#~ msgid "Подкатегория"
+#~ msgstr "Подкатегория"
 
-msgid "Магазин"
-msgstr "Магазин"
+#~ msgid "Заказ"
+#~ msgstr "Заказ"
 
-msgid "Начало периода"
-msgstr "Начало периода"
+#~ msgid "Обращение"
+#~ msgstr "Обращение"
 
-msgid "Конец периода"
-msgstr "Конец периода"
-
-msgid "Тип действия"
-msgstr "Тип действия"
-
-msgid "Тип сущности"
-msgstr "Тип сущности"
-
-msgid "ID сущности"
-msgstr "ID сущности"
-
-msgid "Товар"
-msgstr "Товар"
-
-msgid "Категория"
-msgstr "Категория"
-
-msgid "Подкатегория"
-msgstr "Подкатегория"
-
-msgid "Заказ"
-msgstr "Заказ"
-
-msgid "Обращение"
-msgstr "Обращение"
-
-msgid "Предзаказ"
-msgstr "Предзаказ"
-
-msgid "Модератор"
-msgstr "Модератор"
+#~ msgid "Предзаказ"
+#~ msgstr "Предзаказ"
 

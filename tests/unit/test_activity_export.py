@@ -1,7 +1,10 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +19,6 @@ from app.modules.logging.query import (
     ActivityQueryRepository,
     ActivityRow,
     ActivityScope,
-    Page,
 )
 
 
@@ -25,6 +27,10 @@ def test_activity_format_uses_file_formatter() -> None:
         ActivityEvent(telegram_bot_id=1, action_type="OPEN", created_at=datetime.now(UTC))
     )
     assert "bot=1" in line and "action=OPEN" in line
+    row = _row(1)
+    assert export_module.format_export_line(row) == (
+        format_line(export_module._event(row)) + f" | event_id={row.activity.id}"
+    )
 
 
 def test_export_limits_and_threshold_constants() -> None:
@@ -37,6 +43,7 @@ def _row(number: int) -> ActivityRow:
         activity=cast(
             UserActivity,
             SimpleNamespace(
+                id=UUID(int=number),
                 telegram_bot_id=number,
                 action_type="OPEN",
                 tenant_id=None,
@@ -71,13 +78,17 @@ class _Repository:
         self.rows = rows
         self.calls = 0
 
-    async def search(self, *_args: object, **_kwargs: object) -> Page:
+    @asynccontextmanager
+    async def stream_export(
+        self, *_args: object, limit: int, **_kwargs: object
+    ) -> AsyncIterator[Any]:
         self.calls += 1
-        return Page(self.rows, None, None, False)
 
-    @staticmethod
-    def decode_cursor(value: str) -> tuple[datetime, object]:
-        raise AssertionError(value)
+        async def partitions() -> AsyncIterator[list[UserActivity]]:
+            for row in self.rows[:limit]:
+                yield [row.activity]
+
+        yield SimpleNamespace(partitions=partitions)
 
 
 @pytest.mark.asyncio
@@ -93,6 +104,11 @@ async def test_export_stops_at_max_rows_and_cleans_raw_file(
         scope=ActivityScope(frozenset(), all_tenants=True),
     )
     assert result.suffix == ".txt"
+    assert repository.calls == 1
+    assert [line.rsplit("event_id=", 1)[1] for line in result.read_text().splitlines()] == [
+        str(UUID(int=1)),
+        str(UUID(int=2)),
+    ]
     assert result.read_text().count("action=OPEN") == 2
     assert not list((tmp_path / "system" / "tmp").glob("*.txt.gz"))
 
@@ -138,8 +154,13 @@ async def test_export_gzip_failure_cleans_partial_files(
 @pytest.mark.asyncio
 async def test_export_failure_cleans_temporary_file(tmp_path: Path) -> None:
     class FailingRepository:
-        async def search(self, *_args: object, **_kwargs: object) -> Page:
-            raise RuntimeError("query failed")
+        @asynccontextmanager
+        async def stream_export(self, *_args: object, **_kwargs: object) -> AsyncIterator[Any]:
+            async def partitions() -> AsyncIterator[Any]:
+                raise RuntimeError("query failed")
+                yield []
+
+            yield SimpleNamespace(partitions=partitions)
 
     with pytest.raises(RuntimeError, match="query failed"):
         await export_module.export_txt(
