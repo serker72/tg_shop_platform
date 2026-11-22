@@ -28,6 +28,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.migrations_support import import_all_models, include_name, include_object
 from app.shared_kernel.infrastructure.database import Base
+from app.shared_kernel.infrastructure.outbox import outbox_dlq, outbox_messages  # noqa: F401
 
 # Alembic Config object: access to the values in alembic.ini.
 config = context.config

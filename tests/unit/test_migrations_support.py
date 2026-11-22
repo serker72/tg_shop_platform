@@ -17,6 +17,8 @@ from app.core.migrations_support import (
     include_name,
     include_object,
 )
+from app.shared_kernel.infrastructure.database import metadata
+from app.shared_kernel.infrastructure.outbox import outbox_dlq, outbox_messages
 
 
 @pytest.mark.parametrize("schema", ["partman", "archive", "information_schema"])
@@ -114,6 +116,11 @@ def test_include_object_skips_service_schemas() -> None:
 def test_model_modules_cover_all_business_modules() -> None:
     assert len(MODEL_MODULES) == 9
     assert all(name.startswith("app.modules.") for name in MODEL_MODULES)
+
+
+def test_outbox_metadata_contains_package_owned_tables() -> None:
+    assert metadata.tables["outbox_messages"] is outbox_messages
+    assert metadata.tables["outbox_dlq"] is outbox_dlq
 
 
 @pytest.fixture()
