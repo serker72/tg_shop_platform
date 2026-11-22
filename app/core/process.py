@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from dishka import AsyncContainer
 
     from app.core.config import Settings
+    from app.core.observability.health import HeartbeatRegistry
     from app.core.observability.metrics import AppMetrics
 
 #: Exit code of a process stopped because a supervised background task died.
@@ -81,6 +82,7 @@ class ServiceContext:
     settings: Settings
     container: AsyncContainer
     metrics: AppMetrics
+    readiness_registry: HeartbeatRegistry | None = None
     supervisor: TaskSupervisor = field(default_factory=TaskSupervisor)
 
 
@@ -169,6 +171,7 @@ async def run_service(
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
     from app.core.telemetry import init_telemetry, shutdown_telemetry
+    from app.modules.bot_manager.ioc import BotManagerProvider
     from app.modules.bot_manager.metrics import OutageState
     from app.modules.bot_manager.proxy_health import OutageMonitor
     from app.modules.iam.ioc import IamProvider
@@ -191,6 +194,7 @@ async def run_service(
         LoggingProvider(),
         ObservabilityProvider(),
         IamProvider(),
+        BotManagerProvider(),
         SystemProvider(),
         context={Settings: settings},
     )
@@ -204,7 +208,13 @@ async def run_service(
         checker = await container.get(HealthChecker)
         metrics = await container.get(AppMetrics)
         set_build_info(metrics, component=name)
-        context = ServiceContext(name=name, settings=settings, container=container, metrics=metrics)
+        context = ServiceContext(
+            name=name,
+            settings=settings,
+            container=container,
+            metrics=metrics,
+            readiness_registry=registry,
+        )
         outage_state: OutageState | None = None
         obs = settings.observability
         async with AsyncExitStack() as stack:

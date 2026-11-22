@@ -18,9 +18,9 @@ from aiogram_dialog.widgets.kbd import Button, Column
 from aiogram_dialog.widgets.text import Format
 
 from app.entrypoints.master_bot.texts import Texts
+from app.modules.bot_manager.presentation.tg_master import bots_dialog
 from app.modules.iam.permissions import (
     LOGS_VIEW,
-    PROXIES_MANAGE,
     ROLES_MANAGE,
     SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
@@ -50,10 +50,9 @@ SECTION_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     "roles": (ROLES_MANAGE,),
     "settings": (SETTINGS_MANAGE,),
     "logs": (LOGS_VIEW,),
-    "bots": (TENANTS_VIEW_ALL, PROXIES_MANAGE),
 }
 MENU_PERMISSIONS: Final = frozenset(s for slugs in SECTION_PERMISSIONS.values() for s in slugs)
-_SHOP_SECTIONS: Final = frozenset({"shops", "bots"})
+_SHOP_SECTIONS: Final = frozenset({"shops"})
 #: Sections that already have a dialog (the rest answer "in progress").
 _SECTION_DIALOGS: Final[dict[str, State]] = {
     "shops": TenantsSG.list,
@@ -90,7 +89,6 @@ async def main_menu_getter(dialog_manager: DialogManager, **_: Any) -> dict[str,
         btn_roles=Texts.btn_roles(),
         btn_settings=Texts.btn_settings(),
         btn_logs=Texts.btn_logs(),
-        btn_bots=Texts.btn_bots(),
     )
     return data
 
@@ -142,4 +140,5 @@ def build_menu_router() -> Router:
     router.include_router(effective_dialog())
     router.include_router(settings_dialog())
     router.include_router(logs_dialog())
+    router.include_router(bots_dialog())
     return router

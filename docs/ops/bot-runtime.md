@@ -1,5 +1,15 @@
 # Среда выполнения ботов (bot runtime): пул прокси
 
+## Контракт task-09: bounded dispatch
+
+`app/entrypoints/bot_worker/commands.py` принимает dedupe claim с TTL 120 секунд и
+ограничивает один вызов runtime adapter таймаутом 100 секунд (запас 20 секунд).
+Превышение лимита отменяет adapter task, освобождает только claim своего owner и
+возвращает transient `NackMessage(requeue=True)`. Поэтому обычная повторная
+доставка не получает новый claim до завершения bounded dispatch. Продление claim
+(heartbeat/renewal) намеренно не реализуется в task-09 и относится к task-10/11.
+
+
 Боты магазинов (и, опционально, Master Bot) обращаются к Telegram через прокси (proxy), чтобы бан
 одного IP не останавливал все боты. Код: `app/modules/bot_manager/proxy_service.py`
 (`ProxyPoolService`), `proxy_health.py` (`ProxyHealthTracker`, `probe_handshake`),

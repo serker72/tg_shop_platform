@@ -237,7 +237,7 @@ def test_menu_sections_by_permissions() -> None:
     assert logs["logs"] and not logs["staff"]
     assert not viewer["roles"] and not viewer["settings"]
     moderator = visible_sections(PermissionSnapshot(user_id=uuid4(), tenants=frozenset({uuid4()})))
-    assert moderator["shops"] and moderator["bots"] and not moderator["staff"]
+    assert moderator["shops"] and not moderator["staff"]
 
 
 def test_master_bot_token_config(monkeypatch: pytest.MonkeyPatch) -> None:

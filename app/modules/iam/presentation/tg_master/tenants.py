@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from operator import itemgetter
 from typing import Any, Final
+from uuid import UUID
 
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
@@ -18,6 +19,7 @@ from aiogram_dialog.widgets.kbd import Button, Cancel, Column, ScrollingGroup, S
 from aiogram_dialog.widgets.text import Format
 
 from app.core.i18n import gettext as _
+from app.modules.bot_manager.presentation.tg_master.states import BotsSG
 from app.modules.iam.admin_service import TENANT_SETTINGS_FIELDS, TenantAdminService
 from app.modules.iam.models import TENANT_SLUG_MAX_LENGTH, TENANT_SLUG_PATTERN
 from app.modules.iam.permissions import TENANTS_MANAGE
@@ -151,6 +153,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         "is_active": False,
         "is_inactive": False,
         "is_deleted": False,
+        "can_bots": False,
         "btn_rename": _("Переименовать"),
         "btn_settings": _("Настройки магазина"),
     }
@@ -173,6 +176,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         for key in _fields("chat"):
             lines.append(f"{_setting_label(key)}: {getattr(settings, key) or '—'}")
     manage = _can_manage(dialog_manager)
+    can_bots = snapshot_of(dialog_manager).decide("bots.manage", tenant.id).allowed
     data.update(
         text=compose(dialog_manager, *lines),
         can_manage=manage,
@@ -180,6 +184,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         is_active=manage and tenant.is_active and not tenant.is_deleted,
         is_inactive=manage and not tenant.is_active and not tenant.is_deleted,
         is_deleted=manage and tenant.is_deleted,
+        can_bots=can_bots,
     )
     return {**data, **nav_texts()}
 
@@ -261,6 +266,17 @@ async def on_tenant(
         return
     manager.dialog_data["tenant_id"] = item
     await manager.switch_to(TenantsSG.card)
+
+
+async def on_bots(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    tenant_id = manager.dialog_data.get("tenant_id")
+    if (
+        tenant_id is None
+        or not snapshot_of(manager).decide("bots.manage", UUID(str(tenant_id))).allowed
+    ):
+        await callback.answer(_("Нет доступа."))
+        return
+    await manager.start(BotsSG.list, data={"tenant_id": str(tenant_id)})
 
 
 async def on_invalid(message: Message, widget: Any, manager: DialogManager, error: Any) -> None:
@@ -445,6 +461,7 @@ def tenants_dialog() -> Dialog:
         Window(
             text,
             Column(
+                Button(Format("🤖 Боты"), id="t_bots", on_click=on_bots, when="can_bots"),
                 SwitchTo(
                     Format("{btn_rename}"), id="t_rename", state=TenantsSG.rename, when="is_live"
                 ),

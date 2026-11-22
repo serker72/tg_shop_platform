@@ -236,34 +236,45 @@ class ProxyPoolService:
             return abort.outcome
         return _Bind.BOUND
 
-    async def assign_proxy(self, bot_id: UUID) -> UUID:
-        """Bind the bot to a proxy (sticky) and commit; :class:`NoProxyAvailableError`."""
+    async def _assign_proxy(self, bot_id: UUID) -> UUID:
+        """Assign without starting or committing a transaction."""
         limit = self._settings.proxy_max_bots_per_ip
+        for _ in range(_ASSIGN_ATTEMPTS):
+            row = await self._repo.bot_proxy_id(bot_id)
+            if row is None:
+                raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
+            (current,) = row
+            if current is not None:
+                outcome = await self._try_bind(bot_id, current, expected=current, keep=True)
+                if outcome is _Bind.BOUND:
+                    return current
+                if outcome is _Bind.CHANGED:
+                    continue
+            changed = False
+            for candidate in await self._repo.available_ids(limit, exclude=current):
+                outcome = await self._try_bind(bot_id, candidate, expected=current, keep=False)
+                if outcome is _Bind.BOUND:
+                    _log.info("proxy_assigned", bot_id=str(bot_id), proxy_id=str(candidate))
+                    return candidate
+                if outcome is _Bind.CHANGED:
+                    changed = True
+                    break
+            if not changed:
+                raise NoProxyAvailableError
+        raise DomainError("Bot proxy changed concurrently", code=CONFLICT)
+
+    async def assign_proxy(self, bot_id: UUID) -> UUID:
+        """Bind the bot to a proxy and commit (standalone operation)."""
         async with self._transaction():
-            for _ in range(_ASSIGN_ATTEMPTS):
-                row = await self._repo.bot_proxy_id(bot_id)
-                if row is None:
-                    raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
-                (current,) = row
-                if current is not None:
-                    outcome = await self._try_bind(bot_id, current, expected=current, keep=True)
-                    if outcome is _Bind.BOUND:
-                        return current
-                    if outcome is _Bind.CHANGED:
-                        continue
-                changed = False
-                for candidate in await self._repo.available_ids(limit, exclude=current):
-                    outcome = await self._try_bind(bot_id, candidate, expected=current, keep=False)
-                    if outcome is _Bind.BOUND:
-                        _log.info("proxy_assigned", bot_id=str(bot_id), proxy_id=str(candidate))
-                        return candidate
-                    if outcome is _Bind.CHANGED:
-                        changed = True
-                        break
-                if not changed:
-                    raise NoProxyAvailableError
-            raise DomainError("Bot proxy changed concurrently", code=CONFLICT)
-        raise AssertionError("unreachable")  # pragma: no cover
+            return await self._assign_proxy(bot_id)
+
+    async def assign_proxy_in_transaction(self, bot_id: UUID) -> UUID:
+        """Bind without commit so a caller can atomically save related changes.
+
+        The caller owns rollback/commit and must not invoke this after a separate transaction
+        has been committed. This is used by bot creation to persist token and proxy together.
+        """
+        return await self._assign_proxy(bot_id)
 
     async def release_proxy(self, bot_id: UUID) -> UUID | None:
         """``bots.proxy_id = NULL``; returns the previous proxy id."""

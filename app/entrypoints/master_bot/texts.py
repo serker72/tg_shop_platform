@@ -45,7 +45,3 @@ class Texts:
     @staticmethod
     def btn_logs() -> str:
         return _("Логи")
-
-    @staticmethod
-    def btn_bots() -> str:
-        return _("Боты")

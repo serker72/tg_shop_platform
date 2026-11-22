@@ -10,10 +10,13 @@ from typing import Any, cast
 
 import pytest
 from faststream.rabbit import RabbitBroker, TestRabbitBroker
+from faststream_outbox import OutboxBroker
 from prometheus_client import CollectorRegistry
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncEngine
 from structlog.testing import capture_logs
 
+from app.core.observability.health import HeartbeatRegistry
 from app.core.process import ServiceContext, serve_components
 from app.core.scheduler import Schedule, ScheduledTask, SchedulerRunner, TaskRegistry
 from app.entrypoints.bot_worker import scheduler as component_mod
@@ -22,6 +25,30 @@ from tests.unit.test_process import WAIT_TIMEOUT, sigterm_when, wait_until
 from tests.unit.test_scheduler import FakeRedis, RecordingPublisher
 
 pytestmark = pytest.mark.req("R-II.15")
+
+
+class _RelayConnection:
+    async def __aenter__(self) -> _RelayConnection:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _RelayClient:
+    async def fetch(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+
+class _RelayEngine:
+    def begin(self) -> _RelayConnection:
+        return _RelayConnection()
+
+
+class _RelayOutbox:
+    client = _RelayClient()
+    config = SimpleNamespace(broker_config=SimpleNamespace(dlq_table="outbox_dlq"))
+
 
 NOW = datetime(2026, 11, 16, 0, 0, 1, tzinfo=UTC)
 
@@ -56,6 +83,12 @@ class BeatRedis(FakeRedis):
 
     def pipeline(self, transaction: bool = True) -> _Pipeline:
         return _Pipeline(self.beats)
+
+    def register_script(self, script: str) -> Any:
+        async def release(*, keys: list[str], args: list[str]) -> int:
+            return await self.eval(script, len(keys), keys[0], args[0])
+
+        return release
 
 
 def _registry(*tasks: ScheduledTask) -> TaskRegistry:
@@ -174,10 +207,18 @@ async def test_scheduler_component_enter_exit(monkeypatch: pytest.MonkeyPatch) -
     broker = RabbitBroker()
     monkeypatch.setattr(component_mod, "build_rabbit_broker", lambda settings: broker)
     redis = BeatRedis()
+    outbox = cast(OutboxBroker, _RelayOutbox())
+    engine = cast(AsyncEngine, _RelayEngine())
 
     class Container:
         async def get(self, kind: Any) -> Any:
-            return redis if kind is Redis else "session-factory"
+            if kind is Redis:
+                return redis
+            if kind is OutboxBroker:
+                return outbox
+            if kind is AsyncEngine:
+                return engine
+            return "session-factory"
 
     metrics = SimpleNamespace(registry=CollectorRegistry())
     ctx = ServiceContext(
@@ -208,3 +249,66 @@ async def test_scheduler_component_enter_exit(monkeypatch: pytest.MonkeyPatch) -
         )
         == 1.0
     )
+
+
+async def test_production_registers_consumer_then_fails_before_start_or_relay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Broker:
+        async def __aenter__(self) -> Broker:
+            calls.append("connect")
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            calls.append("close")
+
+        async def start(self) -> None:
+            calls.append("start")
+
+    broker = Broker()
+    monkeypatch.setattr(component_mod, "build_rabbit_broker", lambda settings: broker)
+    monkeypatch.setattr(component_mod, "register_proxy_tasks", lambda *args, **kwargs: None)
+
+    async def declare(*args: Any, **kwargs: Any) -> None:
+        calls.append("dlq")
+
+    def register(*args: Any, **kwargs: Any) -> None:
+        calls.append("consumer")
+
+    monkeypatch.setattr(component_mod, "declare_bot_command_dlq", declare)
+    monkeypatch.setattr(component_mod, "register_bot_command_consumer", register)
+
+    def relay(*args: Any, **kwargs: Any) -> Any:
+        return pytest.fail("relay must not be constructed")
+
+    monkeypatch.setattr(component_mod, "SharedOutboxRelay", relay)
+
+    class Container:
+        async def get(self, kind: Any) -> Any:
+            if kind is Redis:
+                return BeatRedis()
+            if kind is OutboxBroker:
+                return cast(OutboxBroker, _RelayOutbox())
+            if kind is AsyncEngine:
+                return cast(AsyncEngine, _RelayEngine())
+            return "session-factory"
+
+    settings = _settings()
+    settings.project_environment = "prod"
+    ctx = ServiceContext(
+        name="bot_worker",
+        settings=settings,
+        container=cast(Any, Container()),
+        metrics=cast(Any, SimpleNamespace(registry=CollectorRegistry())),
+        readiness_registry=HeartbeatRegistry(),
+    )
+
+    with pytest.raises(RuntimeError, match="startup blocked"):
+        async with component_mod.scheduler_component(ctx):
+            pytest.fail("production startup must fail")
+
+    assert calls == ["connect", "dlq", "consumer", "close"]
+    assert ctx.readiness_registry is not None
+    assert not ctx.readiness_registry.readiness[component_mod.BOT_RUNTIME_READINESS].ready
