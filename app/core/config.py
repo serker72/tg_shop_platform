@@ -27,6 +27,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
 from app.core.proxy_url import validate_proxy_url
+from app.shared_kernel.timezones import validate_timezone
 
 __all__ = [
     "EncryptionSettings",
@@ -581,6 +582,7 @@ class Settings(BaseSettings):
 
     project_environment: ProjectEnvironment = "loc"
     project_name: str = "tg_shop_platform"
+    default_timezone: str = "UTC"
 
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)
     sqlalchemy: SQLAlchemySettings = Field(default_factory=SQLAlchemySettings)
@@ -594,6 +596,11 @@ class Settings(BaseSettings):
     proxy: ProxySettings = Field(default_factory=ProxySettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
+
+    @field_validator("default_timezone")
+    @classmethod
+    def _validate_default_timezone(cls, value: str) -> str:
+        return validate_timezone(value)
 
     def __init__(self, **data: Any) -> None:
         """Initialise settings, forwarding the dotenv source to nested sections.

@@ -27,11 +27,13 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.shared_kernel.domain.base_entity import BaseEntity, BusinessEntity
 from app.shared_kernel.infrastructure.database import Base
 from app.shared_kernel.infrastructure.encrypted_string import EncryptedString
+from app.shared_kernel.infrastructure.iana_timezone import IanaTimezone
+from app.shared_kernel.timezones import validate_timezone
 
 __all__ = [
     "BOT_STATUSES",
@@ -165,12 +167,17 @@ class Customer(BaseEntity, Base):
     )
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     username: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timezone: Mapped[str | None] = mapped_column(IanaTimezone(), nullable=True)
     language_code: Mapped[str | None] = mapped_column(
         Text, ForeignKey("languages.code", ondelete="RESTRICT"), nullable=True, index=True
     )
     first_bot_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("bots.id", ondelete="SET NULL"), nullable=True, index=True
     )
+
+    @validates("timezone")
+    def _validate_timezone(self, _key: str, value: str | None) -> str | None:
+        return None if value is None else validate_timezone(value)
 
     def __repr__(self) -> str:
         return (

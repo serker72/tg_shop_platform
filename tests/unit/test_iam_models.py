@@ -370,7 +370,7 @@ def test_rbac_nullable() -> None:
     assert nullable(PERMISSIONS) == set()
     assert nullable(ROLES) == set()
     assert nullable(ROLE_PERMISSIONS) == set()
-    assert nullable(USERS) == {"telegram_user_name"}
+    assert nullable(USERS) == {"telegram_user_name", "timezone"}
     assert nullable(USER_ROLES) == {"granted_by_id"}
     assert nullable(OVERRIDES) == {"tenant_id", "expires_at", "granted_by_id", "reason"}
     assert nullable(MODERATORS) == set()

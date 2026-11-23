@@ -21,10 +21,12 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.shared_kernel.domain.base_entity import BaseEntity, BusinessEntity
 from app.shared_kernel.infrastructure.database import Base
+from app.shared_kernel.infrastructure.iana_timezone import IanaTimezone
+from app.shared_kernel.timezones import validate_timezone
 
 __all__ = [
     "DEFAULT_LANGUAGE_CODE",
@@ -84,6 +86,11 @@ class Tenant(BusinessEntity, Base):
 
     name: Mapped[str] = mapped_column(Text, nullable=False)
     slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    timezone: Mapped[str] = mapped_column(IanaTimezone(), nullable=False, server_default="UTC")
+
+    @validates("timezone")
+    def _validate_timezone(self, _key: str, value: str) -> str:
+        return validate_timezone(value)
 
 
 class Language(BusinessEntity, Base):
@@ -273,9 +280,14 @@ class User(BusinessEntity, Base):
 
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
     telegram_user_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timezone: Mapped[str | None] = mapped_column(IanaTimezone(), nullable=True)
     is_superuser: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+
+    @validates("timezone")
+    def _validate_timezone(self, _key: str, value: str | None) -> str | None:
+        return None if value is None else validate_timezone(value)
 
 
 class UserRole(BaseEntity, Base):

@@ -269,6 +269,8 @@ END {
     if (!("ENCRYPTION_KEY" in seen)) print "ENCRYPTION_KEY=" key
     if (!("URGENTRY_BOOTSTRAP_PASSWORD" in seen)) print "URGENTRY_BOOTSTRAP_PASSWORD=" gtpw
     if (!("URGENTRY_BOOTSTRAP_PAT" in seen)) print "URGENTRY_BOOTSTRAP_PAT=" gtpk
+    # Keep the non-secret IANA setting; support older source files too.
+    if (!("DEFAULT_TIMEZONE" in seen)) print "DEFAULT_TIMEZONE=UTC"
     if (!("SENTRY_DSN" in seen)) print "SENTRY_DSN="
     if (!("SENTRY_RELEASE" in seen)) print "SENTRY_RELEASE="
     if (!("APP_ENV_FILE" in seen)) { print "# Env file passed to app containers (docker-compose env_file)"; print "APP_ENV_FILE=" tenv }

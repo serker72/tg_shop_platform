@@ -7,7 +7,8 @@
 # (SENTRY_DSN, URGENTRY_BOOTSTRAP_*) and copied to VPS 1. Then:
 #   ROLE=app (VPS 1, application): clears the observability secrets (OBS_SECRETS);
 #   ROLE=obs (VPS 2, monitoring):  clears the application secrets (APP_SECRETS).
-# SENTRY_DSN and all non-secret values are kept. Values are cleared, keys stay (`KEY=`), so
+# SENTRY_DSN and non-secret values (including DEFAULT_TIMEZONE) are kept.
+# Secret values are cleared, keys stay (`KEY=`), so
 # env_check.sh finds every key of .env.example; comments, order and other lines are unchanged.
 # Every `[export ]KEY=...` line of a listed key is cleared (duplicates, quoted values, `KEY= value`);
 # such a line is written as `[export ]KEY=` without a trailing CR (other CRLF lines stay as is).
