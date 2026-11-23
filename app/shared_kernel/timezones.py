@@ -11,6 +11,29 @@ _OFFSET_QUERY = re.compile(r"([+-])([0-9]{1,2})(?::([0-5][0-9]))?")
 _DAY_SECONDS = 24 * 60 * 60
 _HALF_HOUR_SECONDS = 30 * 60
 
+# Stable, human-friendly choices shown before the IANA search.
+TIMEZONE_PRESETS: tuple[str, ...] = (
+    "UTC",
+    "Europe/London",
+    "Europe/Berlin",
+    "Europe/Moscow",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Shanghai",
+    "America/New_York",
+)
+
+
+def timezone_page(
+    query: str, page: int, *, page_size: int = 10, now_utc: datetime | None = None
+) -> tuple[list[tuple[str, timedelta]], bool]:
+    """Return one bounded page of IANA search results and whether another page exists."""
+    if page < 0 or page_size < 1:
+        raise ValueError("Invalid timezone page")
+    rows = search_timezones(query, now_utc=now_utc)
+    start = page * page_size
+    return rows[start : start + page_size], start + page_size < len(rows)
+
 
 @cache
 def _timezone_ids() -> tuple[str, ...]:

@@ -8,6 +8,8 @@ Forged callbacks (hidden buttons, foreign item ids) are sent by rewriting the
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -24,14 +26,13 @@ from app.modules.iam.permissions import (
     USERS_MANAGE,
     USERS_VIEW,
 )
+from app.modules.iam.presentation.tg_master import staff as staff_presentation
+from app.modules.iam.presentation.tg_master import tenants as tenants_presentation
 from app.modules.iam.presentation.tg_master.staff import parse_telegram_id
 from app.modules.iam.presentation.tg_master.tenants import parse_chat_id, parse_name, parse_slug
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import DomainError, ValidationError
-from app.shared_kernel.presentation.tg_master.common import (
-    error_text,
-    short,
-)
+from app.shared_kernel.presentation.tg_master.common import Outcome, error_text, short
 from tests.unit._master_bot_env import (  # noqa: F401
     ACTOR,
     R4,
@@ -47,6 +48,181 @@ from tests.unit._master_bot_env import (  # noqa: F401
     _tenant,
     _user,
 )
+
+# --- dedicated BotClient timezone coverage ---------------------------------------------
+
+
+def _set_timezone(staff: SimpleNamespace, timezone: str) -> SimpleNamespace:
+    staff.timezone = timezone
+    return staff
+
+
+async def test_staff_timezone_onboarding_skip_persists_utc_and_reopens_menu() -> None:
+    staff = _user(ACTOR)
+    staff.timezone = None
+    env = Env(SUPER, users=[staff])
+    env.user_service.handlers["set_timezone"] = lambda actor, timezone: _set_timezone(
+        staff, timezone
+    )
+
+    await env.start()
+    assert "Настройте часовой пояс" in env.text()
+    await env.press("Пропустить (оставить UTC)")
+    assert staff.timezone == "UTC"
+    assert ("set_timezone", ACTOR, "UTC") in env.user_service.calls
+    assert "Магазины" in env.buttons()
+
+    await env.start()
+    assert "Магазины" in env.buttons()
+    assert "Настройте часовой пояс" not in env.text()
+
+
+async def test_staff_timezone_onboarding_preset_and_city_search_save_iana() -> None:
+    staff = _user(ACTOR)
+    staff.timezone = None
+    env = Env(SUPER, users=[staff])
+    env.user_service.handlers["set_timezone"] = lambda actor, timezone: _set_timezone(
+        staff, timezone
+    )
+
+    await env.start()
+    await env.press("Europe/Berlin")
+    assert staff.timezone == "Europe/Berlin"
+    assert "Магазины" in env.buttons()
+
+    staff.timezone = None
+    await env.start()
+    await env.send("new york")
+    assert "America/New_York" in env.buttons()
+    await env.press("America/New_York")
+    assert staff.timezone == "America/New_York"
+
+
+async def test_forged_onboarding_result_is_rejected() -> None:
+    staff = _user(ACTOR)
+    staff.timezone = None
+    env = Env(SUPER, users=[staff])
+    env.user_service.handlers["set_timezone"] = lambda actor, timezone: _set_timezone(
+        staff, timezone
+    )
+
+    await env.start()
+    await env.send("new york")
+    await env.forge("u_onboarding_zone", "America/New_York", "Europe/Berlin")
+    assert staff.timezone is None
+    assert not any(call[0] == "set_timezone" for call in env.user_service.calls)
+    assert "Выберите часовой пояс" in env.text()
+
+
+async def test_onboarding_skip_failed_save_stays_and_keeps_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SimpleNamespace(dialog_data={}, started=[])
+    manager.middleware_data = {"event_from_user": SimpleNamespace(id=ACTOR)}
+    manager.start = lambda *args, **kwargs: manager.started.append((args, kwargs))
+
+    async def failed_mutate(*args: Any, **kwargs: Any) -> Outcome[None]:
+        manager.dialog_data["notice"] = "failed"
+        return _failed_outcome()
+
+    monkeypatch.setattr(staff_presentation, "mutate", failed_mutate)
+    await staff_presentation.on_onboarding_skip(
+        cast(Any, SimpleNamespace()), cast(Any, SimpleNamespace()), manager
+    )
+    assert manager.started == []
+    assert manager.dialog_data["notice"] == "failed"
+
+
+async def test_onboarding_zone_failed_save_stays_and_keeps_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SimpleNamespace(dialog_data={"onboarding_zones": ["Europe/Berlin"]}, started=[])
+    manager.middleware_data = {"event_from_user": SimpleNamespace(id=ACTOR)}
+    manager.start = lambda *args, **kwargs: manager.started.append((args, kwargs))
+
+    async def failed_mutate(*args: Any, **kwargs: Any) -> Outcome[None]:
+        manager.dialog_data["notice"] = "failed"
+        return _failed_outcome()
+
+    monkeypatch.setattr(staff_presentation, "mutate", failed_mutate)
+    await staff_presentation.on_onboarding_zone(
+        cast(Any, SimpleNamespace(answer=lambda *args: None)),
+        cast(Any, SimpleNamespace()),
+        manager,
+        "Europe/Berlin",
+    )
+    assert manager.started == []
+    assert manager.dialog_data["notice"] == "failed"
+
+
+def _failed_outcome() -> Outcome[None]:
+    return Outcome(ok=False, code="permission_denied")
+
+
+async def test_timezone_profile_failed_save_stays_and_keeps_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SimpleNamespace(
+        dialog_data={}, middleware_data={"event_from_user": SimpleNamespace(id=ACTOR)}
+    )
+    manager.switched = []
+
+    async def target_or_back(*args: Any, **kwargs: Any) -> int:
+        return ACTOR
+
+    async def failed_mutate(*args: Any, **kwargs: Any) -> Outcome[None]:
+        manager.dialog_data["notice"] = "failed"
+        return _failed_outcome()
+
+    async def switch_to(*args: Any, **kwargs: Any) -> None:
+        manager.switched.append((args, kwargs))
+
+    manager.switch_to = switch_to
+    monkeypatch.setattr(staff_presentation, "_target_or_back", target_or_back)
+    monkeypatch.setattr(staff_presentation, "mutate", failed_mutate)
+    await staff_presentation.on_timezone_value(
+        cast(Any, SimpleNamespace()),
+        cast(Any, SimpleNamespace()),
+        manager,
+        "Europe/Berlin",
+    )
+    assert manager.switched == []
+    assert manager.dialog_data["notice"] == "failed"
+
+
+async def test_timezone_getters_expose_localized_navigation_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SimpleNamespace(dialog_data={"timezone_query": "europe", "timezone_page": 0})
+
+    async def current(_: Any) -> tuple[SimpleNamespace, SimpleNamespace]:
+        return _tenant_current()
+
+    monkeypatch.setattr(tenants_presentation, "_current", current)
+    monkeypatch.setattr(tenants_presentation, "_can_manage", lambda _: True)
+    presets = await tenants_presentation.timezone_presets_getter(manager)
+    results = await tenants_presentation.timezone_results_getter(manager)
+    assert presets["btn_search"] == "Поиск"
+    assert "btn_next" in results
+
+
+def _tenant_current() -> tuple[SimpleNamespace, SimpleNamespace]:
+    return _tenant("Shop A", "shop-a"), SimpleNamespace()
+
+
+async def test_tenant_timezone_preset_uses_manage_scope_and_persists_iana() -> None:
+    shop = _tenant("Shop A", "shop-a")
+    shop.timezone = "UTC"
+    env = Env(SUPER, [shop])
+    await env.start()
+    await env.press("Магазины")
+    await env.press("Shop A (shop-a)")
+    await env.press("Настройки магазина")
+    await env.press(".*Часовой пояс.*", regex=True)
+    await env.press(".*Europe/Berlin.*", regex=True)
+    assert shop.timezone == "Europe/Berlin"
+    assert ("update", ACTOR, shop.id, shop.name, "Europe/Berlin") in env.tenants.calls
+
 
 # --- section entry ----------------------------------------------------------------------
 

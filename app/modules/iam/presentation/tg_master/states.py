@@ -9,6 +9,9 @@ __all__ = ["EffectiveSG", "OverridesSG", "RolesSG", "StaffSG", "TenantsSG"]
 
 class TenantsSG(StatesGroup):
     list = State()
+    timezone_presets = State()
+    timezone_search = State()
+    timezone_results = State()
     deleted = State()
     card = State()
     create_name = State()
@@ -22,6 +25,9 @@ class TenantsSG(StatesGroup):
 
 class StaffSG(StatesGroup):
     list = State()
+    timezone_presets = State()
+    onboarding = State()
+    onboarding_results = State()
     add = State()
     card = State()
     tenants = State()

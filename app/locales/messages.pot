@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-22 11:33+0300\n"
+"POT-Creation-Date: 2026-11-23 22:01+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -94,6 +94,9 @@ msgid ""
 "Пример: {example}"
 msgstr ""
 
+msgid "Введите город, IANA zone или смещение (например +2)"
+msgstr ""
+
 msgid "Введите название магазина (до 128 символов)"
 msgstr ""
 
@@ -136,10 +139,16 @@ msgstr ""
 msgid "Выберите модуль."
 msgstr ""
 
+msgid "Выберите мой часовой пояс"
+msgstr ""
+
 msgid "Выберите последний день действия (до 23:59:59 UTC) или «Бессрочно»."
 msgstr ""
 
 msgid "Выберите право."
+msgstr ""
+
+msgid "Выберите часовой пояс"
 msgstr ""
 
 msgid "Выберите язык по умолчанию магазина"
@@ -167,6 +176,9 @@ msgid "Готово."
 msgstr ""
 
 msgid "Да"
+msgstr ""
+
+msgid "Далее"
 msgstr ""
 
 msgid "Данные изменились параллельно, повторите действие."
@@ -294,6 +306,9 @@ msgstr ""
 msgid "Модуль: {module}. Отметьте права и нажмите «Сохранить»."
 msgstr ""
 
+msgid "Мой часовой пояс"
+msgstr ""
+
 msgid "Нажмите на магазин, чтобы привязать или отвязать"
 msgstr ""
 
@@ -323,6 +338,9 @@ msgstr ""
 msgid ""
 "Настройки сохранены, но другие процессы увидят изменение с задержкой до 1"
 " мин."
+msgstr ""
+
+msgid "Настройте часовой пояс. Выберите зону или введите HH:MM / город."
 msgstr ""
 
 msgid "Начало периода"
@@ -372,6 +390,9 @@ msgid ""
 msgstr ""
 
 msgid "Некорректный срок действия."
+msgstr ""
+
+msgid "Некорректный часовой пояс IANA."
 msgstr ""
 
 msgid "Нельзя выдать права, которых нет у вас самих."
@@ -449,6 +470,9 @@ msgstr ""
 
 #, python-brace-format
 msgid "Персональные права сотрудника {id}"
+msgstr ""
+
+msgid "Поиск"
 msgstr ""
 
 msgid "Показать сначала новые"
@@ -531,6 +555,9 @@ msgstr ""
 msgid "Пропустить"
 msgstr ""
 
+msgid "Пропустить (оставить UTC)"
+msgstr ""
+
 msgid "Раздел в разработке"
 msgstr ""
 
@@ -538,6 +565,10 @@ msgid "Разрешить"
 msgstr ""
 
 msgid "Разрешить или запретить это право?"
+msgstr ""
+
+#, python-brace-format
+msgid "Результаты поиска: {query}"
 msgstr ""
 
 msgid "Рефералы"
@@ -735,6 +766,13 @@ msgid "Хранение user_activity (мес.)"
 msgstr ""
 
 msgid "Хранение файловых логов (дн.)"
+msgstr ""
+
+msgid "Часовой пояс"
+msgstr ""
+
+#, python-brace-format
+msgid "Часовой пояс: {timezone}"
 msgstr ""
 
 msgid "Чат новостей"

@@ -13,12 +13,14 @@ from app.core.config import Settings
 from app.modules.bot_manager.models import Customer
 from app.modules.iam.models import Tenant, User
 from app.shared_kernel.timezones import (
+    TIMEZONE_PRESETS,
     effective_customer_timezone,
     effective_staff_timezone,
     format_dt,
     get_timezone,
     search_timezones,
     suggest_timezones_by_time,
+    timezone_page,
     to_utc,
     validate_timezone,
 )
@@ -112,6 +114,18 @@ def test_suggestions_include_quarter_hour_zones_across_rounding_boundary(
 def test_suggestions_validate_hhmm(text: str) -> None:
     with pytest.raises(ValueError, match="HH:MM"):
         suggest_timezones_by_time(text, datetime(2026, 1, 1, tzinfo=UTC))
+
+
+def test_presets_and_paginated_search() -> None:
+    assert len(TIMEZONE_PRESETS) == 8
+    assert TIMEZONE_PRESETS[0] == "UTC"
+    first, has_next = timezone_page("europe", 0, page_size=2)
+    second, _ = timezone_page("europe", 1, page_size=2)
+    assert len(first) == 2
+    assert set(first).isdisjoint(second)
+    assert has_next
+    with pytest.raises(ValueError):
+        timezone_page("UTC", -1)
 
 
 def test_search_city_region_and_seasonal_offset() -> None:

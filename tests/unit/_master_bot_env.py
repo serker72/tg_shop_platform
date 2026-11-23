@@ -350,8 +350,13 @@ class Env:
         self.settings[tenant.id] = self._settings()
         return tenant
 
-    def _rename(self, actor: int, tenant_id: UUID, *, name: str) -> SimpleNamespace:
-        return self._set(tenant_id, name=name)
+    def _rename(
+        self, actor: int, tenant_id: UUID, *, name: str, timezone: str | None = None
+    ) -> SimpleNamespace:
+        values: dict[str, Any] = {"name": name}
+        if timezone is not None:
+            values["timezone"] = timezone
+        return self._set(tenant_id, **values)
 
     def _set(self, tenant_id: UUID, **values: Any) -> SimpleNamespace:
         tenant = self.store[tenant_id]

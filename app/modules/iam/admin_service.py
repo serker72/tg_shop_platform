@@ -544,6 +544,7 @@ class _AdminService:
 def _tenant_state(tenant: Tenant) -> dict[str, Any]:
     return {
         "name": tenant.name,
+        "timezone": tenant.timezone,
         "slug": tenant.slug,
         "is_active": tenant.is_active,
         "is_deleted": tenant.is_deleted,
@@ -553,6 +554,7 @@ def _tenant_state(tenant: Tenant) -> dict[str, Any]:
 def _user_state(user: User) -> dict[str, Any]:
     return {
         "telegram_user_id": user.telegram_user_id,
+        "timezone": user.timezone,
         "telegram_user_name": user.telegram_user_name,
         "is_active": user.is_active,
         "is_deleted": user.is_deleted,
@@ -608,16 +610,24 @@ class TenantAdminService(_AdminService):
             )
         return tenant
 
-    async def update(self, actor_telegram_id: int, tenant_id: UUID, *, name: str) -> Tenant:
+    async def update(
+        self, actor_telegram_id: int, tenant_id: UUID, *, name: str, timezone: str | None = None
+    ) -> Tenant:
         """Rename a live tenant (the slug is immutable: it is never reused)."""
         async with self._transaction():
             await self._authorize(actor_telegram_id, TENANTS_MANAGE)
             tenant = await self._live_tenant(tenant_id, for_update=True)
             new_name = validate_name(name)
-            if tenant.name == new_name:
+            if timezone is not None:
+                from app.shared_kernel.timezones import validate_timezone
+
+                timezone = validate_timezone(timezone)
+            if tenant.name == new_name and (timezone is None or tenant.timezone == timezone):
                 raise _NoChange
             before = _tenant_state(tenant)
             tenant.name = new_name
+            if timezone is not None:
+                tenant.timezone = timezone
             await self._session.flush()
             await self._audit(
                 actor_telegram_id,
@@ -744,6 +754,31 @@ class UserAdminService(_AdminService):
 
     Adding, (de)activation, deletion and restore need the global ``users.manage``.
     """
+
+    async def set_timezone(self, actor_telegram_id: int, timezone: str | None) -> User:
+        """Change only the caller's nullable staff timezone."""
+        from app.shared_kernel.timezones import validate_timezone
+
+        if timezone is not None:
+            validate_timezone(timezone)
+        async with self._transaction():
+            user = await self._repo.get_user_by_telegram_id(actor_telegram_id, for_update=True)
+            if user is None or not user.is_active or user.is_deleted:
+                raise PermissionDeniedError("User is not active", code=PERMISSION_DENIED)
+            if user.timezone == timezone:
+                raise _NoChange
+            before = _user_state(user)
+            user.timezone = timezone
+            await self._session.flush()
+            await self._audit(
+                actor_telegram_id,
+                "iam.user.timezone_update",
+                entity_type="user",
+                entity_id=user.id,
+                before=before,
+                after=_user_state(user),
+            )
+        return user
 
     async def add_by_telegram_id(
         self, actor_telegram_id: int, telegram_user_id: int, username: str | None = None

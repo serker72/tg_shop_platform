@@ -44,6 +44,7 @@ from app.shared_kernel.presentation.tg_master.common import (
     set_notice,
     short,
 )
+from app.shared_kernel.timezones import TIMEZONE_PRESETS, timezone_page, validate_timezone
 
 __all__ = ["NAME_MAX_LENGTH", "parse_chat_id", "parse_name", "parse_slug", "tenants_dialog"]
 
@@ -156,6 +157,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         "can_bots": False,
         "btn_rename": _("Переименовать"),
         "btn_settings": _("Настройки магазина"),
+        "btn_timezone": _("Часовой пояс"),
     }
     found = await _current(dialog_manager)
     if found is None:
@@ -167,6 +169,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         _("Статус: {status}").format(
             status=status_text(is_active=tenant.is_active, is_deleted=tenant.is_deleted)
         ),
+        _("Часовой пояс: {timezone}").format(timezone=getattr(tenant, "timezone", "UTC")),
     ]
     if settings is not None:
         for key in _fields("bool"):
@@ -192,7 +195,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
 async def settings_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
     found = await _current(dialog_manager)
     if found is None or found[0].is_deleted:
-        return _not_found(dialog_manager, flags=[], chats=[], btn_language="")
+        return _not_found(dialog_manager, flags=[], chats=[], btn_language="", btn_timezone="")
     settings = found[1]
     flags = [
         (key, f"{mark(bool(getattr(settings, key, False)))} {_setting_label(key)}")
@@ -208,6 +211,7 @@ async def settings_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[
         "flags": flags,
         "chats": chats,
         "btn_language": f"{_setting_label(_LANGUAGE_FIELD)}: {language or _('глобальный')}",
+        "btn_timezone": f"{_('Часовой пояс')}: {getattr(found[0], 'timezone', 'UTC')}",
         **nav_texts(),
     }
 
@@ -385,6 +389,79 @@ async def on_flag(callback: CallbackQuery, widget: Any, manager: DialogManager, 
     await _update_settings(manager, {item: not bool(getattr(found[1], item))})
 
 
+async def on_timezone(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    if await _current(manager) is None or not _can_manage(manager):
+        await callback.answer(denied_text())
+        return
+    await manager.switch_to(TenantsSG.timezone_presets)
+
+
+async def timezone_presets_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    found = await _current(dialog_manager)
+    if found is None or found[0].is_deleted or not _can_manage(dialog_manager):
+        return _not_found(dialog_manager, zones=[])
+    current = getattr(found[0], "timezone", "UTC")
+    return {
+        "text": compose(dialog_manager, _("Выберите часовой пояс")),
+        "zones": [(z, f"{'✅' if z == current else '▫️'} {z}") for z in TIMEZONE_PRESETS],
+        "btn_search": _("Поиск"),
+        **nav_texts(),
+    }
+
+
+async def on_timezone_preset(
+    callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
+) -> None:
+    try:
+        value = validate_timezone(item)
+    except ValueError:
+        set_notice(manager, error_text("invalid_timezone"))
+        return
+    found = await _current(manager)
+    if found is None or not _can_manage(manager):
+        set_notice(manager, denied_text())
+        return
+    outcome = await mutate(
+        manager,
+        TenantAdminService,
+        lambda s: s.update(actor_id(manager), found[0].id, name=found[0].name, timezone=value),
+    )
+    if outcome.ok:
+        await manager.switch_to(TenantsSG.settings)
+
+
+async def on_timezone_search(
+    message: Message, widget: Any, manager: DialogManager, value: str
+) -> None:
+    manager.dialog_data["timezone_query"] = value
+    manager.dialog_data["timezone_page"] = 0
+    await manager.switch_to(TenantsSG.timezone_results)
+
+
+async def timezone_results_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    query = str(dialog_manager.dialog_data.get("timezone_query", ""))
+    page = int(dialog_manager.dialog_data.get("timezone_page", 0))
+    rows, has_next = timezone_page(query, page)
+    return {
+        "text": compose(dialog_manager, _("Результаты поиска: {query}").format(query=query)),
+        "zones": [(z, f"{z} (UTC{offset})") for z, offset in rows],
+        "has_next": has_next,
+        "btn_next": _("Далее"),
+        **nav_texts(),
+    }
+
+
+async def on_timezone_result(
+    callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
+) -> None:
+    await on_timezone_preset(callback, widget, manager, item)
+
+
+async def on_timezone_next(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    manager.dialog_data["timezone_page"] = int(manager.dialog_data.get("timezone_page", 0)) + 1
+    await manager.switch_to(TenantsSG.timezone_results)
+
+
 async def on_language(
     callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
 ) -> None:
@@ -524,6 +601,7 @@ def tenants_dialog() -> Dialog:
             Column(
                 _select("t_flag", "flags", on_flag),
                 SwitchTo(Format("{btn_language}"), id="t_lang", state=TenantsSG.language),
+                Button(Format("{btn_timezone}"), id="t_timezone", on_click=on_timezone),
                 _select("t_chat", "chats", on_chat_field),
                 _back(TenantsSG.card, "t_settings_back"),
             ),
@@ -538,6 +616,50 @@ def tenants_dialog() -> Dialog:
             ),
             state=TenantsSG.language,
             getter=language_getter,
+        ),
+        Window(
+            text,
+            ScrollingGroup(
+                _select("tz_preset", "zones", on_timezone_preset),
+                id="tz_preset_scroll",
+                width=1,
+                height=10,
+            ),
+            Button(
+                Format("{btn_search}"),
+                id="tz_search",
+                on_click=lambda callback, button, manager: manager.switch_to(
+                    TenantsSG.timezone_search
+                ),
+            ),
+            _back(TenantsSG.settings, "tz_back"),
+            state=TenantsSG.timezone_presets,
+            getter=timezone_presets_getter,
+        ),
+        Window(
+            text,
+            TextInput(id="tz_query", on_success=on_timezone_search, on_error=on_invalid),
+            _back(TenantsSG.timezone_presets, "tz_search_back"),
+            state=TenantsSG.timezone_search,
+            getter=lambda dialog_manager, **kwargs: {
+                "text": compose(
+                    dialog_manager, _("Введите город, IANA zone или смещение (например +2)")
+                ),
+                **nav_texts(),
+            },
+        ),
+        Window(
+            text,
+            ScrollingGroup(
+                _select("tz_result", "zones", on_timezone_result),
+                id="tz_result_scroll",
+                width=1,
+                height=10,
+            ),
+            Button(Format("{btn_next}"), id="tz_next", on_click=on_timezone_next, when="has_next"),
+            _back(TenantsSG.timezone_presets, "tz_results_back"),
+            state=TenantsSG.timezone_results,
+            getter=timezone_results_getter,
         ),
         Window(
             text,

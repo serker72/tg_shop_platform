@@ -115,6 +115,7 @@ def _error_messages() -> dict[str, str]:
         ),
         "invalid_telegram_user_id": _("Некорректный Telegram ID."),
         "invalid_settings": _("Некорректное значение настройки."),
+        "invalid_timezone": _("Некорректный часовой пояс IANA."),
         "tenant_slug_taken": _("Этот slug уже занят (в том числе удалённым магазином)."),
         "role_slug_taken": _("Этот slug роли уже занят."),
         "invalid_role_slug": _(

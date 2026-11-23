@@ -36,9 +36,11 @@ from app.modules.iam.presentation.tg_master import (
     tenants_dialog,
 )
 from app.modules.iam.presentation.tg_master.common import STAFF_VIEW_PERMISSIONS
+from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.presentation.tg_master import LogsSG, logs_dialog
 from app.modules.system.presentation.tg_master import SettingsSG, settings_dialog
+from app.shared_kernel.presentation.tg_master.common import actor_id, resolve
 
 __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_getter"]
 
@@ -126,6 +128,11 @@ def build_main_menu_dialog() -> Dialog:
 
 
 async def _start(message: Message, dialog_manager: DialogManager) -> None:
+    """Open mandatory staff timezone onboarding once, without adding a customer step."""
+    user = await (await resolve(dialog_manager, IamAdminQueries)).user(actor_id(dialog_manager))
+    if user is not None and hasattr(user, "timezone") and user.timezone is None:
+        await dialog_manager.start(StaffSG.onboarding, mode=StartMode.RESET_STACK)
+        return
     await dialog_manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
 
 

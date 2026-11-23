@@ -9,16 +9,18 @@ intersected with the viewer's scope. Mutations are authorized by the admin servi
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from operator import itemgetter
 from typing import Any
 from uuid import UUID
 
 from aiogram.types import CallbackQuery, Message
-from aiogram_dialog import Dialog, DialogManager, Window
+from aiogram_dialog import Dialog, DialogManager, StartMode, Window
 from aiogram_dialog.widgets.input import TextInput
 from aiogram_dialog.widgets.kbd import Button, Cancel, Column, ScrollingGroup, Select, SwitchTo
 from aiogram_dialog.widgets.text import Format
 
+from app.core.config import Settings
 from app.core.i18n import gettext as _
 from app.modules.iam.admin_service import (
     USER_DELETED,
@@ -56,6 +58,13 @@ from app.shared_kernel.presentation.tg_master.common import (
     resolve,
     set_notice,
     short,
+)
+from app.shared_kernel.timezones import (
+    TIMEZONE_PRESETS,
+    effective_staff_timezone,
+    search_timezones,
+    suggest_timezones_by_time,
+    validate_timezone,
 )
 
 __all__ = ["parse_telegram_id", "staff_dialog"]
@@ -118,6 +127,13 @@ def _user_label(user: Any) -> str:
     return short(f"{name} ({user.telegram_user_id})") + suffix
 
 
+async def _default_timezone(manager: DialogManager) -> str:
+    try:
+        return (await resolve(manager, Settings)).default_timezone
+    except KeyError:
+        return Settings().default_timezone
+
+
 def _allowed(manager: DialogManager) -> bool:
     return can_view_staff(snapshot_of(manager))
 
@@ -166,6 +182,8 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         "btn_tenants": _("Магазины сотрудника"),
         "btn_roles": _("Роли сотрудника"),
         "btn_overrides": _("Персональные права"),
+        "btn_timezone": _("Мой часовой пояс"),
+        "can_timezone": False,
     }
     if not _allowed(dialog_manager):
         return _denied(dialog_manager, **data)
@@ -190,6 +208,11 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     ]
     lines = [
         _("Сотрудник: {label}").format(label=_user_label(user)),
+        _("Часовой пояс: {timezone}").format(
+            timezone=effective_staff_timezone(
+                getattr(user, "timezone", None), await _default_timezone(dialog_manager)
+            )
+        ),
         _("Статус: {status}").format(
             status=status_text(is_active=user.is_active, is_deleted=user.is_deleted)
         ),
@@ -212,6 +235,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         is_live=status and not user.is_deleted,
         is_deleted=status and user.is_deleted,
         can_roles=mutable and _can_roles(dialog_manager) and not user.is_deleted,
+        can_timezone=user.telegram_user_id == actor_id(dialog_manager) and not user.is_deleted,
         has_user=True,
         can_moderate=mutable
         and _can_moderate(dialog_manager)
@@ -430,6 +454,117 @@ async def _revoke_role(manager: DialogManager, target: int, role_id: UUID | None
     await mutate(manager, AccessAdminService, lambda s: s.revoke_role(actor, target, picked))
 
 
+def _parse_onboarding_query(value: str) -> str:
+    value = value.strip()
+    if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
+        return value
+    if not value:
+        raise ValueError("empty timezone query")
+    return value
+
+
+async def on_onboarding_skip(
+    callback: CallbackQuery, button: Button, manager: DialogManager
+) -> None:
+    from app.entrypoints.master_bot.menu import MainMenu
+
+    outcome = await mutate(
+        manager, UserAdminService, lambda s: s.set_timezone(actor_id(manager), "UTC")
+    )
+    if outcome.ok:
+        await manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
+
+
+async def on_onboarding_query(
+    message: Message, widget: Any, manager: DialogManager, value: str
+) -> None:
+    query = _parse_onboarding_query(value)
+    if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", query):
+        zones = suggest_timezones_by_time(query, datetime.now(UTC))
+    else:
+        zones = [zone for zone, _ in search_timezones(query)]
+    manager.dialog_data["onboarding_zones"] = zones[:10]
+    await manager.switch_to(StaffSG.onboarding_results)
+
+
+async def onboarding_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    return {
+        "text": compose(
+            dialog_manager, _("Настройте часовой пояс. Выберите зону или введите HH:MM / город.")
+        ),
+        "zones": [(zone, zone) for zone in TIMEZONE_PRESETS],
+        "btn_skip": _("Пропустить (оставить UTC)"),
+    }
+
+
+async def onboarding_results_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    zones = list(dialog_manager.dialog_data.get("onboarding_zones", []))
+    return {
+        "text": compose(dialog_manager, _("Выберите часовой пояс")),
+        "zones": [(z, z) for z in zones],
+        "btn_skip": _("Пропустить (оставить UTC)"),
+        "btn_back": _("Назад"),
+    }
+
+
+async def on_onboarding_zone(
+    callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
+) -> None:
+    zones = manager.dialog_data.get("onboarding_zones", TIMEZONE_PRESETS)
+    if item not in zones:
+        await callback.answer(denied_text())
+        return
+    try:
+        validate_timezone(item)
+    except ValueError:
+        set_notice(manager, error_text("invalid_timezone"))
+        return
+    from app.entrypoints.master_bot.menu import MainMenu
+
+    outcome = await mutate(
+        manager, UserAdminService, lambda s: s.set_timezone(actor_id(manager), item)
+    )
+    if outcome.ok:
+        await manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
+
+
+async def on_timezone(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    target = await _target_or_back(callback, manager)
+    if target != actor_id(manager):
+        await callback.answer(denied_text())
+        return
+    await manager.switch_to(StaffSG.timezone_presets)
+
+
+async def timezone_presets_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    target = _target(dialog_manager)
+    user = await (await resolve(dialog_manager, IamAdminQueries)).user(target) if target else None
+    if user is None or target != actor_id(dialog_manager):
+        return _denied(dialog_manager, zones=[])
+    return {
+        "text": compose(dialog_manager, _("Выберите мой часовой пояс")),
+        "zones": [(z, z) for z in TIMEZONE_PRESETS],
+        **nav_texts(),
+    }
+
+
+async def on_timezone_value(
+    callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
+) -> None:
+    if await _target_or_back(callback, manager) != actor_id(manager):
+        return
+    try:
+        value = validate_timezone(item)
+    except ValueError:
+        set_notice(manager, error_text("invalid_timezone"))
+        return
+    outcome = await mutate(
+        manager, UserAdminService, lambda s: s.set_timezone(actor_id(manager), value)
+    )
+    if outcome.ok:
+        await manager.switch_to(StaffSG.card)
+
+
 async def on_effective(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
     """Effective permissions: reading needs ``users.view`` (checked by the guard)."""
     target = await _target_or_back(callback, manager)
@@ -471,6 +606,39 @@ def staff_dialog() -> Dialog:
         Window(
             text,
             ScrollingGroup(
+                _select("u_onboarding_preset", "zones", on_onboarding_zone),
+                id="u_onboarding_preset_scroll",
+                width=1,
+                height=8,
+            ),
+            TextInput(
+                id="u_onboarding_query",
+                type_factory=_parse_onboarding_query,
+                on_success=on_onboarding_query,
+                on_error=on_invalid,
+            ),
+            Button(Format("{btn_skip}"), id="u_onboarding_skip", on_click=on_onboarding_skip),
+            state=StaffSG.onboarding,
+            getter=onboarding_getter,
+        ),
+        Window(
+            text,
+            ScrollingGroup(
+                _select("u_onboarding_zone", "zones", on_onboarding_zone),
+                id="u_onboarding_scroll",
+                width=1,
+                height=10,
+            ),
+            Button(
+                Format("{btn_skip}"), id="u_onboarding_skip_results", on_click=on_onboarding_skip
+            ),
+            _back(StaffSG.onboarding, "u_onboarding_back"),
+            state=StaffSG.onboarding_results,
+            getter=onboarding_results_getter,
+        ),
+        Window(
+            text,
+            ScrollingGroup(
                 _select("u_sel", "users", on_user),
                 id="u_scroll",
                 width=1,
@@ -508,6 +676,12 @@ def staff_dialog() -> Dialog:
                 ),
                 Button(
                     Format("{btn_overrides}"), id="u_ovr", on_click=on_overrides, when="can_roles"
+                ),
+                Button(
+                    Format("{btn_timezone}"),
+                    id="u_timezone",
+                    on_click=on_timezone,
+                    when="can_timezone",
                 ),
                 Button(
                     Format("{btn_deactivate}"), id="deactivate", on_click=on_ask, when="is_active"
@@ -559,5 +733,14 @@ def staff_dialog() -> Dialog:
             _back(StaffSG.card, "u_no"),
             state=StaffSG.confirm,
             getter=confirm_getter,
+        ),
+        Window(
+            text,
+            ScrollingGroup(
+                _select("u_tz", "zones", on_timezone_value), id="u_tz_scroll", width=1, height=10
+            ),
+            _back(StaffSG.card, "u_tz_back"),
+            state=StaffSG.timezone_presets,
+            getter=timezone_presets_getter,
         ),
     )
