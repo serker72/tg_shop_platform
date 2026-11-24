@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from operator import itemgetter
 from typing import Any, Final
-from uuid import UUID
 
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
@@ -155,6 +154,7 @@ async def card_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
         "is_inactive": False,
         "is_deleted": False,
         "can_bots": False,
+        "btn_bots": _("🤖 Боты"),
         "btn_rename": _("Переименовать"),
         "btn_settings": _("Настройки магазина"),
         "btn_timezone": _("Часовой пояс"),
@@ -273,14 +273,11 @@ async def on_tenant(
 
 
 async def on_bots(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    tenant_id = manager.dialog_data.get("tenant_id")
-    if (
-        tenant_id is None
-        or not snapshot_of(manager).decide("bots.manage", UUID(str(tenant_id))).allowed
-    ):
+    found = await _current(manager)
+    if found is None or not snapshot_of(manager).decide("bots.manage", found[0].id).allowed:
         await callback.answer(_("Нет доступа."))
         return
-    await manager.start(BotsSG.list, data={"tenant_id": str(tenant_id)})
+    await manager.start(BotsSG.list, data={"tenant_id": str(found[0].id)})
 
 
 async def on_invalid(message: Message, widget: Any, manager: DialogManager, error: Any) -> None:
@@ -538,7 +535,7 @@ def tenants_dialog() -> Dialog:
         Window(
             text,
             Column(
-                Button(Format("🤖 Боты"), id="t_bots", on_click=on_bots, when="can_bots"),
+                Button(Format("{btn_bots}"), id="t_bots", on_click=on_bots, when="can_bots"),
                 SwitchTo(
                     Format("{btn_rename}"), id="t_rename", state=TenantsSG.rename, when="is_live"
                 ),

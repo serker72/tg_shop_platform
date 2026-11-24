@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from faststream.rabbit import RabbitBroker
+from faststream.rabbit import Channel, RabbitBroker
 from faststream.rabbit.opentelemetry import RabbitTelemetryMiddleware
 
 from app.core.config import Settings
@@ -45,6 +45,7 @@ def build_rabbit_broker(settings: Settings) -> RabbitBroker:
     return RabbitBroker(
         settings.rabbitmq_url,
         logger=broker_logger(),
+        default_channel=Channel(publisher_confirms=True, on_return_raises=True),
         graceful_timeout=BROKER_GRACEFUL_TIMEOUT_SECONDS,
         middlewares=[
             RabbitTelemetryMiddleware(tracer_provider=get_tracer_provider()),

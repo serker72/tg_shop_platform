@@ -205,9 +205,27 @@ class ProxyPoolService:
         return proxy
 
     # --- assignment -------------------------------------------------------------------
-    async def get_available_proxy(self) -> Proxy | None:
-        """Best ACTIVE proxy with a free slot (strikes, load, id); read only, no commit."""
-        return await self._repo.pick_available(self._settings.proxy_max_bots_per_ip)
+    async def get_available_proxy(
+        self, current_id: UUID | None = None, *, exclude: set[UUID] | None = None
+    ) -> Proxy | None:
+        """Keep an active assigned proxy, or select an unattempted free candidate."""
+        if current_id is not None:
+            current = await self._repo.get(current_id)
+            if current is not None and current.status == PROXY_STATUS_ACTIVE:
+                return current
+        return await self._repo.pick_available(
+            self._settings.proxy_max_bots_per_ip, exclude=exclude
+        )
+
+    async def lock_available_proxy(self, proxy_id: UUID) -> None:
+        """Reserve capacity on the exact proxy validated by getMe, before locking a bot."""
+        proxy = await self._repo.get(proxy_id, for_update=True)
+        if (
+            proxy is None
+            or proxy.status != PROXY_STATUS_ACTIVE
+            or await self._repo.bot_count(proxy_id) >= self._settings.proxy_max_bots_per_ip
+        ):
+            raise NoProxyAvailableError
 
     async def _try_bind(
         self, bot_id: UUID, proxy_id: UUID, *, expected: UUID | None, keep: bool

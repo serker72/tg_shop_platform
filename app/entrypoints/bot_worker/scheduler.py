@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
 
 import structlog
 from faststream_outbox import OutboxBroker
@@ -23,31 +22,24 @@ from app.core.scheduler import (
 from app.entrypoints.bot_worker.commands import (
     BotRuntimeCommandAdapter,
     RedisCommandDeduplicator,
-    declare_bot_command_dlq,
+    declare_bot_command_topology,
     register_bot_command_consumer,
 )
+from app.modules.bot_manager.commands import BOT_COMMAND_EXCHANGE, BOT_COMMAND_FANOUT
 from app.modules.bot_manager.tasks import register_proxy_tasks
 from app.shared_kernel.infrastructure.outbox import SharedOutboxRelay
 
 BOT_RUNTIME_READINESS = "bot_runtime"
 
 
-class _RuntimeAdapterUnavailable(BotRuntimeCommandAdapter):
-    """Explicit task-10/11 seam; never reports success before runtime exists."""
-
-    async def start(self, command: Any) -> None:
-        raise RuntimeError("bot runtime adapter is not configured")
-
-    async def stop(self, command: Any) -> None:
-        raise RuntimeError("bot runtime adapter is not configured")
-
-    async def restart(self, command: Any) -> None:
-        raise RuntimeError("bot runtime adapter is not configured")
-
-
 @asynccontextmanager
-async def scheduler_component(ctx: ServiceContext) -> AsyncIterator[None]:
-    """Subscribers always consume; the runner ticks only with ``SCHEDULER_ENABLED=true``.
+async def scheduler_component(
+    ctx: ServiceContext, *, runtime_adapter: BotRuntimeCommandAdapter | None = None
+) -> AsyncIterator[None]:
+    """Run task subscribers independently of the optional bot command transport.
+
+    The runner ticks only with ``SCHEDULER_ENABLED=true``. Without an adapter,
+    publish commands to the durable RabbitMQ queue without consuming them.
 
     Exit order: runner loops cancelled first, then the broker stops (in-flight handlers get
     ``BROKER_GRACEFUL_TIMEOUT_SECONDS``). Runner loops are supervised (``ctx.supervisor``).
@@ -55,8 +47,7 @@ async def scheduler_component(ctx: ServiceContext) -> AsyncIterator[None]:
     settings = ctx.settings
     redis = await ctx.container.get(Redis)
     session_factory = await ctx.container.get(async_sessionmaker[AsyncSession])
-    outbox_broker = await ctx.container.get(OutboxBroker)
-    engine = await ctx.container.get(AsyncEngine)
+
     broker = build_rabbit_broker(settings)
     registry = TaskRegistry()
     register_proxy_tasks(
@@ -72,39 +63,34 @@ async def scheduler_component(ctx: ServiceContext) -> AsyncIterator[None]:
         )
     if runtime_gate is not None:
         runtime_gate.set_not_ready()
-    production = getattr(settings, "project_environment", "test") == "prod"
+    if runtime_adapter is None:
+        structlog.get_logger(__name__).warning(
+            "bot_command_consumer_paused",
+            readiness=BOT_RUNTIME_READINESS,
+            reason="runtime_adapter_unavailable",
+        )
     stats = SchedulerStats()
     ctx.metrics.registry.register(SchedulerCollector(stats, registry.names))
     # RabbitBroker.__aenter__ only connects; it does not start subscribers.
     # Declare the DLQ and register the command consumer before broker.start(),
     # which is the point where FastStream activates delivery.
     async with broker:
-        await declare_bot_command_dlq(broker)
-        # Registration is deliberately unconditional: the production broker topology
-        # must expose the durable consumer even when task-10/11 runtime is unavailable.
-        register_bot_command_consumer(
-            broker,
-            _RuntimeAdapterUnavailable(),
-            RedisCommandDeduplicator(redis),
+        await declare_bot_command_topology(broker)
+        relay = SharedOutboxRelay(
+            outbox_broker=await ctx.container.get(OutboxBroker),
+            rabbit_broker=broker,
+            engine=await ctx.container.get(AsyncEngine),
+            exchanges={BOT_COMMAND_EXCHANGE: BOT_COMMAND_FANOUT},
         )
-        if production:
-            # Fail before broker.start() and relay activation.  Keep the readiness gate
-            # not-ready and emit a durable diagnostic: a healthy process with a silently
-            # disabled consumer would allow outbox rows to be published/deleted forever.
-            structlog.get_logger(__name__).critical(
-                "bot_runtime_unavailable_startup_blocked", readiness=BOT_RUNTIME_READINESS
-            )
-            raise RuntimeError("bot runtime adapter is not configured; startup blocked")
+        if runtime_adapter is not None:
+            register_bot_command_consumer(broker, runtime_adapter, RedisCommandDeduplicator(redis))
         await broker.start()
-        relay: SharedOutboxRelay | None = None
-        if not production:
-            relay = SharedOutboxRelay(
-                outbox_broker=outbox_broker, rabbit_broker=broker, engine=engine
-            )
+        try:
             await relay.start()
             if relay.task is not None:
                 ctx.supervisor.watch(relay.task)
-        try:
+            if runtime_gate is not None and runtime_adapter is not None:
+                runtime_gate.set_ready()
             if not settings.scheduler.scheduler_enabled:
                 yield
                 return
@@ -121,5 +107,6 @@ async def scheduler_component(ctx: ServiceContext) -> AsyncIterator[None]:
                     ctx.supervisor.watch(task)
                 yield
         finally:
-            if relay is not None:
-                await relay.stop()
+            if runtime_gate is not None:
+                runtime_gate.set_not_ready()
+            await relay.stop()

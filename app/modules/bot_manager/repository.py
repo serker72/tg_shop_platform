@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import Select, false, func, select, true
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.modules.bot_manager.models import (
     BOT_STATUS_INVALID_TOKEN,
@@ -53,10 +54,13 @@ class BotRepository:
             stmt = stmt.where(Bot.is_deleted.is_(false()))
         return await self._one(stmt, for_update=for_update)
 
-    async def by_token_hash(self, token_hash: str, *, for_update: bool = False) -> Bot | None:
+    async def by_token_hash(
+        self, token_hash: str, *, for_update: bool = False, refresh: bool = False
+    ) -> Bot | None:
         """Lookup by ``token_hash`` (unique across all rows, soft-deleted included)."""
+        stmt = select(Bot).where(Bot.token_hash == token_hash)
         return await self._one(
-            select(Bot).where(Bot.token_hash == token_hash), for_update=for_update
+            stmt.execution_options(populate_existing=refresh), for_update=for_update
         )
 
     async def by_telegram_bot_id(
@@ -77,6 +81,60 @@ class BotRepository:
             stmt = stmt.where(Bot.tenant_id.in_(list(tenant_ids)))
         stmt = stmt.order_by(Bot.created_at, Bot.id)
         return list(await self._session.scalars(stmt))
+
+    async def snapshot_page_for_tenant(
+        self, tenant_id: UUID, size: int, page: int
+    ) -> tuple[list[Bot], int, int]:
+        """Read count and a clamped page in one PostgreSQL statement/snapshot."""
+        filters = (Bot.tenant_id == tenant_id, Bot.is_deleted.is_(false()))
+        count = select(func.count()).select_from(Bot).where(*filters).scalar_subquery()
+        pages = ((count + size - 1) // size).label("pages")
+        bounds = select(pages).subquery()
+        index = func.greatest(0, func.least(max(0, page), bounds.c.pages - 1))
+        limited = (
+            select(Bot)
+            .where(*filters)
+            .order_by(Bot.created_at, Bot.id)
+            .limit(size)
+            .offset(index * size)
+            .correlate(bounds)
+            .lateral()
+        )
+        bot = aliased(Bot, limited)
+        stmt = (
+            select(bot, index, bounds.c.pages)
+            .select_from(bounds)
+            .outerjoin(limited, true())
+            .order_by(bot.created_at, bot.id)
+        )
+        result = (await self._session.execute(stmt)).all()
+        return [row[0] for row in result if row[0] is not None], result[0][1], result[0][2]
+
+    async def count_for_tenant(self, tenant_id: UUID) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Bot)
+            .where(Bot.tenant_id == tenant_id, Bot.is_deleted.is_(false()))
+        )
+        return (await self._session.scalars(stmt)).one()
+
+    async def page_for_tenant(self, tenant_id: UUID, *, limit: int, offset: int) -> list[Bot]:
+        stmt = (
+            select(Bot)
+            .where(Bot.tenant_id == tenant_id, Bot.is_deleted.is_(false()))
+            .order_by(Bot.created_at, Bot.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(await self._session.scalars(stmt))
+
+    async def get_for_tenant(
+        self, tenant_id: UUID, bot_id: UUID, *, for_update: bool = False
+    ) -> Bot | None:
+        stmt = select(Bot).where(
+            Bot.id == bot_id, Bot.tenant_id == tenant_id, Bot.is_deleted.is_(false())
+        )
+        return await self._one(stmt, for_update=for_update)
 
     async def list_runnable(self) -> list[Bot]:
         """Live, enabled bots of live, enabled tenants whose token is not known to be invalid."""

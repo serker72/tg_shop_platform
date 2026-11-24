@@ -14,10 +14,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from faststream.rabbit import RabbitBroker, RabbitQueue
+from aio_pika.abc import FieldValue
+from faststream.rabbit import RabbitBroker, RabbitExchange, RabbitQueue
 from faststream_outbox import OutboxBroker, make_dlq_table, make_outbox_table
 from faststream_outbox.message import OutboxInnerMessage
 from faststream_outbox.retry import ExponentialRetry, RetryStrategyProto
+from opentelemetry.context import Context, attach, detach
+from opentelemetry.propagate import extract
 from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -104,6 +107,7 @@ class SharedOutboxRelay:
         rabbit_broker: RabbitBroker,
         engine: AsyncEngine,
         queues: tuple[str, ...] = (OUTBOX_QUEUE,),
+        exchanges: Mapping[str, RabbitExchange] | None = None,
         config: RelayConfig | None = None,
         retry_strategy: RetryStrategyProto | None = None,
     ) -> None:
@@ -114,6 +118,7 @@ class SharedOutboxRelay:
         self._rabbit_broker = rabbit_broker
         self._engine = engine
         self._queues = queues
+        self._exchanges = dict(exchanges or {})
         self._config = config or RelayConfig()
         self._retry = retry_strategy or ExponentialRetry(
             initial_delay_seconds=1.0, multiplier=2.0, max_delay_seconds=300.0, max_attempts=10
@@ -235,14 +240,27 @@ class SharedOutboxRelay:
     async def _publish(self, row: OutboxInnerMessage) -> None:
         # payload and headers are already package-encoded. Do not decode/re-encode:
         # this preserves content-type, routing headers and W3C traceparent exactly.
-        await self._rabbit_broker.publish(
-            row.payload,
-            queue=RabbitQueue(row.queue, durable=True),
-            headers=dict(row.headers or {}),
-            message_id=str(row.id),
-            persist=True,
-            timeout=self._config.publish_timeout_seconds,
+        exchange = self._exchanges.get(row.queue)
+        routing = (
+            {"exchange": exchange, "mandatory": True}
+            if exchange
+            else {"queue": RabbitQueue(row.queue, durable=True)}
         )
+        carrier = dict(row.headers or {})
+        headers: dict[str, FieldValue] = dict(carrier)
+        # Use the committed producer context, not the relay task's ambient context.
+        context_token = attach(extract(carrier, context=Context()))
+        try:
+            await self._rabbit_broker.publish(
+                row.payload,
+                **routing,
+                headers=headers,
+                message_id=str(row.id),
+                persist=True,
+                timeout=self._config.publish_timeout_seconds,
+            )
+        finally:
+            detach(context_token)
 
     @property
     def task(self) -> asyncio.Task[None] | None:

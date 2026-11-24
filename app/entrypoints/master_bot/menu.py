@@ -14,11 +14,13 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, StartMode, Window
+from aiogram_dialog.api.internal import CONTEXT_KEY
 from aiogram_dialog.widgets.kbd import Button, Column
 from aiogram_dialog.widgets.text import Format
 
 from app.entrypoints.master_bot.texts import Texts
 from app.modules.bot_manager.presentation.tg_master import bots_dialog
+from app.modules.bot_manager.presentation.tg_master.states import BotsSG
 from app.modules.iam.permissions import (
     LOGS_VIEW,
     ROLES_MANAGE,
@@ -136,9 +138,16 @@ async def _start(message: Message, dialog_manager: DialogManager) -> None:
     await dialog_manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
 
 
+async def _outside_token_input(message: Message, **data: Any) -> bool:
+    # The intent middleware loads the context before filters run; the manager is
+    # injected later, and aiogram's raw FSM state is not the dialog state.
+    context = data.get(CONTEXT_KEY)
+    return context is None or context.state not in (BotsSG.add_token, BotsSG.replace_token)
+
+
 def build_menu_router() -> Router:
     router = Router(name="master_bot.menu")
-    router.message.register(_start, CommandStart())
+    router.message.register(_start, CommandStart(), _outside_token_input)
     router.include_router(build_main_menu_dialog())
     router.include_router(tenants_dialog())
     router.include_router(staff_dialog())

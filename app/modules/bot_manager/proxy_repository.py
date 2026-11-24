@@ -71,9 +71,14 @@ class ProxyRepository:
             .order_by(Proxy.strike_count, load, Proxy.id)
         )
 
-    async def pick_available(self, max_bots: int) -> Proxy | None:
-        """Best ACTIVE proxy with a free slot (no lock): strikes, then load, then id."""
-        return (await self._session.scalars(self._available(max_bots).limit(1))).first()
+    async def pick_available(
+        self, max_bots: int, *, exclude: set[UUID] | None = None
+    ) -> Proxy | None:
+        """Best ACTIVE proxy with a free slot, excluding already attempted candidates."""
+        stmt = self._available(max_bots)
+        if exclude:
+            stmt = stmt.where(Proxy.id.not_in(exclude))
+        return (await self._session.scalars(stmt.limit(1))).first()
 
     async def available_ids(self, max_bots: int, *, exclude: UUID | None = None) -> list[UUID]:
         stmt = self._available(max_bots).with_only_columns(Proxy.id)

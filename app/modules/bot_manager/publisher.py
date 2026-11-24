@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from faststream_outbox import OutboxBroker
+from opentelemetry.propagate import inject
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.bot_manager.commands import BOT_COMMAND_EXCHANGE, BotCommand
+from app.modules.bot_manager.commands import BOT_COMMAND_FANOUT, BotCommand
 from app.shared_kernel.infrastructure.outbox import append_outbox
 
 
@@ -19,7 +20,8 @@ class BotCommandPublisher:
     async def publish(self, command: BotCommand) -> Any:
         # Legacy direct transport path retained for non-transactional callers.
         return await self._broker.publish(
-            command.model_dump(mode="json"), exchange=BOT_COMMAND_EXCHANGE
+            command.model_dump(mode="json"),
+            exchange=BOT_COMMAND_FANOUT,
         )
 
     async def publish_transactional(
@@ -31,6 +33,7 @@ class BotCommandPublisher:
     ) -> Any:
         """Append to the shared outbox in the caller's open transaction."""
         headers = {"content-type": "application/json", "x-command-type": command.kind}
+        inject(headers)
         if traceparent:
             headers["traceparent"] = traceparent
         return await append_outbox(

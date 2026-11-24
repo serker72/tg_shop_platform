@@ -2,17 +2,233 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from faststream.rabbit import ExchangeType, RabbitExchange, RabbitMessage, RabbitQueue
 from faststream_outbox.client import OutboxClient
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from redis.asyncio import Redis
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from app.shared_kernel.infrastructure.outbox import outbox_dlq, outbox_messages
+from app.core.config import Settings
+from app.core.observability.broker import build_rabbit_broker
+from app.shared_kernel.infrastructure.outbox import (
+    SharedOutboxRelay,
+    append_outbox,
+    build_outbox_broker,
+    outbox_dlq,
+    outbox_messages,
+)
 
 pytestmark = pytest.mark.integration
+
+
+async def test_worker_relays_to_durable_queue_without_adapter(
+    engine: AsyncEngine, settings: Settings, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    import aio_pika
+    from dishka import AsyncContainer
+    from faststream_outbox import OutboxBroker
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.core.observability.health import HeartbeatRegistry
+    from app.core.observability.metrics import build_metrics
+    from app.core.process import ServiceContext
+    from app.entrypoints.bot_worker import commands, scheduler
+
+    name = f"test.worker.{uuid4().hex}"
+    dlq = f"{name}.dlq"
+    exchange = RabbitExchange(name, type=ExchangeType.FANOUT, durable=True)
+    monkeypatch.setattr(commands, "COMMAND_QUEUE", name)
+    monkeypatch.setattr(commands, "COMMAND_DLQ", dlq)
+    monkeypatch.setattr(
+        commands,
+        "COMMAND_QUEUE_ARGUMENTS",
+        {
+            "x-dead-letter-exchange": "",
+            "x-dead-letter-routing-key": dlq,
+        },
+    )
+    monkeypatch.setattr(commands, "BOT_COMMAND_FANOUT", exchange)
+    monkeypatch.setattr(scheduler, "BOT_COMMAND_FANOUT", exchange)
+    monkeypatch.setattr(scheduler, "BOT_COMMAND_EXCHANGE", name)
+    # Isolate the test relay from other outbox rows while exercising production wiring.
+    monkeypatch.setattr(
+        scheduler, "SharedOutboxRelay", lambda **kw: SharedOutboxRelay(**kw, queues=(name,))
+    )
+    assert settings.project_environment == "test"
+    settings = settings.model_copy(update={"project_environment": "prod"})
+    outbox = build_outbox_broker(engine)
+
+    dependencies: dict[object, object] = {
+        Redis: redis_client,
+        AsyncEngine: engine,
+        OutboxBroker: outbox,
+        async_sessionmaker[AsyncSession]: async_sessionmaker(engine),
+    }
+    container = AsyncMock(spec=AsyncContainer)
+    container.get.side_effect = dependencies.__getitem__
+
+    readiness = HeartbeatRegistry()
+    ctx = ServiceContext(
+        name="bot_worker",
+        settings=settings,
+        container=container,
+        metrics=build_metrics(component="bot_worker"),
+        readiness_registry=readiness,
+    )
+    traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+    async with await aio_pika.connect(settings.rabbitmq_url) as connection:
+        channel = await connection.channel()
+        try:
+            async with scheduler.scheduler_component(ctx):
+                assert not readiness.readiness[scheduler.BOT_RUNTIME_READINESS].ready
+                async with AsyncSession(engine) as session:
+                    await append_outbox(
+                        outbox,
+                        session,
+                        payload={"kind": "START_BOT"},
+                        headers={"traceparent": traceparent},
+                        idempotency_key=uuid4().hex,
+                        queue=name,
+                    )
+                    await session.commit()
+                async with asyncio.timeout(5):
+                    while True:
+                        queue = await channel.declare_queue(name, passive=True)
+                        assert queue.declaration_result.consumer_count == 0
+                        if queue.declaration_result.message_count == 1:
+                            break
+                        await asyncio.sleep(0.05)
+                message = await queue.get()
+                header = message.headers["traceparent"]
+                assert isinstance(header, str)
+                assert header.split("-")[1] == traceparent.split("-")[1]
+                assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
+                await message.ack()
+                dead = await channel.declare_queue(dlq, passive=True)
+                assert dead.declaration_result.message_count == 0
+        finally:
+            await channel.queue_delete(name)
+            await channel.queue_delete(dlq)
+            await channel.exchange_delete(name)
+            async with engine.begin() as conn:
+                await conn.execute(outbox_messages.delete().where(outbox_messages.c.queue == name))
+
+
+async def test_shared_outbox_commit_relay_rabbit_trace_and_precommit_visibility(
+    engine: AsyncEngine,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.observability import broker as broker_module
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(broker_module, "get_tracer_provider", lambda: provider)
+    queue_name = f"test.outbox.{uuid4().hex}"
+    exchange = RabbitExchange(queue_name, type=ExchangeType.FANOUT, auto_delete=True)
+    broker = build_rabbit_broker(settings)
+    received: asyncio.Future[tuple[dict[str, str], str]] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    @broker.subscriber(RabbitQueue(queue_name, auto_delete=True), exchange=exchange)
+    async def consume(body: dict[str, str], message: RabbitMessage) -> None:
+        if not received.done():
+            received.set_result((body, str(message.headers["traceparent"])))
+
+    outbox = build_outbox_broker(engine)
+    relay = SharedOutboxRelay(
+        outbox_broker=outbox,
+        rabbit_broker=broker,
+        engine=engine,
+        queues=(queue_name,),
+        exchanges={queue_name: exchange},
+    )
+    traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+    async with broker:
+        await broker.start()
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                await append_outbox(
+                    outbox,
+                    session,
+                    payload={"kind": "START_BOT"},
+                    headers={"traceparent": traceparent},
+                    idempotency_key=uuid4().hex,
+                    queue=queue_name,
+                )
+                assert await relay.run_once() == 0
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(received), 0.2)
+                await session.commit()
+            assert await relay.run_once() == 1
+            body, header = await asyncio.wait_for(received, 5)
+            assert body == {"kind": "START_BOT"}
+            assert header.split("-")[1] == traceparent.split("-")[1]
+            assert any(
+                span.parent is not None
+                and span.parent.span_id == int(traceparent.split("-")[2], 16)
+                and span.context is not None
+                and span.context.trace_id == int(traceparent.split("-")[1], 16)
+                for span in exporter.get_finished_spans()
+            )
+        finally:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    outbox_messages.delete().where(outbox_messages.c.queue == queue_name)
+                )
+
+
+async def test_shared_outbox_unroutable_fanout_keeps_row_for_retry(
+    engine: AsyncEngine, settings: Settings
+) -> None:
+    name = f"test.unroutable.{uuid4().hex}"
+    exchange = RabbitExchange(name, type=ExchangeType.FANOUT, auto_delete=True)
+    broker = build_rabbit_broker(settings)
+    outbox = build_outbox_broker(engine)
+    relay = SharedOutboxRelay(
+        outbox_broker=outbox,
+        rabbit_broker=broker,
+        engine=engine,
+        queues=(name,),
+        exchanges={name: exchange},
+    )
+    async with broker:
+        declared = await broker.declare_exchange(exchange)
+        try:
+            async with AsyncSession(engine) as session:
+                await append_outbox(
+                    outbox,
+                    session,
+                    payload={"kind": "START_BOT"},
+                    headers={},
+                    idempotency_key=uuid4().hex,
+                    queue=name,
+                )
+                await session.commit()
+            assert await relay.run_once() == 1
+            async with engine.connect() as conn:
+                attempts = await conn.scalar(
+                    select(outbox_messages.c.deliveries_count).where(
+                        outbox_messages.c.queue == name
+                    )
+                )
+            assert attempts == 1
+        finally:
+            async with engine.begin() as conn:
+                await conn.execute(outbox_messages.delete().where(outbox_messages.c.queue == name))
+            await declared.delete()
 
 
 async def test_shared_outbox_schema_is_package_compatible(engine: AsyncEngine) -> None:

@@ -45,7 +45,7 @@ MAINTENANCE_RESULT: Final = "maintenance"
 SOURCE: Final = "master_bot"
 #: Logged instead of a free text message (tokens, PII never reach the click-log).
 TEXT_MARKER: Final = "<text>"
-_COMMAND_MAX_LEN: Final = 64
+
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
 SnapshotLoader = Callable[[int], Awaitable[PermissionSnapshot]]
@@ -187,7 +187,7 @@ def describe_update(update: Update) -> tuple[str, str | None, str | None]:
         return "callback", update.callback_query.data, None
     if update.message is not None:
         text = update.message.text or update.message.caption or ""
-        if text.startswith("/"):
-            return "command", None, text.split(maxsplit=1)[0][:_COMMAND_MAX_LEN]
+        if update.message.text and update.message.text.split(maxsplit=1)[:1] == ["/start"]:
+            return "command", None, "/start"
         return "message", None, TEXT_MARKER if text else None
     return update.event_type, None, None

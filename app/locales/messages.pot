@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-23 22:01+0300\n"
+"POT-Creation-Date: 2026-11-24 13:39+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -16,6 +16,14 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid ""
+"1. Откройте @BotFather.\n"
+"2. Отправьте /newbot.\n"
+"3. Укажите имя и username, оканчивающийся на bot.\n"
+"4. Скопируйте токен. Нажмите «Ввести токен» и отправьте его на следующем "
+"экране."
+msgstr ""
 
 msgid "24 ч"
 msgstr ""
@@ -42,6 +50,12 @@ msgstr ""
 msgid "Telegram ID"
 msgstr ""
 
+msgid "Telegram недоступен. Попробуйте ещё раз."
+msgstr ""
+
+msgid "Telegram отклонил токен."
+msgstr ""
+
 msgid "Username"
 msgstr ""
 
@@ -60,7 +74,13 @@ msgstr ""
 msgid "Бот магазина"
 msgstr ""
 
+msgid "Бот уже добавлен."
+msgstr ""
+
 msgid "Боты"
+msgstr ""
+
+msgid "Боты (только просмотр)"
 msgstr ""
 
 msgid "Бухгалтерия"
@@ -114,6 +134,9 @@ msgid "Введите новое название роли."
 msgstr ""
 
 msgid "Введите причину (до 500 символов) или нажмите «Пропустить»."
+msgstr ""
+
+msgid "Ввести токен"
 msgstr ""
 
 msgid ""
@@ -176,6 +199,9 @@ msgid "Готово."
 msgstr ""
 
 msgid "Да"
+msgstr ""
+
+msgid "Да, удалить"
 msgstr ""
 
 msgid "Далее"
@@ -264,6 +290,9 @@ msgid "Логи активности"
 msgstr ""
 
 msgid "Магазин"
+msgstr ""
+
+msgid "Магазин доступен только для просмотра."
 msgstr ""
 
 msgid "Магазин не найден."
@@ -357,6 +386,12 @@ msgstr ""
 msgid "Не удалось выполнить действие."
 msgstr ""
 
+msgid "Не удалось удалить сообщение. Удалите его вручную и повторите ввод."
+msgstr ""
+
+msgid "Неверный формат токена."
+msgstr ""
+
 msgid "Недостаточно прав для этого действия."
 msgstr ""
 
@@ -413,6 +448,9 @@ msgstr ""
 msgid "Нет доступных магазинов"
 msgstr ""
 
+msgid "Нет свободного прокси."
+msgstr ""
+
 msgid "Нет событий"
 msgstr ""
 
@@ -432,13 +470,26 @@ msgstr ""
 msgid "Общие права"
 msgstr ""
 
+msgid "Операция недоступна."
+msgstr ""
+
 msgid "Отзывы"
 msgstr ""
 
 msgid "Отмена"
 msgstr ""
 
+msgid "Отправьте новый токен"
+msgstr ""
+
+msgid "Отправьте токен"
+msgstr ""
+
 msgid "Очистить"
+msgstr ""
+
+#, python-brace-format
+msgid "Ошибка: {error}"
 msgstr ""
 
 msgid "Панель управления платформой"
@@ -552,6 +603,10 @@ msgstr ""
 msgid "Прокси"
 msgstr ""
 
+#, python-brace-format
+msgid "Прокси: {proxy}"
+msgstr ""
+
 msgid "Пропустить"
 msgstr ""
 
@@ -621,6 +676,9 @@ msgid "Системные настройки"
 msgstr ""
 
 msgid "Системные настройки не инициализированы. Обратитесь к администратору."
+msgstr ""
+
+msgid "Скопировать /newbot"
 msgstr ""
 
 #, python-brace-format
@@ -718,10 +776,16 @@ msgstr ""
 msgid "Товары"
 msgstr ""
 
+msgid "Токен принадлежит другому боту."
+msgstr ""
+
 msgid "Уведомления"
 msgstr ""
 
 msgid "Удалить"
+msgstr ""
+
+msgid "Удалить бота?"
 msgstr ""
 
 msgid "Удалить магазин? Его можно будет восстановить."
@@ -808,6 +872,9 @@ msgstr ""
 msgid "бессрочно"
 msgstr ""
 
+msgid "вкл"
+msgstr ""
+
 msgid "включены"
 msgstr ""
 
@@ -816,6 +883,9 @@ msgstr ""
 
 #, python-brace-format
 msgid "выдал: {who}"
+msgstr ""
+
+msgid "выкл"
 msgstr ""
 
 msgid "выключены"
@@ -891,6 +961,27 @@ msgstr ""
 msgid "удалён — прав нет"
 msgstr ""
 
+msgid "⏹ Остановить"
+msgstr ""
+
+msgid "▶️ Запустить"
+msgstr ""
+
+msgid "➕ Добавить бота"
+msgstr ""
+
+msgid "🔄 Перезапустить"
+msgstr ""
+
+msgid "🔑 Заменить токен"
+msgstr ""
+
 msgid "🔒 — системная роль (набор прав только для просмотра), ⏸ — деактивирована."
+msgstr ""
+
+msgid "🗑 Удалить"
+msgstr ""
+
+msgid "🤖 Боты"
 msgstr ""
 

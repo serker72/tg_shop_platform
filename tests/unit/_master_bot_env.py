@@ -253,6 +253,8 @@ class Env:
         export_service: Any | None = None,
         filter_options: Any | None = None,
         master_telegram_bot_id: int | None = None,
+        bot_control_service: Any | None = None,
+        click_log: Any | None = None,
     ) -> None:
         self.snapshot = snapshot
         self.store: dict[UUID, SimpleNamespace] = {t.id: t for t in tenants or []}
@@ -304,8 +306,11 @@ class Env:
                 settings_row, "file_logs_retention_days", v
             ),
         )
+        from app.modules.bot_manager.service import BotControlService
+
         container = FakeContainer(
             {
+                BotControlService: bot_control_service,
                 TenantAdminService: self.tenants,
                 UserAdminService: self.user_service,
                 AccessAdminService: self.access,
@@ -331,6 +336,8 @@ class Env:
 
         dispatcher = Dispatcher(storage=MemoryStorage())
         dispatcher.update.outer_middleware(inject)
+        if click_log is not None:
+            dispatcher.update.outer_middleware(click_log)
         dispatcher.include_router(build_menu_router())
         self.messages = CheckedMessageManager()  # type: ignore[no-untyped-call]
         setup_dialogs(dispatcher, message_manager=self.messages)

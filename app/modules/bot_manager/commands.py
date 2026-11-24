@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StrictInt
+from faststream.rabbit import ExchangeType, RabbitExchange
+from pydantic import AwareDatetime, BaseModel, ConfigDict, StrictInt
 
 BOT_COMMAND_EXCHANGE = "bot.commands"
+BOT_COMMAND_FANOUT = RabbitExchange(BOT_COMMAND_EXCHANGE, type=ExchangeType.FANOUT, durable=True)
 BotCommandKind = Literal["START_BOT", "STOP_BOT", "RESTART_BOT"]
 
 
@@ -19,7 +20,7 @@ class BotCommand(BaseModel):
     idempotency_key: UUID
     kind: BotCommandKind
     bot_id: UUID
-    issued_at: datetime
+    issued_at: AwareDatetime
     issued_by: StrictInt
 
 

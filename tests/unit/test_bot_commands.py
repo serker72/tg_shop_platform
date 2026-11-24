@@ -2,8 +2,10 @@
 
 import asyncio
 from collections.abc import Callable
+from contextvars import Context
 from datetime import UTC, datetime
 from typing import Any, cast
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -14,6 +16,7 @@ from pydantic import ValidationError
 from app.entrypoints.bot_worker.commands import (
     DEDUPE_TTL_SECONDS,
     DISPATCH_TIMEOUT_SECONDS,
+    ClaimState,
     InMemoryCommandDeduplicator,
     TransientAdapterError,
     TransientDispatchTimeout,
@@ -24,6 +27,47 @@ from app.entrypoints.bot_worker.commands import (
 from app.modules.bot_manager.commands import BOT_COMMAND_EXCHANGE, BotCommand
 
 pytestmark = pytest.mark.req("R-II.8")
+
+
+async def test_start_fanout_carries_traceparent() -> None:
+    from faststream.rabbit import RabbitMessage, TestRabbitBroker
+    from opentelemetry.context import attach, detach
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, set_span_in_context
+
+    from app.core.config import Settings
+    from app.core.observability.broker import build_rabbit_broker
+    from app.modules.bot_manager.commands import BOT_COMMAND_FANOUT
+    from app.modules.bot_manager.publisher import BotCommandPublisher
+
+    broker = build_rabbit_broker(Settings(_env_file=None))
+    seen = []
+
+    @broker.subscriber("bot-trace-test", exchange=BOT_COMMAND_FANOUT)
+    async def receive(body: dict[str, Any], message: RabbitMessage) -> None:
+        seen.append((BotCommand.model_validate(body), message.headers["traceparent"]))
+
+    command = BotCommand.model_validate(command_payload())
+    trace_id = 1234
+    token = attach(
+        set_span_in_context(
+            NonRecordingSpan(
+                SpanContext(
+                    trace_id=trace_id,
+                    span_id=4321,
+                    is_remote=False,
+                    trace_flags=TraceFlags(1),
+                )
+            )
+        )
+    )
+    try:
+        async with TestRabbitBroker(broker):
+            await BotCommandPublisher(broker).publish(command)
+    finally:
+        detach(token)
+    assert len(seen) == 1
+    assert seen[0][0] == command
+    assert seen[0][1].split("-")[1] == f"{trace_id:032x}"
 
 
 def test_command_payload_is_strict_and_json_serializable() -> None:
@@ -161,7 +205,7 @@ async def test_dispatch_transient_terminal_and_crash_release_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transient_dispatch_with_release_failure_is_terminal_reject() -> None:
+async def test_transient_dispatch_with_release_failure_is_requeued() -> None:
     from app.entrypoints.bot_worker.commands import register_bot_command_consumer
 
     class BrokenRelease(InMemoryCommandDeduplicator):
@@ -176,9 +220,9 @@ async def test_transient_dispatch_with_release_failure_is_terminal_reject() -> N
     handle = register_bot_command_consumer(
         cast(RabbitBroker, FakeBroker()), FailingAdapter(), dedupe
     )
-    with pytest.raises(RejectMessage) as caught:
+    with pytest.raises(NackMessage) as caught:
         await handle(command_payload())
-    assert caught.value.extra_options == {"requeue": False}
+    assert caught.value.extra_options == {"requeue": True}
 
 
 @pytest.mark.asyncio
@@ -208,11 +252,19 @@ async def test_cancellation_releases_claim_and_propagates_without_reject() -> No
 
 
 @pytest.mark.asyncio
-async def test_redis_claim_failure_is_requeued_without_release() -> None:
-    from app.entrypoints.bot_worker.commands import register_bot_command_consumer
+async def test_redis_claim_failure_is_requeued_without_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.entrypoints.bot_worker import commands
+
+    delay = AsyncMock()
+    monkeypatch.setattr(commands, "_retry_delay", delay)
+    register_bot_command_consumer = commands.register_bot_command_consumer
 
     class BrokenDedupe(InMemoryCommandDeduplicator):
-        async def claim(self, key: str) -> str | None:
+        async def claim(self, key: str) -> str | ClaimState:
             raise ConnectionError("redis down")
 
         async def release(self, key: str, owner: str) -> None:
@@ -223,6 +275,161 @@ async def test_redis_claim_failure_is_requeued_without_release() -> None:
     )
     with pytest.raises(NackMessage):
         await handle(command_payload())
+
+
+@pytest.mark.parametrize("stored", [False, True])
+async def test_uncertain_completion_with_release_failure(
+    monkeypatch: pytest.MonkeyPatch, stored: bool
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.entrypoints.bot_worker import commands
+
+    delay = AsyncMock()
+    monkeypatch.setattr(commands, "_retry_delay", delay)
+
+    class BrokenSettlement(InMemoryCommandDeduplicator):
+        async def complete(self, key: str, owner: str) -> bool:
+            if stored:
+                await super().complete(key, owner)
+            raise ConnectionError("completion reply lost")
+
+        async def release(self, key: str, owner: str) -> None:
+            raise ConnectionError("release reply lost")
+
+    dedupe, adapter = BrokenSettlement(), RuntimeAdapter()
+    handle = commands.register_bot_command_consumer(
+        cast(RabbitBroker, FakeBroker()), adapter, dedupe
+    )
+    payload = command_payload()
+    with pytest.raises(NackMessage):
+        await handle(payload)
+    if stored:
+        await handle(payload)
+        assert delay.await_count == 1
+    else:
+        with pytest.raises(NackMessage):
+            await handle(payload)
+        assert delay.await_count == 2
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.parametrize("trigger", ["deadline", "renewal", "shutdown", "deadline_shutdown"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_claim_renews_during_cancel_cleanup(
+    monkeypatch: pytest.MonkeyPatch, trigger: str, cleanup_fails: bool
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from app.entrypoints.bot_worker import commands
+
+    backoff = AsyncMock()
+    monkeypatch.setattr(commands, "_retry_delay", backoff)
+    monkeypatch.setattr(commands, "DISPATCH_TIMEOUT_MARGIN_SECONDS", 0)
+    started, cleanup, finish, renewed = (asyncio.Event() for _ in range(4))
+    loop = asyncio.get_running_loop()
+    call_later = loop.call_later
+    deadlines: list[Callable[[], object]] = []
+
+    def capture_deadline(
+        delay: float, callback: Callable[..., object], *args: object, context: Context | None = None
+    ) -> asyncio.TimerHandle:
+        if getattr(callback, "__name__", "") == "on_deadline":
+            deadlines.append(callback)
+            return call_later(60, callback, *args, context=context)
+        return call_later(delay, callback, *args, context=context)
+
+    monkeypatch.setattr(loop, "call_later", capture_deadline)
+
+    class Renewing(InMemoryCommandDeduplicator):
+        async def renew(self, key: str, owner: str) -> bool:
+            await started.wait()
+            if cleanup.is_set():
+                renewed.set()
+            elif trigger == "renewal":
+                raise ConnectionError("renewal reply lost")
+            return await super().renew(key, owner)
+
+    class SlowCleanup(RuntimeAdapter):
+        async def start(self, command: BotCommand) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleanup.set()
+                await finish.wait()
+                if cleanup_fails:
+                    raise RuntimeError("cleanup failed")
+
+    dedupe = Renewing(ttl_seconds=1)
+    release = AsyncMock(wraps=dedupe.release)
+    complete = AsyncMock(wraps=dedupe.complete)
+    monkeypatch.setattr(dedupe, "release", release)
+    monkeypatch.setattr(dedupe, "complete", complete)
+    handle = commands.register_bot_command_consumer(
+        cast(RabbitBroker, FakeBroker()), SlowCleanup(), dedupe
+    )
+    payload = command_payload()
+    task = asyncio.ensure_future(handle(payload))
+    key = payload["idempotency_key"]
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        if trigger in ("deadline", "deadline_shutdown"):
+            deadlines[0]()
+        elif trigger == "shutdown":
+            task.cancel()
+        await asyncio.wait_for(cleanup.wait(), 2)
+        if trigger == "deadline_shutdown":
+            task.cancel()
+        elif trigger == "shutdown":
+            deadlines[0]()
+        await asyncio.wait_for(renewed.wait(), 2)
+        assert not task.done()
+        release.assert_not_awaited()
+        assert await dedupe.claim(key) is ClaimState.IN_FLIGHT
+    finally:
+        finish.set()
+    if "shutdown" in trigger:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        backoff.assert_not_awaited()
+    else:
+        with pytest.raises(NackMessage) as error:
+            await task
+        assert error.value.extra_options == {"requeue": True}
+        backoff.assert_awaited_once()
+    release.assert_awaited_once()
+    assert release.await_args is not None
+    assert release.await_args.args[0] == key
+    complete.assert_not_awaited()
+    assert isinstance(await dedupe.claim(key), str)
+
+
+@pytest.mark.asyncio
+async def test_adapter_timeout_without_deadline_requeues_and_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.entrypoints.bot_worker import commands
+
+    delay = AsyncMock()
+    monkeypatch.setattr(commands, "_retry_delay", delay)
+
+    class TimeoutAdapter(RuntimeAdapter):
+        async def start(self, command: BotCommand) -> None:
+            raise TimeoutError("adapter timeout")
+
+    dedupe = InMemoryCommandDeduplicator()
+    handle = commands.register_bot_command_consumer(
+        cast(RabbitBroker, FakeBroker()), TimeoutAdapter(), dedupe
+    )
+    payload = command_payload()
+    with pytest.raises(NackMessage) as error:
+        await handle(payload)
+    assert error.value.extra_options == {"requeue": True}
+    delay.assert_awaited_once()
+    assert await dedupe.claim(payload["idempotency_key"]) is not None
+    # Completion must not be recorded; the released owner can be claimed again.
+    assert await dedupe.claim(payload["idempotency_key"]) is ClaimState.IN_FLIGHT
 
 
 @pytest.mark.asyncio
@@ -245,8 +452,8 @@ async def test_dispatch_adapter_routes_all_lifecycle_commands() -> None:
 async def test_in_memory_idempotency_duplicate_and_release_on_error() -> None:
     dedupe = InMemoryCommandDeduplicator()
     owner = await dedupe.claim("key")
-    assert owner is not None
-    assert await dedupe.claim("key") is None
+    assert isinstance(owner, str)
+    assert await dedupe.claim("key") is ClaimState.IN_FLIGHT
     await dedupe.release("key", owner)
     assert await dedupe.claim("key") is not None
 
@@ -260,7 +467,16 @@ async def test_completed_duplicate_is_acked_without_adapter_after_inflight_expir
     handle = register_bot_command_consumer(cast(RabbitBroker, FakeBroker()), adapter, dedupe)
     payload = command_payload()
 
+    key = payload["idempotency_key"]
+    owner = await dedupe.claim(key)
+    assert isinstance(owner, str)
+    with pytest.raises(NackMessage) as error:
+        await handle(payload)
+    assert error.value.extra_options == {"requeue": True}
+    assert adapter.calls == []
+    await dedupe.release(key, owner)
     await handle(payload)
+    assert await dedupe.claim(key) is ClaimState.COMPLETED
     # The in-flight claim is gone, while the durable completed marker remains.
     assert len(adapter.calls) == 1
     await handle(payload)
@@ -268,6 +484,40 @@ async def test_completed_duplicate_is_acked_without_adapter_after_inflight_expir
 
 
 @pytest.mark.asyncio
+async def test_consumer_timeout_with_default_deadline_requeues_and_releases_without_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.entrypoints.bot_worker import commands
+
+    backoff = AsyncMock()
+    monkeypatch.setattr(commands, "_retry_delay", backoff)
+
+    class TimeoutAdapter(RuntimeAdapter):
+        async def start(self, command: BotCommand) -> None:
+            raise TimeoutError("adapter timed out")
+
+    dedupe = InMemoryCommandDeduplicator()
+    complete = AsyncMock(wraps=dedupe.complete)
+    release = AsyncMock(wraps=dedupe.release)
+    monkeypatch.setattr(dedupe, "complete", complete)
+    monkeypatch.setattr(dedupe, "release", release)
+    handle = commands.register_bot_command_consumer(
+        cast(RabbitBroker, FakeBroker()), TimeoutAdapter(), dedupe
+    )
+    payload = command_payload()
+    with pytest.raises(NackMessage) as error:
+        await handle(payload)
+    assert error.value.extra_options == {"requeue": True}
+    assert backoff.await_count == 1
+    release.assert_awaited_once()
+    assert release.await_args is not None
+    assert release.await_args.args[0] == payload["idempotency_key"]
+    assert isinstance(release.await_args.args[1], str)
+    complete.assert_not_awaited()
+    assert isinstance(error.value.__cause__, TransientDispatchTimeout)
+    assert isinstance(error.value.__cause__.__cause__, TimeoutError)
+
+
 async def test_dispatch_timeout_is_transient_and_cancels_hanging_adapter() -> None:
     cancelled = asyncio.Event()
 
