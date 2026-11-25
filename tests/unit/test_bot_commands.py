@@ -183,13 +183,16 @@ def command_payload() -> dict[str, Any]:
 
 
 async def test_registered_consumer_dispatches_published_command_with_header_trace() -> None:
+    from logging import Logger
+
     from faststream.rabbit import TestRabbitBroker
     from structlog.testing import capture_logs
 
     from app.entrypoints.bot_worker.commands import register_bot_command_consumer
     from app.modules.bot_manager.commands import BOT_COMMAND_FANOUT
 
-    broker = RabbitBroker()
+    # Keep FastStream from configuring the process-wide faststream.access.rabbit logger.
+    broker = RabbitBroker(logger=Logger(__name__))
     payload = command_payload()
     traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
     adapter = AsyncMock(spec=RuntimeAdapter)
