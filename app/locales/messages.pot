@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-25 19:15+0300\n"
+"POT-Creation-Date: 2026-11-25 20:08+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -59,7 +59,16 @@ msgstr ""
 msgid "Username"
 msgstr ""
 
+#, python-brace-format
+msgid ""
+"{label} · {address} · {status} · штрафы: {strikes} · боты: {load}/{limit}"
+" · бан: {ban}"
+msgstr ""
+
 msgid "« Назад"
+msgstr ""
+
+msgid "Активен"
 msgstr ""
 
 msgid "Активировать"
@@ -126,6 +135,11 @@ msgstr ""
 msgid "Введите название новой роли (до 128 символов)."
 msgstr ""
 
+msgid ""
+"Введите название прокси (до 60 символов: буквы, цифры, пробел, дефис, "
+"подчёркивание)."
+msgstr ""
+
 #, python-brace-format
 msgid "Введите новое значение — целое число от {low} до {high}."
 msgstr ""
@@ -140,6 +154,9 @@ msgid "Введите причину (до 500 символов) или нажм
 msgstr ""
 
 msgid "Ввести токен"
+msgstr ""
+
+msgid "Вернуть прокси в активный пул?"
 msgstr ""
 
 msgid ""
@@ -242,6 +259,15 @@ msgstr ""
 msgid "Ещё в магазинах вне вашей области: {count}"
 msgstr ""
 
+msgid "Заблокирован"
+msgstr ""
+
+msgid "Заблокировать"
+msgstr ""
+
+msgid "Заблокировать прокси? Назначенные боты будут отвязаны."
+msgstr ""
+
 msgid "Заказы"
 msgstr ""
 
@@ -278,6 +304,9 @@ msgid "Истёкшие персональные права:"
 msgstr ""
 
 msgid "Истёкшие:"
+msgstr ""
+
+msgid "Карточка прокси устарела. Повторите действие."
 msgstr ""
 
 msgid "Конец периода"
@@ -338,6 +367,9 @@ msgstr ""
 msgid "Мой часовой пояс"
 msgstr ""
 
+msgid "На карантине"
+msgstr ""
+
 msgid "Нажмите на магазин, чтобы привязать или отвязать"
 msgstr ""
 
@@ -389,6 +421,12 @@ msgstr ""
 msgid "Не удалось удалить сообщение. Удалите его вручную и повторите ввод."
 msgstr ""
 
+msgid "Не удалось удалить сообщение. Удалите его вручную."
+msgstr ""
+
+msgid "Неверный адрес прокси. Допустимые схемы: socks5, socks4 и http."
+msgstr ""
+
 msgid "Неверный формат токена."
 msgstr ""
 
@@ -406,6 +444,9 @@ msgstr ""
 
 #, python-brace-format
 msgid "Некорректное значение: нужно целое число от {low} до {high}."
+msgstr ""
+
+msgid "Некорректное название прокси. Не вводите здесь URL."
 msgstr ""
 
 msgid "Некорректные данные."
@@ -481,6 +522,9 @@ msgid "Отзывы"
 msgstr ""
 
 msgid "Отмена"
+msgstr ""
+
+msgid "Отправьте URL прокси. Сообщение будет удалено перед сохранением."
 msgstr ""
 
 msgid "Отправьте новый токен"
@@ -607,11 +651,17 @@ msgstr ""
 msgid "Прокси"
 msgstr ""
 
+msgid "Прокси не найден."
+msgstr ""
+
 #, python-brace-format
 msgid "Прокси: {proxy}"
 msgstr ""
 
 msgid "Пропустить"
+msgstr ""
+
+msgid "Пул прокси пуст."
 msgstr ""
 
 msgid "Раздел в разработке"
@@ -746,6 +796,9 @@ msgstr ""
 msgid "Статистика"
 msgstr ""
 
+msgid "Статус прокси обновлён."
+msgstr ""
+
 #, python-brace-format
 msgid "Статус: {status}"
 msgstr ""
@@ -762,6 +815,9 @@ msgstr ""
 
 #, python-brace-format
 msgid "Такого местного времени нет ({timezone}). Выберите корректное время."
+msgstr ""
+
+msgid "Такой прокси уже добавлен."
 msgstr ""
 
 msgid "Такой сотрудник уже есть."
@@ -973,6 +1029,9 @@ msgid "▶️ Запустить"
 msgstr ""
 
 msgid "➕ Добавить бота"
+msgstr ""
+
+msgid "➕ Добавить прокси"
 msgstr ""
 
 msgid "🔄 Перезапустить"

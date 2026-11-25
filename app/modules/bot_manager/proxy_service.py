@@ -59,10 +59,13 @@ __all__ = [
     "NO_PROXY_AVAILABLE",
     "PROXY_EXISTS",
     "PROXY_NOT_FOUND",
+    "PROXY_STATUS_CHANGED",
     "FailureVerdict",
     "NoProxyAvailableError",
     "PermissionChecker",
     "ProxyPoolService",
+    "ProxySummary",
+    "ProxyVersion",
     "ProxyUrlChangedError",
     "StrikeResult",
     "ValidatedProxyAssignment",
@@ -75,12 +78,35 @@ INVALID_PROXY_URL: Final = "invalid_proxy_url"
 NO_PROXY_AVAILABLE: Final = "no_proxy_available"
 PROXY_EXISTS: Final = "proxy_exists"
 PROXY_NOT_FOUND: Final = "proxy_not_found"
+PROXY_STATUS_CHANGED: Final = "proxy_status_changed"
 _LAST_ERROR_MAX: Final = 500
 #: Re-reads of ``bots.proxy_id`` when it changes concurrently during ``assign_proxy``.
 _ASSIGN_ATTEMPTS: Final = 3
 
 VerdictKind = Literal["strike", "outage", "single_proxy", "deduplicated", "error"]
 _log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyVersion:
+    status: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ProxySummary:
+    id: UUID
+    label: str | None
+    masked_url: str
+    version: ProxyVersion
+    strike_count: int
+    bot_count: int
+    bot_limit: int
+    last_ban_at: datetime | None
+
+    @property
+    def status(self) -> str:
+        return self.version.status
 
 
 def _utcnow() -> datetime:
@@ -466,6 +492,37 @@ class ProxyPoolService:
         return count
 
     # --- manual management (P5) -------------------------------------------------------
+    async def require_manage(self, actor: int) -> None:
+        await self._require(actor)
+
+    def _summary(self, proxy: Proxy, count: int) -> ProxySummary:
+        return ProxySummary(
+            id=proxy.id,
+            label=proxy.label,
+            masked_url=mask_proxy_url(proxy.url),
+            version=ProxyVersion(proxy.status, proxy.updated_at),
+            strike_count=proxy.strike_count,
+            bot_count=count,
+            bot_limit=self._settings.proxy_max_bots_per_ip,
+            last_ban_at=proxy.last_ban_at,
+        )
+
+    async def list_proxies(self, actor: int) -> list[ProxySummary]:
+        await self._require(actor)
+        return [self._summary(proxy, count) for proxy, count in await self._repo.list_with_load()]
+
+    async def get_proxy(self, proxy_id: UUID, actor: int) -> ProxySummary:
+        await self._require(actor)
+        row = await self._repo.get_with_load(proxy_id)
+        if row is None:
+            raise EntityNotFoundError("Proxy not found", code=PROXY_NOT_FOUND)
+        return self._summary(*row)
+
+    @staticmethod
+    def _check_version(proxy: Proxy, expected: ProxyVersion | None) -> None:
+        if expected is not None and expected != ProxyVersion(proxy.status, proxy.updated_at):
+            raise DomainError("Proxy changed since confirmation", code=PROXY_STATUS_CHANGED)
+
     async def add(self, url: str, label: str | None, actor: int) -> UUID:
         """Add a proxy; the URL is normalized (scheme/host lower-cased) before hashing."""
         await self._require(actor)
@@ -487,11 +544,14 @@ class ProxyPoolService:
             )
         return proxy.id
 
-    async def ban(self, proxy_id: UUID, actor: int) -> tuple[UUID, ...]:
+    async def ban(
+        self, proxy_id: UUID, actor: int, *, expected: ProxyVersion | None = None
+    ) -> tuple[UUID, ...]:
         """Manual ban; unbinds the bots and returns their ids."""
         await self._require(actor)
         async with self._transaction():
             proxy = await self._locked_proxy(proxy_id)
+            self._check_version(proxy, expected)
             if proxy.status == PROXY_STATUS_BANNED:
                 return ()
             before = proxy.status
@@ -507,11 +567,14 @@ class ProxyPoolService:
             )
         return released
 
-    async def activate(self, proxy_id: UUID, actor: int) -> None:
+    async def activate(
+        self, proxy_id: UUID, actor: int, *, expected: ProxyVersion | None = None
+    ) -> None:
         """Manual return to ACTIVE; resets ``strike_count``."""
         await self._require(actor)
         async with self._transaction():
             proxy = await self._locked_proxy(proxy_id)
+            self._check_version(proxy, expected)
             if proxy.status == PROXY_STATUS_ACTIVE and proxy.strike_count == 0:
                 return
             before = {"status": proxy.status, "strike_count": proxy.strike_count}

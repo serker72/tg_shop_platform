@@ -28,14 +28,22 @@ from app.modules.bot_manager.models import Bot, Proxy
 from app.modules.bot_manager.proxy_health import ProxyHealthTracker, strike_key
 from app.modules.bot_manager.proxy_repository import ProxyRepository
 from app.modules.bot_manager.proxy_service import (
+    PROXY_NOT_FOUND,
+    PROXY_STATUS_CHANGED,
     NoProxyAvailableError,
     ProxyPoolService,
+    ProxyVersion,
     proxy_url_hash,
 )
 from app.modules.bot_manager.security import token_hash
 from app.modules.iam.permissions import SEED_PERMISSION_SLUGS
 from app.modules.iam.superuser import SuperuserInstaller
-from app.shared_kernel.domain.exceptions import EntityAlreadyExistsError, PermissionDeniedError
+from app.shared_kernel.domain.exceptions import (
+    DomainError,
+    EntityAlreadyExistsError,
+    EntityNotFoundError,
+    PermissionDeniedError,
+)
 from tests.integration.conftest import Query
 from tests.integration.conftest import run_alembic as _alembic
 from tests.integration.test_iam_models import _tenant
@@ -400,6 +408,84 @@ async def test_manual_add_ban_activate(factory: Any, redis: Any) -> None:
     )
     assert [r[0] for r in audit] == ["proxy.add", "proxy.ban", "proxy.activate"]
     assert all(r[1] == ACTOR and "secret" not in r[2] for r in audit)
+
+
+async def test_proxy_reads_require_permission_and_return_masked_live_load(
+    factory: Any, redis: Any
+) -> None:
+    pool = Pool(factory, redis, _settings())
+    perms = _Allow()
+    (other, deleted), (live, soft_deleted, unbound, elsewhere) = await _seed(factory, 2, 4)
+    url = "socks5://fixture-login:fixture-pass@proxy.invalid:1080"
+    proxy = await pool.call("add", url, "Fixture proxy", ACTOR, perms=perms)
+    await pool.sql("UPDATE proxies SET is_deleted = true WHERE id = :p", p=deleted)
+    await pool.sql(
+        "UPDATE bots SET proxy_id = :p WHERE id IN (:a, :b)", p=proxy, a=live, b=soft_deleted
+    )
+    await pool.sql("UPDATE bots SET is_deleted = true WHERE id = :b", b=soft_deleted)
+    await pool.sql("UPDATE bots SET proxy_id = :p WHERE id = :b", p=other, b=elsewhere)
+
+    with pytest.raises(PermissionDeniedError):
+        await pool.call("list_proxies", ACTOR, perms=_Deny())
+    for proxy_id in (proxy, deleted, uuid.uuid4()):
+        with pytest.raises(PermissionDeniedError):
+            await pool.call("get_proxy", proxy_id, ACTOR, perms=_Deny())
+    with pytest.raises(EntityNotFoundError) as exc:
+        await pool.call("get_proxy", deleted, ACTOR, perms=perms)
+    assert exc.value.code == PROXY_NOT_FOUND
+
+    listed = {row.id: row for row in await pool.call("list_proxies", ACTOR, perms=perms)}
+    assert {key: row.bot_count for key, row in listed.items()} == {other: 1, proxy: 1}
+    assert await pool.sql("SELECT proxy_id FROM bots WHERE id = :b", b=unbound) == [(None,)]
+    card = await pool.call("get_proxy", proxy, ACTOR, perms=perms)
+    assert card == listed[proxy]
+    assert (card.label, card.bot_limit, card.masked_url) == (
+        "Fixture proxy",
+        2,
+        "socks5://proxy.invalid:1080",
+    )
+    for dto in (*listed.values(), card):
+        assert not hasattr(dto, "url")
+        assert "fixture-login" not in repr(dto) and "fixture-pass" not in repr(dto)
+    assert perms.slugs == ["proxies.manage"] * 4
+
+
+@pytest.mark.parametrize(("method", "status"), [("ban", "active"), ("activate", "quarantine")])
+@pytest.mark.parametrize("change", ["status", "updated_at"])
+async def test_manual_confirmation_rechecks_row_version_before_mutating(
+    factory: Any, redis: Any, method: str, status: str, change: str
+) -> None:
+    pool = Pool(factory, redis, _settings())
+    perms = _Allow()
+    (proxy,), (bot,) = await _seed(factory, 1, 1, strikes=[1])
+    await pool.sql("UPDATE proxies SET status = :status WHERE id = :p", status=status, p=proxy)
+    await pool.sql("UPDATE bots SET proxy_id = :p WHERE id = :b", p=proxy, b=bot)
+    async with factory() as session:
+        service = ProxyPoolService(session, pool.settings, pool.tracker, permissions=perms)
+        # Keep an actual stale ORM row in this session across the other transaction.
+        cached = await session.get(Proxy, proxy)
+        assert cached is not None
+        expected = (await service.get_proxy(proxy, ACTOR)).version
+        await session.commit()
+        if change == "status":
+            newer = ProxyVersion("banned", expected.updated_at)
+        else:
+            newer = ProxyVersion(status, expected.updated_at + timedelta(seconds=1))
+        await pool.sql(
+            "UPDATE proxies SET status = :status, updated_at = :moment WHERE id = :p",
+            status=newer.status,
+            moment=newer.updated_at,
+            p=proxy,
+        )
+        assert ProxyVersion(cached.status, cached.updated_at) == expected
+        with pytest.raises(DomainError) as exc:
+            await getattr(service, method)(proxy, ACTOR, expected=expected)
+        assert exc.value.code == PROXY_STATUS_CHANGED
+
+    card = await pool.call("get_proxy", proxy, ACTOR, perms=perms)
+    assert card.version == newer
+    assert (card.strike_count, card.bot_count, card.last_ban_at) == (1, 1, None)
+    assert await pool.sql("SELECT action FROM audit_logs WHERE entity_id = :p", p=proxy) == []
 
 
 async def test_release_strike_only_by_owner(redis: Any) -> None:

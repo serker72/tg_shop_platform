@@ -21,9 +21,11 @@ from aiogram_dialog.widgets.text import Format
 from app.core.i18n import gettext as _
 from app.entrypoints.master_bot.texts import Texts
 from app.modules.bot_manager.presentation.tg_master import bots_dialog
-from app.modules.bot_manager.presentation.tg_master.states import BotsSG
+from app.modules.bot_manager.presentation.tg_master.proxies import proxies_dialog
+from app.modules.bot_manager.presentation.tg_master.states import BotsSG, ProxiesSG
 from app.modules.iam.permissions import (
     LOGS_VIEW,
+    PROXIES_MANAGE,
     ROLES_MANAGE,
     SETTINGS_MANAGE,
     TENANTS_VIEW_ALL,
@@ -54,6 +56,7 @@ SECTION_PERMISSIONS: Final[dict[str, tuple[str, ...]]] = {
     "roles": (ROLES_MANAGE,),
     "settings": (SETTINGS_MANAGE,),
     "logs": (LOGS_VIEW,),
+    "proxies": (PROXIES_MANAGE,),
 }
 MENU_PERMISSIONS: Final = frozenset(s for slugs in SECTION_PERMISSIONS.values() for s in slugs)
 _SHOP_SECTIONS: Final = frozenset({"shops"})
@@ -64,6 +67,7 @@ _SECTION_DIALOGS: Final[dict[str, State]] = {
     "roles": RolesSG.list,
     "settings": SettingsSG.main,
     "logs": LogsSG.list,
+    "proxies": ProxiesSG.list,
 }
 
 
@@ -93,6 +97,7 @@ async def main_menu_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict
         btn_roles=Texts.btn_roles(),
         btn_settings=Texts.btn_settings(),
         btn_logs=Texts.btn_logs(),
+        btn_proxies=_("Прокси"),
         btn_timezone=_("Мой часовой пояс"),
         can_timezone=has_panel_access(snapshot),
     )
@@ -148,16 +153,20 @@ async def _start(message: Message, dialog_manager: DialogManager) -> None:
     await dialog_manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
 
 
-async def _outside_token_input(message: Message, **data: Any) -> bool:
+async def _outside_secret_input(message: Message, **data: Any) -> bool:
     # The intent middleware loads the context before filters run; the manager is
     # injected later, and aiogram's raw FSM state is not the dialog state.
     context = data.get(CONTEXT_KEY)
-    return context is None or context.state not in (BotsSG.add_token, BotsSG.replace_token)
+    return context is None or context.state not in (
+        BotsSG.add_token,
+        BotsSG.replace_token,
+        ProxiesSG.add_url,
+    )
 
 
 def build_menu_router() -> Router:
     router = Router(name="master_bot.menu")
-    router.message.register(_start, CommandStart(), _outside_token_input)
+    router.message.register(_start, CommandStart(), _outside_secret_input)
     router.include_router(build_main_menu_dialog())
     router.include_router(tenants_dialog())
     router.include_router(staff_dialog())
@@ -167,4 +176,5 @@ def build_menu_router() -> Router:
     router.include_router(settings_dialog())
     router.include_router(logs_dialog())
     router.include_router(bots_dialog())
+    router.include_router(proxies_dialog())
     return router

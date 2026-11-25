@@ -12,9 +12,14 @@ from typing import Any, Final, Protocol
 
 import structlog
 from aiogram import BaseMiddleware, Bot
+from aiogram.fsm.storage.base import BaseEventIsolation, BaseStorage
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import Chat, TelegramObject, Update, User
+from aiogram_dialog.context.storage import StorageProxy
 
+from app.core.i18n import gettext as _
 from app.entrypoints.master_bot.texts import Texts
+from app.modules.bot_manager.presentation.tg_master.states import ProxiesSG
 from app.modules.iam.permissions import SETTINGS_MANAGE
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.events import ActivityEvent
@@ -114,8 +119,11 @@ class AuthMiddleware(BaseMiddleware):
 class MaintenanceMiddleware(BaseMiddleware):
     """Maintenance on: stub for everyone except superuser and ``settings.manage`` (Q4)."""
 
-    def __init__(self, gate: MaintenanceFlag) -> None:
+    def __init__(
+        self, gate: MaintenanceFlag, dialog_isolation: BaseEventIsolation | None = None
+    ) -> None:
         self._gate = gate
+        self._dialog_isolation = dialog_isolation or SimpleEventIsolation()
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         snapshot: PermissionSnapshot | None = data.get(SNAPSHOT_KEY)
@@ -124,8 +132,62 @@ class MaintenanceMiddleware(BaseMiddleware):
         if snapshot.decide(SETTINGS_MANAGE).allowed:  # superuser included
             return await handler(event, data)
         data[MAINTENANCE_BLOCKED_KEY] = True
-        await _send_stub(event, data.get("bot"), Texts.maintenance())
+        text = Texts.maintenance()
+        if await self._delete_blocked_proxy_input(event, data) is False:
+            text += "\n\n" + _("Не удалось удалить сообщение. Удалите его вручную.")
+        await _send_stub(event, data.get("bot"), text)
         return None
+
+    async def _delete_blocked_proxy_input(
+        self, event: TelegramObject, data: dict[str, Any]
+    ) -> bool | None:
+        """True if deleted, False on deletion failure, None outside a confirmed URL step."""
+        message = event.message if isinstance(event, Update) else None
+        bot: Bot | None = data.get("bot")
+        user: User | None = data.get("event_from_user")
+        storage: BaseStorage | None = data.get("fsm_storage")
+        if (
+            message is None
+            or bot is None
+            or user is None
+            or message.from_user is None
+            or storage is None
+            or message.chat.type != "private"
+            or message.chat.id != user.id
+            or message.from_user.id != user.id
+            or message.business_connection_id is not None
+        ):
+            return None
+        # aiogram-dialog has not loaded CONTEXT_KEY yet. Read the private chat's
+        # default stack under the same lock as the dialog router.
+        reader = StorageProxy(
+            storage=storage,
+            events_isolation=self._dialog_isolation,
+            bot=bot,
+            chat_id=message.chat.id,
+            user_id=user.id,
+            thread_id=message.message_thread_id if message.is_topic_message else None,
+            business_connection_id=None,
+            state_groups={ProxiesSG.__name__: ProxiesSG},
+        )
+        try:
+            try:
+                stack = await reader.load_stack()
+                if not stack.intents:
+                    return None
+                context = await reader.load_context(stack.intents[-1])
+            except Exception:
+                # Missing, unknown or unreadable context is not permission to delete.
+                return None
+            if context.stack_id != stack.id or context.state != ProxiesSG.add_url:
+                return None
+            try:
+                return await bot.delete_message(message.chat.id, message.message_id)
+            except Exception:
+                # Never log this exception or the message in the secret-input path.
+                return False
+        finally:
+            await reader.unlock()  # type: ignore[no-untyped-call]
 
 
 async def _send_stub(event: TelegramObject, bot: Bot | None, text: str) -> None:

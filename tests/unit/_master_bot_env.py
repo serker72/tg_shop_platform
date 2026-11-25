@@ -254,6 +254,7 @@ class Env:
         filter_options: Any | None = None,
         master_telegram_bot_id: int | None = None,
         bot_control_service: Any | None = None,
+        proxy_pool_service: Any | None = None,
         click_log: Any | None = None,
         default_timezone: str = "UTC",
     ) -> None:
@@ -308,6 +309,7 @@ class Env:
                 settings_row, "file_logs_retention_days", v
             ),
         )
+        from app.modules.bot_manager.proxy_service import ProxyPoolService
         from app.modules.bot_manager.service import BotControlService
         from app.modules.logging.presentation.tg_master.logs import StaffTimezoneReader
         from app.shared_kernel.timezones import effective_staff_timezone
@@ -319,6 +321,7 @@ class Env:
         container = FakeContainer(
             {
                 BotControlService: bot_control_service,
+                ProxyPoolService: proxy_pool_service,
                 TenantAdminService: self.tenants,
                 UserAdminService: self.user_service,
                 AccessAdminService: self.access,

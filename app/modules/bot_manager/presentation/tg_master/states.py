@@ -10,4 +10,12 @@ class BotsSG(StatesGroup):
     confirm = State()
 
 
-__all__ = ["BotsSG"]
+class ProxiesSG(StatesGroup):
+    list = State()
+    card = State()
+    add_label = State()
+    add_url = State()
+    confirm = State()
+
+
+__all__ = ["BotsSG", "ProxiesSG"]

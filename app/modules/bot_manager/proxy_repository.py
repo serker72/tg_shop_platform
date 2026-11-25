@@ -46,6 +46,19 @@ class ProxyRepository:
             stmt = _locked(stmt)
         return (await self._session.scalars(stmt)).one_or_none()
 
+    async def list_with_load(self) -> list[tuple[Proxy, int]]:
+        """All live rows (all statuses) and their loads in one SQL statement."""
+        stmt = (
+            select(Proxy, _load())
+            .where(Proxy.is_deleted.is_(false()))
+            .order_by(Proxy.created_at, Proxy.id)
+        )
+        return list((await self._session.execute(stmt)).tuples())
+
+    async def get_with_load(self, proxy_id: UUID) -> tuple[Proxy, int] | None:
+        stmt = select(Proxy, _load()).where(Proxy.id == proxy_id, Proxy.is_deleted.is_(false()))
+        return (await self._session.execute(stmt)).tuples().one_or_none()
+
     async def by_url_hash(self, url_hash: str) -> Proxy | None:
         return (
             await self._session.scalars(select(Proxy).where(Proxy.url_hash == url_hash))

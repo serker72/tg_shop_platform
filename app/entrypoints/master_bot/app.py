@@ -23,6 +23,7 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.fsm.storage.base import DefaultKeyBuilder
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import User
 from aiogram.utils.i18n import ConstI18nMiddleware
@@ -132,10 +133,11 @@ def build_dispatcher(
         dispatcher.update.outer_middleware(ConstI18nMiddleware(DEFAULT_LOCALE, i18n))
     dispatcher.update.outer_middleware(AuthMiddleware(loader, sync))
     dispatcher.update.outer_middleware(ClickLogMiddleware(activity, telegram_bot_id))
-    dispatcher.update.outer_middleware(MaintenanceMiddleware(gate))
+    dialog_isolation = SimpleEventIsolation()
+    dispatcher.update.outer_middleware(MaintenanceMiddleware(gate, dialog_isolation))
     dispatcher.include_router(build_menu_router())
     install_unique_intent_ids()
-    setup_dialogs(dispatcher)
+    setup_dialogs(dispatcher, events_isolation=dialog_isolation)
     setup_dishka(container=container, router=dispatcher, auto_inject=True)
     return dispatcher
 
