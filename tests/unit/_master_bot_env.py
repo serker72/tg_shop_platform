@@ -255,6 +255,7 @@ class Env:
         master_telegram_bot_id: int | None = None,
         bot_control_service: Any | None = None,
         click_log: Any | None = None,
+        default_timezone: str = "UTC",
     ) -> None:
         self.snapshot = snapshot
         self.store: dict[UUID, SimpleNamespace] = {t.id: t for t in tenants or []}
@@ -308,6 +309,12 @@ class Env:
             ),
         )
         from app.modules.bot_manager.service import BotControlService
+        from app.modules.logging.presentation.tg_master.logs import StaffTimezoneReader
+        from app.shared_kernel.timezones import effective_staff_timezone
+
+        async def read_staff_timezone(actor: int) -> str:
+            user = await self.queries.user(actor)
+            return effective_staff_timezone(getattr(user, "timezone", None), default_timezone)
 
         container = FakeContainer(
             {
@@ -320,6 +327,7 @@ class Env:
                 IamAdminQueries: self.queries,
                 SystemSettingsService: self.system,
                 ActivityQueryRepository: activity_repository,
+                StaffTimezoneReader: StaffTimezoneReader(read_staff_timezone),
                 ExportService: export_service,
                 ActivityFilterOptions: filter_options,
             }

@@ -28,8 +28,10 @@ def test_activity_format_uses_file_formatter() -> None:
     )
     assert "bot=1" in line and "action=OPEN" in line
     row = _row(1)
-    assert export_module.format_export_line(row) == (
-        format_line(export_module._event(row)) + f" | event_id={row.activity.id}"
+    assert export_module.format_export_line(row, "UTC") == (
+        format_line(export_module._event(row))
+        + f" | local_at={row.activity.created_at.isoformat()} | timezone=UTC"
+        + f" | event_id={row.activity.id}"
     )
 
 
@@ -38,7 +40,7 @@ def test_export_limits_and_threshold_constants() -> None:
     assert GZIP_THRESHOLD == 45 * 1024 * 1024
 
 
-def _row(number: int) -> ActivityRow:
+def _row(number: int, created_at: datetime | None = None) -> ActivityRow:
     return ActivityRow(
         activity=cast(
             UserActivity,
@@ -67,7 +69,7 @@ def _row(number: int) -> ActivityRow:
                 screen_to=None,
                 metadata_=None,
                 result="ok",
-                created_at=datetime.now(UTC),
+                created_at=created_at if created_at is not None else datetime.now(UTC),
             ),
         )
     )
@@ -91,6 +93,58 @@ class _Repository:
         yield SimpleNamespace(partitions=partitions)
 
 
+@pytest.mark.req("R-II.17", "R-II.6")
+@pytest.mark.asyncio
+async def test_txt_preserves_utc_prefix_and_distinguishes_both_dst_fold_instants(
+    tmp_path: Path,
+) -> None:
+    first = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    second = datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+    rows = [_row(1, first), _row(2, second)]
+    result = await export_module.export_txt(
+        ActivityFilter(),
+        "oldest",
+        repository=cast(ActivityQueryRepository, _Repository(rows)),
+        logs_dir=tmp_path,
+        scope=ActivityScope(frozenset(), all_tenants=True),
+        timezone="Europe/Berlin",
+    )
+    assert result.read_text(encoding="utf-8").splitlines() == [
+        "2026-10-25 00:30:00 | bot=1 | user=1 | username=@user | action=OPEN | result=ok"
+        f" | local_at=2026-10-25T02:30:00+02:00 | timezone=Europe/Berlin | event_id={UUID(int=1)}",
+        "2026-10-25 01:30:00 | bot=2 | user=2 | username=@user | action=OPEN | result=ok"
+        f" | local_at=2026-10-25T02:30:00+01:00 | timezone=Europe/Berlin | event_id={UUID(int=2)}",
+    ]
+
+
+@pytest.mark.req("R-II.17", "R-II.6")
+@pytest.mark.parametrize(
+    ("zone", "utc_iso"),
+    [("Asia/Tokyo", "9999-12-31T16:00:00+00:00"), ("Etc/GMT+5", "0001-01-01T00:00:00+00:00")],
+    ids=["upper-overflow", "lower-overflow"],
+)
+def test_export_line_explicitly_displays_utc_when_local_projection_overflows(
+    zone: str, utc_iso: str
+) -> None:
+    created_at = datetime.fromisoformat(utc_iso)
+    row = _row(1, created_at)
+    # Use the existing formatter as the legacy prefix contract, including year 1 padding.
+    prefix = format_line(
+        ActivityEvent(
+            telegram_bot_id=1,
+            telegram_user_id=1,
+            username="user",
+            action_type="OPEN",
+            result="ok",
+            created_at=created_at,
+        )
+    )
+    assert export_module.format_export_line(row, zone) == (
+        f"{prefix} | local_at={utc_iso} | timezone={zone} | display_timezone=UTC"
+        f" | event_id={UUID(int=1)}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_export_stops_at_max_rows_and_cleans_raw_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -102,6 +156,7 @@ async def test_export_stops_at_max_rows_and_cleans_raw_file(
         repository=cast(ActivityQueryRepository, repository),
         logs_dir=tmp_path,
         scope=ActivityScope(frozenset(), all_tenants=True),
+        timezone="UTC",
     )
     assert result.suffix == ".txt"
     assert repository.calls == 1
@@ -123,6 +178,7 @@ async def test_export_gzips_above_threshold_and_removes_source(
         repository=cast(ActivityQueryRepository, _Repository([_row(1)])),
         logs_dir=tmp_path,
         scope=ActivityScope(frozenset(), all_tenants=True),
+        timezone="UTC",
     )
     assert result.suffix == ".gz"
     assert result.exists()
@@ -147,6 +203,7 @@ async def test_export_gzip_failure_cleans_partial_files(
             repository=cast(ActivityQueryRepository, _Repository([_row(1)])),
             logs_dir=tmp_path,
             scope=ActivityScope(frozenset(), all_tenants=True),
+            timezone="UTC",
         )
     assert list((tmp_path / "system" / "tmp").iterdir()) == []
 
@@ -168,6 +225,7 @@ async def test_export_failure_cleans_temporary_file(tmp_path: Path) -> None:
             repository=cast(ActivityQueryRepository, FailingRepository()),
             logs_dir=tmp_path,
             scope=ActivityScope(frozenset(), all_tenants=True),
+            timezone="UTC",
         )
     assert list((tmp_path / "system" / "tmp").iterdir()) == []
 

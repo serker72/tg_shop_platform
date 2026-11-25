@@ -19,6 +19,7 @@ from app.modules.logging.query import (
     ActivityScope,
     Order,
 )
+from app.modules.logging.time_display import project_for_display
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -59,8 +60,13 @@ def _event(row: ActivityRow) -> ActivityEvent:
     )
 
 
-def format_export_line(row: ActivityRow) -> str:
-    return f"{format_line(_event(row))} | event_id={row.activity.id}"
+def format_export_line(row: ActivityRow, timezone: str) -> str:
+    shown_at, utc_fallback = project_for_display(row.activity.created_at, timezone)
+    display_timezone = " | display_timezone=UTC" if utc_fallback else ""
+    return (
+        f"{format_line(_event(row))} | local_at={shown_at.isoformat()} | timezone={timezone}"
+        f"{display_timezone} | event_id={row.activity.id}"
+    )
 
 
 async def export_txt(
@@ -70,6 +76,7 @@ async def export_txt(
     repository: ActivityQueryRepository,
     logs_dir: str | Path,
     scope: ActivityScope,
+    timezone: str,
     audit: Callable[[], Awaitable[None]] | None = None,
 ) -> Path:
     if scope is None:
@@ -91,7 +98,7 @@ async def export_txt(
                 async for batch in rows.partitions():
                     await asyncio.to_thread(
                         stream.writelines,
-                        [format_export_line(ActivityRow(row)) + "\n" for row in batch],
+                        [format_export_line(ActivityRow(row), timezone) + "\n" for row in batch],
                     )
         finally:
             await asyncio.to_thread(stream.close)
@@ -145,7 +152,13 @@ class ExportService:
                 await self.audit_logger.record(session, event)
 
     async def export_txt(
-        self, actor: int, filter: ActivityFilter, order: Order, *, scope: ActivityScope
+        self,
+        actor: int,
+        filter: ActivityFilter,
+        order: Order,
+        *,
+        scope: ActivityScope,
+        timezone: str,
     ) -> Path:
         await self._record_audit(
             AuditEvent(
@@ -159,6 +172,7 @@ class ExportService:
                 repository=self.repository,
                 logs_dir=self.logs_dir,
                 scope=scope,
+                timezone=timezone,
             )
         except Exception as error:
             await self._record_audit(

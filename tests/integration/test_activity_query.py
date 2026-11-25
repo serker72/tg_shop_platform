@@ -1,7 +1,7 @@
 """Integration coverage for the bounded activity query and PostgreSQL plan."""
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -17,6 +17,7 @@ from app.modules.logging.export import export_txt
 from app.modules.logging.filter_options import ActivityFilterOptions
 from app.modules.logging.models import UserActivity
 from app.modules.logging.query import ActivityFilter, ActivityQueryRepository, ActivityScope
+from app.shared_kernel.timezones import to_utc
 from tests.integration.test_iam_models import _tenant
 
 pytestmark = [pytest.mark.integration, pytest.mark.req("R-II.6")]
@@ -277,7 +278,9 @@ async def test_activity_scope_keyset_tenants_master_and_both_orders(
     assert [len(batch) for batch in batches] == [20, 2]
     assert [ident for batch in batches for ident in batch] == ids
 
-    exported = await export_txt(window, repository=repo, logs_dir=tmp_path, scope=scope)
+    exported = await export_txt(
+        window, repository=repo, logs_dir=tmp_path, scope=scope, timezone="UTC"
+    )
     lines = exported.read_text(encoding="utf-8").splitlines()
     assert [line.rsplit(" | ", 1)[-1] for line in lines] == [f"event_id={ident}" for ident in ids]
     assert await repo.count(window, scope=ActivityScope(frozenset({allowed}), 777)) == 21
@@ -317,6 +320,46 @@ async def test_activity_scope_keyset_tenants_master_and_both_orders(
         scope=ActivityScope(frozenset({allowed}), master_telegram_bot_id=777),
     )
     assert all(item.activity.telegram_bot_id != 777 for item in without_master.items)
+
+
+@pytest.mark.req("R-II.17")
+async def test_local_range_crosses_utc_month_with_same_half_open_count_list_and_txt(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    boundary = datetime(now.year + (now.month == 12), now.month % 12 + 1, 1, tzinfo=UTC)
+    zone = "Asia/Tokyo"
+    local_nine = datetime(boundary.year, boundary.month, 1, 9)
+    tick = timedelta(microseconds=1)
+    start = to_utc(local_nine - timedelta(seconds=1), zone)
+    end = to_utc(local_nine + timedelta(seconds=1), zone)
+    assert (start, end) == (boundary - timedelta(seconds=1), boundary + timedelta(seconds=1))
+
+    shop = uuid4()
+    rows = [
+        UserActivity(
+            id=uuid4(), tenant_id=shop, telegram_bot_id=9000, created_at=moment, action_type="CLICK"
+        )
+        for moment in (start - tick, start, boundary - tick, boundary, end - tick, end)
+    ]
+    session.add_all(rows)
+    await session.flush()
+    expected = rows[1:-1]
+    window = ActivityFilter(start_at=start, end_at=end)
+    scope = ActivityScope(frozenset({shop}))
+    repo = ActivityQueryRepository(session)
+
+    page = await repo.search(window, "oldest", scope=scope)
+    assert page.total == await repo.count(window, scope=scope) == len(expected)
+    assert [(item.activity.id, item.activity.created_at) for item in page.items] == [
+        (row.id, row.created_at) for row in expected
+    ]
+    exported = await export_txt(
+        window, "oldest", repository=repo, logs_dir=tmp_path, scope=scope, timezone=zone
+    )
+    assert [
+        line.rsplit(" | ", 1)[-1] for line in exported.read_text(encoding="utf-8").splitlines()
+    ] == [f"event_id={row.id}" for row in expected]
 
 
 async def test_visitor_choices_use_shop_scope_before_pagination(session: AsyncSession) -> None:

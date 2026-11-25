@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-24 13:39+0300\n"
+"POT-Creation-Date: 2026-11-25 19:15+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -66,6 +66,9 @@ msgid "Активировать"
 msgstr ""
 
 msgid "Без изменений."
+msgstr ""
+
+msgid "Без смещения используется этот часовой пояс; можно указать смещение или Z."
 msgstr ""
 
 msgid "Бессрочно"
@@ -160,9 +163,6 @@ msgid "Выберите магазин."
 msgstr ""
 
 msgid "Выберите модуль."
-msgstr ""
-
-msgid "Выберите мой часовой пояс"
 msgstr ""
 
 msgid "Выберите последний день действия (до 23:59:59 UTC) или «Бессрочно»."
@@ -434,6 +434,10 @@ msgid "Нельзя выдать права, которых нет у вас с�
 msgstr ""
 
 msgid "Нельзя изменять самого себя."
+msgstr ""
+
+#, python-brace-format
+msgid "Неоднозначное местное время ({timezone}). Укажите числовое смещение UTC."
 msgstr ""
 
 msgid "Нет"
@@ -754,6 +758,10 @@ msgid "Суперпользователь"
 msgstr ""
 
 msgid "Суперпользователя нельзя изменить."
+msgstr ""
+
+#, python-brace-format
+msgid "Такого местного времени нет ({timezone}). Выберите корректное время."
 msgstr ""
 
 msgid "Такой сотрудник уже есть."

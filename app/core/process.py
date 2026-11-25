@@ -171,6 +171,7 @@ async def run_service(
     from app.core.observability.providers import ObservabilityProvider
     from app.core.observability.sentry import init_sentry
     from app.core.telemetry import init_telemetry, shutdown_telemetry
+    from app.entrypoints.master_bot.logs import MasterBotLogsProvider
     from app.modules.bot_manager.ioc import BotManagerProvider
     from app.modules.bot_manager.metrics import OutageState
     from app.modules.bot_manager.proxy_health import OutageMonitor
@@ -192,6 +193,7 @@ async def run_service(
         DatabaseProvider(),
         RedisProvider(),
         LoggingProvider(),
+        MasterBotLogsProvider(),
         ObservabilityProvider(),
         IamProvider(),
         BotManagerProvider(),

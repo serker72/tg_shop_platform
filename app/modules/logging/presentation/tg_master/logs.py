@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import UTC, datetime, timedelta
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from html import escape
 from typing import Any, cast
 from uuid import UUID
@@ -30,7 +32,13 @@ from app.modules.logging.query import (
     ActivityScope,
     Order,
 )
+from app.modules.logging.time_display import project_for_display
 from app.shared_kernel.presentation.tg_master.common import actor_id, resolve
+from app.shared_kernel.timezones import (
+    AmbiguousLocalTimeError,
+    NonexistentLocalTimeError,
+    to_utc,
+)
 
 from .states import LogsSG
 
@@ -45,11 +53,22 @@ CHOICES = {"shop", "bot", "staff", "visitor", "moderator"}
 EXAMPLES = {
     "uid": "123456789",
     "username": "@example",
-    "start_at": "2026-11-21 00:00Z",
-    "end_at": "2026-11-22 00:00Z",
+    "start_at": "2026-11-21 00:00",
+    "end_at": "2026-11-22 00:00",
     "action_type": "command",
 }
 PERIODS = {"24h": 1, "7d": 7, "30d": 30}
+DATE_FIELDS = ("start_at", "end_at")
+
+
+@dataclass(frozen=True, slots=True)
+class StaffTimezoneReader:
+    read: Callable[[int], Awaitable[str]]
+
+
+async def _staff_timezone(manager: DialogManager) -> str:
+    reader = await resolve(manager, StaffTimezoneReader)
+    return await reader.read(actor_id(manager))
 
 
 def _titles() -> dict[str, str]:
@@ -91,14 +110,18 @@ def _html(value: object, limit: int, encoded_limit: int) -> str:
     return "".join(parts)
 
 
-def _line(row: ActivityRow, master: int | None) -> str:
+def _line(row: ActivityRow, master: int | None, timezone: str) -> str:
     a = row.activity
     bot = _("Master") if a.telegram_bot_id == master else row.bot_name or a.telegram_bot_id
     user = ("@" + a.username.lstrip("@")) if a.username else a.telegram_user_id or "—"
     action = f"cmd: {a.button}" if a.action_type == "command" and a.button else a.action_type
+    shown_at, utc_fallback = project_for_display(a.created_at, timezone)
+    timestamp = (
+        f"{shown_at.isoformat(sep=' ')} UTC" if utc_fallback else shown_at.strftime("%d.%m %H:%M")
+    )
     return " | ".join(
         (
-            a.created_at.astimezone(UTC).strftime("%d.%m %H:%M"),
+            timestamp,
             _html(bot, 32, 64),
             _html(user, 32, 64),
             _html(action, 48, 88),
@@ -120,19 +143,27 @@ async def _require(manager: DialogManager) -> ActivityScope:
     )
 
 
+def _utc_bound(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.utcoffset() is None:
+        raise ValueError("expected an aware period bound")
+    return parsed.astimezone(UTC)
+
+
 def _dates(values: dict[str, Any]) -> tuple[datetime, datetime]:
-    now = datetime.now(UTC)
-    if values.get("period") == "custom":
-        start, end = (datetime.fromisoformat(values[k]) for k in ("start_at", "end_at"))
-    else:
-        start, end = now - timedelta(days=PERIODS[values.get("period", "24h")]), now
+    start, end = (_utc_bound(values[key]) for key in DATE_FIELDS)
     if start >= end:
         raise ValueError("invalid period")
     return start, end
 
 
 def _freeze(values: dict[str, Any]) -> dict[str, Any]:
-    start, end = _dates(values)
+    period = values.get("period", "24h")
+    if period == "custom":
+        start, end = _dates(values)
+    else:
+        end = datetime.now(UTC)
+        start = end - timedelta(days=PERIODS[period])
     return {**values, "start_at": start.isoformat(), "end_at": end.isoformat()}
 
 
@@ -229,28 +260,33 @@ async def _filter(
             "Посетитель и выбранный бот или магазин относятся к разным магазинам: "
             "пересечение пусто."
         )
-    return ActivityFilter(
-        start_at=datetime.fromisoformat(values["start_at"]),
-        end_at=datetime.fromisoformat(values["end_at"]),
-        **kwargs,
-    ), labels
+    start, end = _dates(values)
+    return ActivityFilter(start_at=start, end_at=end, **kwargs), labels
 
 
-def _period(values: dict[str, Any]) -> str:
-    if values.get("period") == "custom":
-        return (
-            " – ".join(str(values[k])[:16].replace("T", " ") for k in ("start_at", "end_at"))
-            + " UTC"
-        )
-    return {"24h": _("24 ч"), "7d": _("7 д"), "30d": _("30 д")}[values.get("period", "24h")]
+def _local_bound(value: str, timezone: str) -> str:
+    shown_at, utc_fallback = project_for_display(_utc_bound(value), timezone)
+    return shown_at.isoformat(sep=" ") + (" UTC" if utc_fallback else "")
 
 
-def _summary(values: dict[str, Any], labels: dict[str, str]) -> str:
+def _timezone_label(timezone: str) -> str:
+    return _("Часовой пояс: {timezone}").format(timezone=timezone)
+
+
+def _summary(values: dict[str, Any], labels: dict[str, str], timezone: str) -> str:
     titles = _titles()
-    entries = [(titles["period"], _period(values))]
+    period = values.get("period", "24h")
+    bounds = " – ".join(_local_bound(values[key], timezone) for key in DATE_FIELDS)
+    if period != "custom":
+        preset = {"24h": _("24 ч"), "7d": _("7 д"), "30d": _("30 д")}[period]
+        bounds = f"{preset} · {bounds}"
     titles.update(bot_kind=titles["bots"], visitor_shop=_("Магазин посетителя"))
-    entries.extend((titles[key], value) for key, value in labels.items() if key != "conflict")
-    lines = [f"{escape(title)}: {_html(value, 44, 90)}" for title, value in entries]
+    lines = [escape(_timezone_label(timezone)), f"{escape(titles['period'])}: {escape(bounds)}"]
+    lines.extend(
+        f"{escape(titles[key])}: {_html(value, 44, 90)}"
+        for key, value in labels.items()
+        if key != "conflict"
+    )
     if "conflict" in labels:
         lines.append(escape(labels["conflict"]))
     return "\n".join(lines)
@@ -297,6 +333,7 @@ async def logs_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     scope = await _require(manager)
     data = manager.dialog_data
     values = _applied(manager)
+    timezone = await _staff_timezone(manager)
     order = _order(data)
     header = f"<b>{_title()}</b>\n{escape(_order_label(order))}\n"
     sort_action = _sort_action(_opposite_order(order))
@@ -336,10 +373,10 @@ async def logs_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str,
     )
     if stale:
         data.update(next=None, prev=None)
-    rows = "\n".join(_line(row, scope.master_telegram_bot_id) for row in page.items) or _(
+    rows = "\n".join(_line(row, scope.master_telegram_bot_id, timezone) for row in page.items) or _(
         "Нет событий"
     )
-    screen = f"{header}{_summary(values, labels)}\n\n"
+    screen = f"{header}{_summary(values, labels, timezone)}\n\n"
     screen += f"{min(page_no, pages)}/{pages}\n{rows}"
     if stale:
         screen += "\n" + escape(_("Список изменился. Вернитесь на первую страницу."))
@@ -384,6 +421,9 @@ async def _editor_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
     if state == LogsSG.input:
         field = data["field"]
         current = data.get("input_period", {}).get(field, values.get(field))
+        timezone = await _staff_timezone(manager) if field in DATE_FIELDS else None
+        if timezone is not None and current is not None:
+            current = _local_bound(current, timezone)
         result["screen"] = escape(
             _("Введите {field}\nТекущее: {current}\nПример: {example}").format(
                 field=_titles()[field],
@@ -391,6 +431,11 @@ async def _editor_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
                 example=EXAMPLES[field],
             )
         )
+        if timezone is not None:
+            result["screen"] += "\n" + escape(_timezone_label(timezone))
+            result["screen"] += "\n" + escape(
+                _("Без смещения используется этот часовой пояс; можно указать смещение или Z.")
+            )
         return result
     tenant = None
     if "shop" in values or "bot" in values:
@@ -422,8 +467,9 @@ async def _editor_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
         raise ValueError("invalid category")
     result["screen"] = escape(_titles()[str(category)])
     try:
-        _validated, labels = await _filter(manager, _freeze(values), scope)
-        result["screen"] += "\n" + _summary(values, labels)
+        frozen = _freeze(values)
+        _validated, labels = await _filter(manager, frozen, scope)
+        result["screen"] += "\n" + _summary(frozen, labels, await _staff_timezone(manager))
     except (ValueError, KeyError):
         result["screen"] += "\n" + escape(_invalid())
     result.update({f"cat_{key}": key == category for key in CATEGORIES})
@@ -444,7 +490,7 @@ def _choice_tenant(data: dict[str, Any], draft: dict[str, Any], tenant: UUID | N
     return None
 
 
-def _parse_value(field: str, raw: str) -> str | int:
+def _parse_value(field: str, raw: str, timezone: str = "UTC") -> str | int:
     value = raw.strip()
     if field == "uid" and re.fullmatch(r"[0-9]{1,19}", value) and 0 < int(value) < 2**63:
         return int(value)
@@ -452,10 +498,14 @@ def _parse_value(field: str, raw: str) -> str | int:
         return value.removeprefix("@").lower()
     if field == "action_type" and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", value):
         return value
-    if field in ("start_at", "end_at"):
+    if field in DATE_FIELDS:
         parsed = datetime.fromisoformat(value)
         if parsed.utcoffset() is not None:
             return parsed.astimezone(UTC).isoformat()
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            return to_utc(parsed, timezone).isoformat()
     raise ValueError("invalid filter value")
 
 
@@ -469,13 +519,28 @@ def _clear(values: dict[str, Any], category: str) -> None:
 async def _input(message: Message, widget: MessageInput, manager: DialogManager) -> None:
     await _require(manager)
     field = manager.dialog_data["field"]
+    timezone = await _staff_timezone(manager) if field in DATE_FIELDS else "UTC"
     try:
-        value = _parse_value(field, message.text or "")
+        value = _parse_value(field, message.text or "", timezone)
+    except AmbiguousLocalTimeError:
+        await message.answer(
+            _("Неоднозначное местное время ({timezone}). Укажите числовое смещение UTC.").format(
+                timezone=timezone
+            )
+        )
+        return
+    except NonexistentLocalTimeError:
+        await message.answer(
+            _("Такого местного времени нет ({timezone}). Выберите корректное время.").format(
+                timezone=timezone
+            )
+        )
+        return
     except (ValueError, OverflowError):
         await message.answer(_invalid())
         return
     draft = _draft(manager)
-    if field in ("start_at", "end_at"):
+    if field in DATE_FIELDS:
         draft.update(manager.dialog_data.pop("input_period"))
         draft["period"] = "custom"
     draft[field] = value
@@ -556,10 +621,10 @@ async def _edit(callback: CallbackQuery, button: Button, manager: DialogManager)
         draft["period"] = key
     elif key in CATEGORIES[category] and key in EXAMPLES:
         data["field"] = key
-        if key in ("start_at", "end_at"):
+        if key in DATE_FIELDS:
             # Preserve the other bound exactly as displayed, without mutating draft on Cancel.
             dates = draft if draft.get("period") == "custom" else _freeze(draft)
-            data["input_period"] = {k: dates[k] for k in ("start_at", "end_at")}
+            data["input_period"] = {k: dates[k] for k in DATE_FIELDS}
         await manager.switch_to(LogsSG.input)
     elif key in CATEGORIES[category] and key in CHOICES:
         kind = key
@@ -613,7 +678,9 @@ async def _export(callback: CallbackQuery, button: Button, manager: DialogManage
         return
     service = await resolve(manager, ExportService)
     actor = actor_id(manager)
-    path = await service.export_txt(actor, f, _order(manager.dialog_data), scope=scope)
+    path = await service.export_txt(
+        actor, f, _order(manager.dialog_data), scope=scope, timezone=await _staff_timezone(manager)
+    )
     try:
         try:
             if callback.message is None:

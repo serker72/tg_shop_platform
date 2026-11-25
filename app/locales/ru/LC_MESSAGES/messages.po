@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-24 13:39+0300\n"
+"POT-Creation-Date: 2026-11-25 19:15+0300\n"
 "PO-Revision-Date: 2026-11-15 20:44+0300\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: ru\n"
@@ -74,6 +74,9 @@ msgstr ""
 
 msgid "Без изменений."
 msgstr ""
+
+msgid "Без смещения используется этот часовой пояс; можно указать смещение или Z."
+msgstr "Без смещения используется этот часовой пояс; можно указать смещение или Z."
 
 msgid "Бессрочно"
 msgstr ""
@@ -167,9 +170,6 @@ msgid "Выберите магазин."
 msgstr ""
 
 msgid "Выберите модуль."
-msgstr ""
-
-msgid "Выберите мой часовой пояс"
 msgstr ""
 
 msgid "Выберите последний день действия (до 23:59:59 UTC) или «Бессрочно»."
@@ -442,6 +442,10 @@ msgstr ""
 
 msgid "Нельзя изменять самого себя."
 msgstr ""
+
+#, python-brace-format
+msgid "Неоднозначное местное время ({timezone}). Укажите числовое смещение UTC."
+msgstr "Неоднозначное местное время ({timezone}). Укажите числовое смещение UTC."
 
 msgid "Нет"
 msgstr ""
@@ -763,6 +767,10 @@ msgstr ""
 msgid "Суперпользователя нельзя изменить."
 msgstr ""
 
+#, python-brace-format
+msgid "Такого местного времени нет ({timezone}). Выберите корректное время."
+msgstr "Такого местного времени нет ({timezone}). Выберите корректное время."
+
 msgid "Такой сотрудник уже есть."
 msgstr ""
 
@@ -1079,5 +1087,8 @@ msgstr ""
 #~ "2. Отправьте /newbot.\n"
 #~ "3. Укажите имя и username, оканчивающийся на bot.\n"
 #~ "4. Скопируйте токен и пришлите его сюда."
+#~ msgstr ""
+
+#~ msgid "Выберите мой часовой пояс"
 #~ msgstr ""
 

@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+from aiogram.methods import SendMessage, TelegramMethod
+from aiogram_dialog.test_tools.bot_client import FakeBot
 
 from app.modules.logging.filter_options import FilterOption
 from app.modules.logging.models import UserActivity
 from app.modules.logging.presentation.tg_master.logs import _line, _parse_value
 from app.modules.logging.query import ActivityQueryRepository, ActivityRow, ActivityScope, Page
-from tests.unit._master_bot_env import ACTOR, SUPER, VIEWER, Env
+from tests.unit._master_bot_env import ACTOR, SUPER, VIEWER, Env, _user
 
 
 def test_input_and_bounded_html() -> None:
@@ -30,9 +32,9 @@ def test_input_and_bounded_html() -> None:
         button="/start",
     )
     row = ActivityRow(a)
-    assert _line(row, 1) == "21.11 11:54 | Master | @name | cmd: /start"
+    assert _line(row, 1, "UTC") == "21.11 11:54 | Master | @name | cmd: /start"
     a.button = "<&" * 400
-    line = _line(row, None)
+    line = _line(row, None, "UTC")
     assert "<" not in line and "&lt;" in line and str(a.id) not in line
     assert len(line) * 12 < 3000
 
@@ -441,3 +443,191 @@ async def test_period_presets_custom_and_visible_input() -> None:
     cleared = repo.search.await_args.args[0]
     assert cleared.end_at - cleared.start_at == timedelta(hours=24)
     assert "Период: 24 ч" in env.text()
+
+
+@pytest.mark.req("R-II.17", "R-II.6")
+@pytest.mark.parametrize(
+    ("staff_zone", "effective_zone", "displayed_time", "start_hour"),
+    [
+        ("Europe/Berlin", "Europe/Berlin", "01.02 00:30", 23),
+        (None, "Asia/Tokyo", "01.02 08:30", 15),
+    ],
+    ids=["staff-overrides-default", "non-utc-default"],
+)
+async def test_local_range_display_and_applied_export(
+    tmp_path: Path,
+    staff_zone: str | None,
+    effective_zone: str,
+    displayed_time: str,
+    start_hour: int,
+) -> None:
+    actor, event_user = _user(ACTOR), _user(ACTOR + 1)
+    actor.timezone, event_user.timezone = staff_zone, "America/New_York"
+    created_at = datetime(2026, 1, 31, 23, 30, tzinfo=UTC)
+    activity = UserActivity(
+        id=uuid4(),
+        created_at=created_at,
+        telegram_bot_id=1,
+        telegram_user_id=event_user.telegram_user_id,
+        username="visitor",
+        action_type="click",
+    )
+    repo = AsyncMock()
+    repo.search.return_value = Page([ActivityRow(activity)], None, None, False, 1)
+    exporter = AsyncMock()
+    exported = tmp_path / "logs.txt"
+    exported.write_text("log", encoding="utf-8")
+    exporter.export_txt.return_value = exported
+    env = Env(
+        SUPER,
+        users=[actor, event_user],
+        default_timezone="Asia/Tokyo",
+        activity_repository=repo,
+        export_service=exporter,
+        master_telegram_bot_id=1,
+    )
+    await env.start()
+    if staff_zone is None:
+        await env.press("Пропустить")
+    await env.press("Логи")
+    zone_label = f"Часовой пояс: {effective_zone}"
+    assert zone_label in env.text()
+    assert f"{displayed_time} | Master | @visitor | click" in env.text()
+    assert activity.created_at is created_at
+
+    await env.press("Фильтры")
+    await env.press("✓ Период")
+    await env.press("Начало периода")
+    assert zone_label in env.text()
+    await env.send("2026-02-01 00:00")
+    await env.press("Конец периода")
+    await env.send("2026-02-01 10:00")
+    await env.press("Начало периода")
+    offset = "+01:00" if staff_zone else "+09:00"
+    assert f"Текущее: 2026-02-01 00:00:00{offset}" in env.text()
+    await env.press("Отмена")
+    await env.press("Назад")
+    repo.search.assert_awaited_once()
+    await env.press("Применить")
+    applied, order = repo.search.await_args.args[:2]
+    expected_start = datetime(2026, 1, 31, start_hour, tzinfo=UTC)
+    assert (applied.start_at, applied.end_at) == (
+        expected_start,
+        expected_start + timedelta(hours=10),
+    )
+    assert applied.start_at.tzinfo is UTC and applied.end_at.tzinfo is UTC
+    assert f"Период: 2026-02-01 00:00:00{offset} – 2026-02-01 10:00:00{offset}" in env.text()
+    scope = repo.search.await_args.kwargs["scope"]
+
+    # A valid but cancelled draft must not leak into the list or TXT export.
+    await env.press("Фильтры")
+    await env.press("✓ Период")
+    await env.press("Конец периода")
+    await env.send("2026-02-01 11:00")
+    await env.press("Назад")
+    await env.press("Отмена")
+    assert repo.search.await_args.args[:2] == (applied, order)
+    with patch.object(env.client.bot, "send_document", new=AsyncMock()) as send:
+        await env.press("Экспорт TXT")
+    send.assert_awaited_once()
+    exporter.export_txt.assert_awaited_once_with(
+        ACTOR, applied, order, scope=scope, timezone=effective_zone
+    )
+
+
+@pytest.mark.req("R-II.17", "R-II.6")
+@pytest.mark.parametrize(
+    ("invalid_local", "hint"),
+    [
+        ("2026-10-25 02:30", "Укажите числовое смещение UTC"),
+        ("2026-03-29 02:30", "Выберите корректное время"),
+    ],
+    ids=["fold", "gap"],
+)
+async def test_invalid_dst_input_preserves_draft_and_accepts_explicit_instants(
+    invalid_local: str, hint: str
+) -> None:
+    replies: list[str] = []
+
+    class ReplyBot(FakeBot):
+        async def __call__(
+            self, method: TelegramMethod[Any], request_timeout: int | None = None
+        ) -> Any:
+            if isinstance(method, SendMessage):
+                replies.append(method.text)
+                return
+            return await super().__call__(method, request_timeout)
+
+    staff = _user(ACTOR)
+    staff.timezone = "Europe/Berlin"
+    repo = AsyncMock()
+    repo.search.return_value = Page([], None, None, False, 0)
+    env = Env(SUPER, users=[staff], activity_repository=repo)
+    env.client.bot = ReplyBot()  # type: ignore[no-untyped-call]
+    await env.start()
+    await env.press("Логи")
+    await env.press("Фильтры")
+    await env.press("✓ Период")
+    await env.press("Начало периода")
+    await env.send("2026-10-25 02:30+02:00")
+    await env.press("Конец периода")
+    await env.send("2026-10-25 01:30Z")
+    draft_summary = "2026-10-25 02:30:00+02:00 – 2026-10-25 02:30:00+01:00"
+    assert draft_summary in env.text()
+
+    await env.press("Начало периода")
+    await env.client.send(invalid_local)
+    assert len(replies) == 1 and "Europe/Berlin" in replies[0] and hint in replies[0]
+    # The editor must stay open; cancelling the input must reveal the same draft.
+    await env.press("Отмена")
+    assert draft_summary in env.text()
+    repo.search.assert_awaited_once()
+    await env.press("Назад")
+    await env.press("Применить")
+    applied = repo.search.await_args.args[0]
+    assert applied.start_at == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    assert applied.end_at == datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+
+@pytest.mark.req("R-II.17", "R-II.6")
+@pytest.mark.parametrize(
+    ("zone", "start_iso"),
+    [("Asia/Tokyo", "9999-12-31T16:00:00Z"), ("Etc/GMT+5", "0001-01-01T00:00:00Z")],
+    ids=["upper-overflow", "lower-overflow"],
+)
+async def test_extreme_utc_start_bound_is_applied_and_displayed(zone: str, start_iso: str) -> None:
+    start = datetime.fromisoformat(start_iso)
+    end = start + timedelta(hours=6)
+    utc_label = start_iso.replace("T", " ").removesuffix("Z") + "+00:00 UTC"
+    staff = _user(ACTOR)
+    staff.timezone = zone
+    event = UserActivity(
+        id=uuid4(), created_at=start, telegram_bot_id=1, username="visitor", action_type="click"
+    )
+    repo = AsyncMock()
+    repo.search.side_effect = [
+        Page([], None, None, False, 0),
+        Page([ActivityRow(event)], None, None, False, 1),
+    ]
+    env = Env(SUPER, users=[staff], activity_repository=repo, master_telegram_bot_id=1)
+    await env.start()
+    await env.press("Логи")
+    await env.press("Фильтры")
+    await env.press("✓ Период")
+    await env.press("Начало периода")
+    await env.send(start_iso)
+    await env.press("Конец периода")
+    await env.send(end.isoformat())
+    await env.press("Начало периода")
+    assert f"Текущее: {utc_label}" in env.text()
+    await env.press("Отмена")
+    await env.press("Назад")
+    await env.press("Применить")
+
+    assert repo.search.await_count == 2
+    applied = repo.search.await_args.args[0]
+    assert (applied.start_at, applied.end_at) == (start, end)
+    assert applied.start_at.tzinfo is UTC and applied.end_at.tzinfo is UTC
+    assert f"Часовой пояс: {zone}" in env.text()
+    assert f"Период: {utc_label} – " in env.text()
+    assert f"{utc_label} | Master | @visitor | click" in env.text()

@@ -90,6 +90,14 @@ def _roundtrip_utc(local: datetime, zone: ZoneInfo) -> datetime | None:
     return None
 
 
+class AmbiguousLocalTimeError(ValueError):
+    """A local wall time identifies two instants."""
+
+
+class NonexistentLocalTimeError(ValueError):
+    """A local wall time falls in a timezone transition gap."""
+
+
 def to_utc(local_dt: datetime, timezone_id: str) -> datetime:
     """Convert wall time; reject gaps and folds unless a valid ZoneInfo fold is explicit."""
     zone = get_timezone(timezone_id)
@@ -109,8 +117,10 @@ def to_utc(local_dt: datetime, timezone_id: str) -> datetime:
         for fold in (0, 1)
         if (utc := _roundtrip_utc(local_dt.replace(tzinfo=zone, fold=fold), zone)) is not None
     }
-    if len(candidates) != 1:
-        raise ValueError("Ambiguous or nonexistent local time")
+    if not candidates:
+        raise NonexistentLocalTimeError("Ambiguous or nonexistent local time: gap")
+    if len(candidates) > 1:
+        raise AmbiguousLocalTimeError("Ambiguous or nonexistent local time: fold")
     return candidates.pop()
 
 
