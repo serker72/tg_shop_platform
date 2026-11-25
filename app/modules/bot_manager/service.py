@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -26,7 +27,12 @@ from app.modules.bot_manager.models import (
     Proxy,
 )
 from app.modules.bot_manager.proxy_repository import ProxyRepository
-from app.modules.bot_manager.proxy_service import NoProxyAvailableError, ProxyPoolService
+from app.modules.bot_manager.proxy_service import (
+    NoProxyAvailableError,
+    ProxyPoolService,
+    ProxyUrlChangedError,
+    ValidatedProxyAssignment,
+)
 from app.modules.bot_manager.publisher import BotCommandPublisher
 from app.modules.bot_manager.repository import BotRepository
 from app.modules.bot_manager.security import token_hash
@@ -174,31 +180,57 @@ class BotControlService:
             raise DomainError("No proxy available", code="no_proxy_available")
         return proxy
 
-    async def _get_me_with_proxy_retry(
-        self, token: str, *, current_id: UUID | None = None
-    ) -> tuple[User, Proxy | None]:
-        """Validate getMe, retrying bounded proxy-capacity races on another candidate."""
+    async def _add_with_proxy_retry(
+        self, token: str, save_bot: Callable[[User], Awaitable[Bot]]
+    ) -> Bot:
+        """Repeat getMe after a concurrent slot loss or URL change."""
+        if self.proxy_pool is None:
+            raise NoProxyAvailableError
         attempted: set[UUID] = set()
         for _ in range(3):
-            proxy = await self._proxy(current_id, exclude=attempted)
+            proxy = await self.proxy_pool.get_available_proxy(exclude=attempted)
             if proxy is None:
-                return await self._get_me(token, None), None
-            attempted.add(proxy.id)
+                break
+            proxy_id, url = proxy.id, proxy.url
+            attempted.add(proxy_id)
+            me = await self._get_me(token, url)
             try:
-                me = await self._get_me(token, proxy.url)
-                if self.proxy_pool is not None:
-                    async with self.session.begin_nested():
-                        await self.proxy_pool.lock_available_proxy(proxy.id)
-                return me, proxy
-            except NoProxyAvailableError:
-                # Another transaction may have filled the slot with this Telegram
-                # bot using a different token. Only live rows block addition.
+                return await self.proxy_pool.assign_proxy(
+                    ValidatedProxyAssignment(proxy_id, url, partial(save_bot, me))
+                )
+            except (NoProxyAvailableError, ProxyUrlChangedError) as exc:
+                if isinstance(exc, ProxyUrlChangedError):
+                    # The savepoint has rolled back; the same proxy can be picked again.
+                    attempted.remove(proxy_id)
+                # A concurrent add with a different token can still have the same Telegram ID.
+                # Only live rows block addition.
                 if await self.repo.by_telegram_bot_id(me.id) is not None:
                     raise EntityAlreadyExistsError(
                         "Bot already added", code="bot_already_exists"
                     ) from None
-                continue
-        raise DomainError("No proxy available", code="no_proxy_available")
+        raise NoProxyAvailableError
+
+    async def _save_unbound_bot(
+        self, tenant_id: UUID, token: str, digest: str, me: User
+    ) -> tuple[Bot, bool]:
+        existing = await self.repo.by_telegram_bot_id(me.id, include_deleted=True, for_update=True)
+        duplicate = await self.repo.by_token_hash(digest)
+        if (existing is not None and not existing.is_deleted) or (
+            duplicate is not None and duplicate is not existing
+        ):
+            raise EntityAlreadyExistsError("Bot already added", code="bot_already_exists")
+        bot = existing if existing is not None else Bot(telegram_bot_id=me.id)
+        bot.tenant_id, bot.username, bot.name = tenant_id, me.username, me.first_name
+        bot.encrypted_token, bot.token_hash = token, digest
+        bot.proxy_id = None
+        bot.is_active, bot.is_deleted = False, False
+        if existing is None:
+            bot.status = BOT_STATUS_STOPPED
+            bot.status_changed_at = datetime.now(UTC)
+            await self.repo.add(bot)
+        else:
+            await self.repo.set_status(bot, BOT_STATUS_STOPPED)
+        return bot, existing is not None
 
     async def add_bot(self, tenant_id: UUID, token: str, actor: int) -> Bot:
         async with self._transaction():
@@ -208,40 +240,26 @@ class BotControlService:
             known = await self.repo.by_token_hash(digest)
             if known is not None and not known.is_deleted:
                 raise EntityAlreadyExistsError("Bot already added", code="bot_already_exists")
+            restored = False
+
+            async def save_bot(me: User) -> Bot:
+                nonlocal restored
+                bot, restored = await self._save_unbound_bot(tenant_id, token, digest, me)
+                return bot
+
             if self.tenants_use_proxy:
                 try:
-                    me, proxy = await self._get_me_with_proxy_retry(token)
-                except DomainError as exc:
-                    if exc.code == "no_proxy_available":
-                        latest = await self.repo.by_token_hash(digest, refresh=True)
-                        if latest is not None and not latest.is_deleted:
-                            raise EntityAlreadyExistsError(
-                                "Bot already added", code="bot_already_exists"
-                            ) from None
+                    bot = await self._add_with_proxy_retry(token, save_bot)
+                except NoProxyAvailableError:
+                    latest = await self.repo.by_token_hash(digest, refresh=True)
+                    if latest is not None and not latest.is_deleted:
+                        raise EntityAlreadyExistsError(
+                            "Bot already added", code="bot_already_exists"
+                        ) from None
                     raise
             else:
-                proxy = None
-                me = await self._get_me(token, None)
-            existing = await self.repo.by_telegram_bot_id(
-                me.id, include_deleted=True, for_update=True
-            )
-            duplicate = await self.repo.by_token_hash(digest)
-            if (existing is not None and not existing.is_deleted) or (
-                duplicate is not None and duplicate is not existing
-            ):
-                raise EntityAlreadyExistsError("Bot already added", code="bot_already_exists")
-            bot = existing if existing is not None else Bot(telegram_bot_id=me.id)
-            bot.tenant_id, bot.username, bot.name = tenant_id, me.username, me.first_name
-            bot.encrypted_token, bot.token_hash = token, digest
-            bot.proxy_id = proxy.id if proxy else None
-            bot.is_active, bot.is_deleted = False, False
-            if existing is None:
-                bot.status = BOT_STATUS_STOPPED
-                bot.status_changed_at = datetime.now(UTC)
-                await self.repo.add(bot)
-            else:
-                await self.repo.set_status(bot, BOT_STATUS_STOPPED)
-            await self._audit("bot.added" if existing is None else "bot.restored", bot, actor)
+                bot = await save_bot(await self._get_me(token, None))
+            await self._audit("bot.restored" if restored else "bot.added", bot, actor)
         return bot
 
     async def _locked_bot(self, bot_id: UUID, actor: int, tenant_id: UUID | None) -> Bot:

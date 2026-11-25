@@ -4,13 +4,14 @@ import asyncio
 from collections.abc import Callable
 from contextvars import Context
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
 from faststream.exceptions import NackMessage, RejectMessage
-from faststream.rabbit import RabbitBroker
+from faststream.rabbit import RabbitBroker, RabbitMessage
 from pydantic import ValidationError
 
 from app.entrypoints.bot_worker.commands import (
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.req("R-II.8")
 
 
 async def test_start_fanout_carries_traceparent() -> None:
-    from faststream.rabbit import RabbitMessage, TestRabbitBroker
+    from faststream.rabbit import TestRabbitBroker
     from opentelemetry.context import attach, detach
     from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, set_span_in_context
 
@@ -166,6 +167,10 @@ class FakeBroker:
         return lambda handler: handler
 
 
+def rabbit_message() -> RabbitMessage:
+    return Mock(spec=RabbitMessage, headers={})
+
+
 def command_payload() -> dict[str, Any]:
     return {
         "command_id": str(uuid4()),
@@ -177,8 +182,39 @@ def command_payload() -> dict[str, Any]:
     }
 
 
+async def test_registered_consumer_dispatches_published_command_with_header_trace() -> None:
+    from faststream.rabbit import TestRabbitBroker
+    from structlog.testing import capture_logs
+
+    from app.entrypoints.bot_worker.commands import register_bot_command_consumer
+    from app.modules.bot_manager.commands import BOT_COMMAND_FANOUT
+
+    broker = RabbitBroker()
+    payload = command_payload()
+    traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+    adapter = AsyncMock(spec=RuntimeAdapter)
+    register_bot_command_consumer(broker, adapter, InMemoryCommandDeduplicator())
+
+    with capture_logs() as logs:
+        async with TestRabbitBroker(broker) as test_broker:
+            await test_broker.publish(
+                payload, exchange=BOT_COMMAND_FANOUT, headers={"traceparent": traceparent}
+            )
+
+    adapter.start.assert_awaited_once_with(BotCommand.model_validate(payload))
+    adapter.stop.assert_not_awaited()
+    adapter.restart.assert_not_awaited()
+    assert [
+        (event["command"], event["traceparent"])
+        for event in logs
+        if event["event"] == "bot_command_done"
+    ] == [("START_BOT", traceparent)]
+
+
 @pytest.mark.asyncio
-async def test_dispatch_transient_terminal_and_crash_release_paths() -> None:
+async def test_dispatch_transient_terminal_and_crash_release_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.entrypoints.bot_worker.commands import register_bot_command_consumer
 
     class FailingAdapter(RuntimeAdapter):
@@ -195,13 +231,22 @@ async def test_dispatch_transient_terminal_and_crash_release_paths() -> None:
         (RuntimeError("crash"), RejectMessage),
     ):
         dedupe = InMemoryCommandDeduplicator()
+        release = AsyncMock(wraps=dedupe.release)
+        monkeypatch.setattr(dedupe, "release", release)
         handle = register_bot_command_consumer(
             cast(RabbitBroker, FakeBroker()), FailingAdapter(error), dedupe
         )
+        payload = command_payload()
         with pytest.raises(expected):
-            await handle(command_payload())
-        # Every owned claim is released, including terminal and unknown crashes.
-        assert await dedupe.claim("unused") is not None
+            await handle(payload, rabbit_message())
+        key = payload["idempotency_key"]
+        release.assert_awaited_once()
+        release_call = release.await_args
+        assert release_call is not None
+        released_key, old_owner = release_call.args
+        assert released_key == key
+        new_owner = await dedupe.claim(key)
+        assert isinstance(new_owner, str) and new_owner != old_owner
 
 
 @pytest.mark.asyncio
@@ -221,7 +266,7 @@ async def test_transient_dispatch_with_release_failure_is_requeued() -> None:
         cast(RabbitBroker, FakeBroker()), FailingAdapter(), dedupe
     )
     with pytest.raises(NackMessage) as caught:
-        await handle(command_payload())
+        await handle(command_payload(), rabbit_message())
     assert caught.value.extra_options == {"requeue": True}
 
 
@@ -247,7 +292,7 @@ async def test_cancellation_releases_claim_and_propagates_without_reject() -> No
         cast(RabbitBroker, FakeBroker()), CancellingAdapter(), dedupe
     )
     with pytest.raises(asyncio.CancelledError):
-        await handle(command_payload())
+        await handle(command_payload(), rabbit_message())
     assert dedupe.release_calls == 1
 
 
@@ -274,7 +319,7 @@ async def test_redis_claim_failure_is_requeued_without_release(
         cast(RabbitBroker, FakeBroker()), RuntimeAdapter(), BrokenDedupe()
     )
     with pytest.raises(NackMessage):
-        await handle(command_payload())
+        await handle(command_payload(), rabbit_message())
 
 
 @pytest.mark.parametrize("stored", [False, True])
@@ -303,13 +348,13 @@ async def test_uncertain_completion_with_release_failure(
     )
     payload = command_payload()
     with pytest.raises(NackMessage):
-        await handle(payload)
+        await handle(payload, rabbit_message())
     if stored:
-        await handle(payload)
+        await handle(payload, rabbit_message())
         assert delay.await_count == 1
     else:
         with pytest.raises(NackMessage):
-            await handle(payload)
+            await handle(payload, rabbit_message())
         assert delay.await_count == 2
     assert len(adapter.calls) == 1
 
@@ -370,7 +415,7 @@ async def test_claim_renews_during_cancel_cleanup(
         cast(RabbitBroker, FakeBroker()), SlowCleanup(), dedupe
     )
     payload = command_payload()
-    task = asyncio.ensure_future(handle(payload))
+    task = asyncio.ensure_future(handle(payload, rabbit_message()))
     key = payload["idempotency_key"]
     try:
         await asyncio.wait_for(started.wait(), 2)
@@ -424,7 +469,7 @@ async def test_adapter_timeout_without_deadline_requeues_and_releases(
     )
     payload = command_payload()
     with pytest.raises(NackMessage) as error:
-        await handle(payload)
+        await handle(payload, rabbit_message())
     assert error.value.extra_options == {"requeue": True}
     delay.assert_awaited_once()
     assert await dedupe.claim(payload["idempotency_key"]) is not None
@@ -471,15 +516,15 @@ async def test_completed_duplicate_is_acked_without_adapter_after_inflight_expir
     owner = await dedupe.claim(key)
     assert isinstance(owner, str)
     with pytest.raises(NackMessage) as error:
-        await handle(payload)
+        await handle(payload, rabbit_message())
     assert error.value.extra_options == {"requeue": True}
     assert adapter.calls == []
     await dedupe.release(key, owner)
-    await handle(payload)
+    await handle(payload, rabbit_message())
     assert await dedupe.claim(key) is ClaimState.COMPLETED
     # The in-flight claim is gone, while the durable completed marker remains.
     assert len(adapter.calls) == 1
-    await handle(payload)
+    await handle(payload, rabbit_message())
     assert len(adapter.calls) == 1
 
 
@@ -506,7 +551,7 @@ async def test_consumer_timeout_with_default_deadline_requeues_and_releases_with
     )
     payload = command_payload()
     with pytest.raises(NackMessage) as error:
-        await handle(payload)
+        await handle(payload, rabbit_message())
     assert error.value.extra_options == {"requeue": True}
     assert backoff.await_count == 1
     release.assert_awaited_once()
@@ -536,20 +581,56 @@ async def test_dispatch_timeout_is_transient_and_cancels_hanging_adapter() -> No
 
 
 @pytest.mark.asyncio
-async def test_timeout_requeues_and_releases_owner_without_duplicate_call() -> None:
+async def test_timeout_requeues_and_releases_owner_without_duplicate_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from app.entrypoints.bot_worker.commands import register_bot_command_consumer
+
+    dispatch_timeout = 5.0
+    loop = asyncio.get_running_loop()
+    call_later = loop.call_later
+    expire_dispatch: Callable[[], None] | None = None
+
+    def capture_deadline(
+        delay: float, callback: Callable[..., None], *args: Any, context: Context | None = None
+    ) -> asyncio.TimerHandle:
+        nonlocal expire_dispatch
+        timer = call_later(delay, callback, *args, context=context)
+        if delay == dispatch_timeout:
+            expire_dispatch = partial(callback, *args)
+        return timer
+
+    monkeypatch.setattr(loop, "call_later", capture_deadline)
 
     class HangingAdapter(RuntimeAdapter):
         async def start(self, command: BotCommand) -> None:
-            await asyncio.Event().wait()
+            await super().start(command)
+            # Trigger the consumer's deadline only once the adapter has entered.
+            assert expire_dispatch is not None
+            loop.call_soon(expire_dispatch)
+            try:
+                async with asyncio.timeout(1.0):
+                    await asyncio.Event().wait()
+            except TimeoutError:
+                pytest.fail("Consumer deadline did not cancel the adapter dispatch")
 
     dedupe = InMemoryCommandDeduplicator()
+    release = AsyncMock(wraps=dedupe.release)
+    monkeypatch.setattr(dedupe, "release", release)
     adapter = HangingAdapter()
     handle = register_bot_command_consumer(
-        cast(RabbitBroker, FakeBroker()), adapter, dedupe, dispatch_timeout_seconds=0.01
+        cast(RabbitBroker, FakeBroker()), adapter, dedupe, dispatch_timeout_seconds=dispatch_timeout
     )
+    payload = command_payload()
     with pytest.raises(NackMessage) as caught:
-        await handle(command_payload())
+        await handle(payload, rabbit_message())
     assert caught.value.extra_options == {"requeue": True}
-    assert await dedupe.claim("unused") is not None
-    assert adapter.calls == []
+    key = payload["idempotency_key"]
+    release.assert_awaited_once()
+    release_call = release.await_args
+    assert release_call is not None
+    released_key, old_owner = release_call.args
+    assert released_key == key
+    new_owner = await dedupe.claim(key)
+    assert isinstance(new_owner, str) and new_owner != old_owner
+    assert adapter.calls == ["START_BOT"]

@@ -6,6 +6,10 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
+from aiogram import Bot as TelegramBot
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.methods import GetMe
 from aiogram.types import User
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -107,6 +111,57 @@ async def test_concurrent_proxy_capacity_race_retries_available_candidate(
     assert calls[2][1] != calls[0][1]
 
 
+@pytest.mark.parametrize("has_fallback", [False, True])
+async def test_add_bot_retries_when_validated_proxy_url_changes(
+    clean_db: AsyncEngine, monkeypatch: pytest.MonkeyPatch, has_fallback: bool
+) -> None:
+    factory = async_sessionmaker(clean_db, expire_on_commit=False)
+    changed_url = "socks5://changed-proxy:1080"
+    fallback_url = "socks5://fallback-proxy:1080"
+    async with factory() as writer, factory() as concurrent:
+        tenant_id = await shop(writer)
+        first = Proxy(url=PROXY, url_hash=uuid4().hex, strike_count=1)
+        writer.add(first)
+        await writer.commit()
+        first_id = first.id
+        fallback = Proxy(url=fallback_url, url_hash=uuid4().hex)
+        pool = ProxyPoolService(writer, ProxySettings(proxy_max_bots_per_ip=1), AsyncMock())
+        service = BotControlService(
+            writer,
+            permissions=ScopedPermissions(tenant_id),
+            proxy_pool=pool,
+            tenants_use_proxy=True,
+        )
+        calls: list[str | None] = []
+
+        async def get_me(token: str, url: str | None) -> User:
+            assert token == TOKEN
+            calls.append(url)
+            if url == PROXY:
+                # Commit the URL change after selection, before add_bot locks the proxy.
+                proxy = await concurrent.get(Proxy, first_id)
+                assert proxy is not None
+                proxy.url = changed_url
+                proxy.url_hash = uuid4().hex
+                if has_fallback:
+                    concurrent.add(fallback)
+                await concurrent.commit()
+                return User(id=123456, is_bot=True, first_name="First response")
+            assert url == (fallback_url if has_fallback else changed_url)
+            return User(id=123456, is_bot=True, first_name="Second response")
+
+        monkeypatch.setattr(service, "_get_me", get_me)
+        bot = await service.add_bot(tenant_id, TOKEN, 42)
+
+        assert calls == [PROXY, fallback_url if has_fallback else changed_url]
+        expected_id = fallback.id if has_fallback else first_id
+        assert bot.proxy_id == expected_id
+        assert (await concurrent.execute(select(Bot.proxy_id, Bot.name))).one() == (
+            expected_id,
+            "Second response",
+        )
+
+
 async def test_bot_pages_are_scoped_ordered_and_clamped(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -201,13 +256,18 @@ async def test_proxy_add_duplicate_delete_and_restore(
         tenants_use_proxy=True,
         publisher=BotCommandPublisher(build_outbox_broker(engine)),
     )
-    get_me = AsyncMock(
-        return_value=SimpleNamespace(id=123456, username="sample_bot", first_name="Sample")
-    )
-    monkeypatch.setattr(service, "_get_me", get_me)
+    get_me_calls: list[tuple[str, int | None, object]] = []
+
+    async def get_me(bot: TelegramBot, request_timeout: int | None = None) -> User:
+        assert isinstance(bot.session, AiohttpSession)
+        get_me_calls.append((bot.token, request_timeout, bot.session.proxy))
+        return User(id=123456, is_bot=True, username="sample_bot", first_name="Sample")
+
+    monkeypatch.setattr(TelegramBot, "get_me", get_me)
     bot = await service.add_bot(first, TOKEN, 42)
     bot_id = bot.id
-    get_me.assert_awaited_once_with(TOKEN, PROXY)
+    assert get_me_calls == [(TOKEN, 10, PROXY)]
+    assert await session.scalar(select(Bot.proxy_id).where(Bot.id == bot_id)) == proxy_id
     assert bot.tenant_id == first and bot.proxy_id == proxy_id
     assert not bot.is_active and bot.status == "stopped"
     raw = await session.scalar(
@@ -220,9 +280,11 @@ async def test_proxy_add_duplicate_delete_and_restore(
     with pytest.raises(DomainError) as error:
         await service.add_bot(second, NEW_TOKEN, 42)
     assert error.value.code == "no_proxy_available"
-    get_me.assert_awaited_once()
+    assert await session.scalar(select(Bot.id).where(Bot.tenant_id == second)) is None
+    assert await session.scalar(select(AuditLog.id).where(AuditLog.tenant_id == second)) is None
+    assert len(get_me_calls) == 1
     await service.replace_token(bot_id, f" {NEW_TOKEN} ", 42, tenant_id=first)
-    get_me.assert_awaited_with(NEW_TOKEN, PROXY)
+    assert get_me_calls[-1] == (NEW_TOKEN, 10, PROXY)
     assert bot.token_hash == token_hash(NEW_TOKEN)
     service.tenants_use_proxy = False
     with pytest.raises(DomainError) as error:
@@ -242,6 +304,77 @@ async def test_proxy_add_duplicate_delete_and_restore(
     }
     assert TOKEN not in caplog.text and NEW_TOKEN not in caplog.text
     assert all(event.payload is None for event in events)
+
+
+@pytest.mark.parametrize("restore", [False, True])
+async def test_proxy_assignment_and_audit_roll_back_together(
+    clean_db: AsyncEngine, restore: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = async_sessionmaker(clean_db, expire_on_commit=False)
+    async with factory() as writer, factory() as reader:
+        original_tenant, target_tenant = await shop(writer), await shop(writer)
+        writer.add(proxy := Proxy(url=PROXY, url_hash=uuid4().hex))
+        if restore:
+            writer.add(
+                Bot(
+                    tenant_id=original_tenant,
+                    telegram_bot_id=123456,
+                    encrypted_token=NEW_TOKEN,
+                    token_hash=token_hash(NEW_TOKEN),
+                    is_deleted=True,
+                )
+            )
+        await writer.commit()
+        proxy_id = proxy.id
+        pool = ProxyPoolService(writer, ProxySettings(proxy_max_bots_per_ip=1), AsyncMock())
+        service = BotControlService(
+            writer,
+            permissions=ScopedPermissions(target_tenant),
+            proxy_pool=pool,
+            tenants_use_proxy=True,
+        )
+        me = User(id=123456, is_bot=True, first_name="Bot")
+        monkeypatch.setattr(service, "_get_me", AsyncMock(return_value=me))
+        snapshot = select(
+            Bot.id, Bot.tenant_id, Bot.proxy_id, Bot.token_hash, Bot.is_deleted
+        ).where(Bot.telegram_bot_id == 123456)
+        before = (await reader.execute(snapshot)).one_or_none()
+        assert (before is not None) == restore
+        real_audit = service._audit
+
+        async def fail_after_audit(action: str, bot: Bot, actor: int) -> None:
+            assert bot.proxy_id == proxy_id and not bot.is_deleted
+            await real_audit(action, bot, actor)
+            await writer.flush()
+            assert await writer.scalar(select(Bot.proxy_id).where(Bot.id == bot.id)) == proxy_id
+            audit_action = select(AuditLog.action).where(AuditLog.entity_id == bot.id)
+            assert await writer.scalar(audit_action) == action
+            # An independent transaction must not see the write before add_bot commits.
+            assert (await reader.execute(snapshot)).one_or_none() == before
+            assert await reader.scalar(audit_action) is None
+            raise RuntimeError("fail after audit flush")
+
+        monkeypatch.setattr(service, "_audit", fail_after_audit)
+        with pytest.raises(RuntimeError, match="fail after audit flush"):
+            await service.add_bot(target_tenant, TOKEN, 42)
+        assert (await reader.execute(snapshot)).one_or_none() == before
+        target_audit = select(AuditLog.action).where(AuditLog.tenant_id == target_tenant)
+        assert await reader.scalar(target_audit) is None
+
+        monkeypatch.setattr(service, "_audit", real_audit)
+        bot = await service.add_bot(target_tenant, TOKEN, 42)
+        assert (await reader.execute(snapshot)).one() == (
+            bot.id,
+            target_tenant,
+            proxy_id,
+            token_hash(TOKEN),
+            False,
+        )
+        if before is not None:
+            assert bot.id == before.id
+        assert await reader.scalar(select(AuditLog.action).where(AuditLog.entity_id == bot.id)) == (
+            "bot.restored" if restore else "bot.added"
+        )
 
 
 async def test_moderator_cannot_manage_foreign_bot_or_without_permission(
@@ -275,6 +408,24 @@ async def test_moderator_cannot_manage_foreign_bot_or_without_permission(
     assert bot is not None
     assert bot.tenant_id == foreign and not bot.is_active and bot.status == "stopped"
     assert not bot.is_deleted
+
+
+async def test_add_bot_telegram_unauthorized_leaves_no_bot_or_audit(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await shop(session)
+    service = BotControlService(session, permissions=ScopedPermissions(tenant))
+    unauthorized = TelegramUnauthorizedError(method=GetMe(), message="Unauthorized")
+    get_me = AsyncMock(side_effect=unauthorized)
+    monkeypatch.setattr(TelegramBot, "get_me", get_me)
+
+    with pytest.raises(DomainError) as error:
+        await service.add_bot(tenant, TOKEN, 42)
+
+    assert error.value.code == "invalid_token"
+    get_me.assert_awaited_once_with(request_timeout=10)
+    assert await session.scalar(select(Bot.id).where(Bot.tenant_id == tenant)) is None
+    assert await session.scalar(select(AuditLog.id).where(AuditLog.tenant_id == tenant)) is None
 
 
 async def test_invalid_identity_scope_and_lifecycle_outbox(

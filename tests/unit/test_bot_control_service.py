@@ -111,18 +111,25 @@ async def test_proxy_capacity_race_retries_next_candidate(monkeypatch: pytest.Mo
         return first if len(selections) == 1 else second
 
     pool.get_available_proxy.side_effect = select_proxy
-    pool.lock_available_proxy.side_effect = [NoProxyAvailableError(), None]
-    from unittest.mock import MagicMock
-
-    session = AsyncMock()
-    session.begin_nested = MagicMock(return_value=AsyncMock())
-    service = BotControlService(session, proxy_pool=pool, tenants_use_proxy=True)
+    bot = Bot(id=uuid4())
+    pool.assign_proxy.side_effect = [NoProxyAvailableError(), bot]
+    service = BotControlService(AsyncMock(), proxy_pool=pool, tenants_use_proxy=True)
     me = User(id=7, is_bot=True, username="bot", first_name="Bot")
-    monkeypatch.setattr(service, "_get_me", AsyncMock(return_value=me))
+    get_me = AsyncMock(return_value=me)
+    monkeypatch.setattr(service, "_get_me", get_me)
     monkeypatch.setattr(service.repo, "by_telegram_bot_id", AsyncMock(return_value=None))
-    result, proxy = await service._get_me_with_proxy_retry("123456:" + "x" * 35)
-    assert result is me and proxy is second
+    token = "123456:" + "x" * 35
+    assert await service._add_with_proxy_retry(token, AsyncMock()) is bot
     assert selections == [set(), {first.id}]
+    assert [call.args for call in get_me.await_args_list] == [
+        (token, first.url),
+        (token, second.url),
+    ]
+    assignments = [call.args[0] for call in pool.assign_proxy.await_args_list]
+    assert [(a.proxy_id, a.url) for a in assignments] == [
+        (first.id, first.url),
+        (second.id, second.url),
+    ]
 
 
 @pytest.mark.parametrize("unauthorized", [True, False])

@@ -1,9 +1,9 @@
 """Proxy pool use cases (decisions.md "Пул прокси", docs/ops/bot-runtime.md).
 
-Transaction discipline is the one of the IAM admin services: every writing method commits
-the passed session itself (it must hold no pending changes - ``session_not_clean``), any
-error rolls back, rows are locked with ``FOR UPDATE`` + ``populate_existing``, audit is
-written in the same transaction, constraint errors become domain errors.
+Standalone writes own commit/rollback (the session must hold no pending changes).
+Transactional assignment leaves commit/rollback of the outer transaction to the caller.
+Rows are locked with ``FOR UPDATE`` + ``populate_existing``; database audit records
+are written in the same transaction.
 
 **Lock order: proxy row, then bot row** (``assign_proxy``, ``register_strike``, ``ban``),
 so parallel assignment and quarantine/ban never deadlock. The number of bots of a proxy is
@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import enum
 import hashlib
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol, overload
 from uuid import UUID
 
 import structlog
@@ -34,6 +34,7 @@ from app.modules.bot_manager.models import (
     PROXY_STATUS_ACTIVE,
     PROXY_STATUS_BANNED,
     PROXY_STATUS_QUARANTINE,
+    Bot,
     Proxy,
 )
 from app.modules.bot_manager.proxy_health import ProxyHealthTracker
@@ -62,7 +63,9 @@ __all__ = [
     "NoProxyAvailableError",
     "PermissionChecker",
     "ProxyPoolService",
+    "ProxyUrlChangedError",
     "StrikeResult",
+    "ValidatedProxyAssignment",
     "VerdictKind",
     "proxy_url_hash",
 ]
@@ -96,6 +99,13 @@ class NoProxyAvailableError(DomainError):
         super().__init__(message, code=code or NO_PROXY_AVAILABLE)
 
 
+class ProxyUrlChangedError(DomainError):
+    """The proxy still has a free slot, but its endpoint needs revalidation."""
+
+    def __init__(self) -> None:
+        super().__init__("Proxy URL changed", code="proxy_url_changed")
+
+
 class PermissionChecker(Protocol):
     async def require(
         self, telegram_user_id: int, slug: str, tenant_id: UUID | None = None
@@ -118,6 +128,18 @@ class FailureVerdict:
 
     verdict: VerdictKind
     released_bot_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ValidatedProxyAssignment:
+    """Exact getMe endpoint and a callback to save an unbound bot in the same session.
+
+    The callback runs after the proxy lock is acquired, may flush, and must not commit.
+    """
+
+    proxy_id: UUID
+    url: str
+    save_bot: Callable[[], Awaitable[Bot]]
 
 
 class _Bind(enum.Enum):
@@ -217,15 +239,23 @@ class ProxyPoolService:
             self._settings.proxy_max_bots_per_ip, exclude=exclude
         )
 
-    async def lock_available_proxy(self, proxy_id: UUID) -> None:
-        """Reserve capacity on the exact proxy validated by getMe, before locking a bot."""
-        proxy = await self._repo.get(proxy_id, for_update=True)
-        if (
-            proxy is None
-            or proxy.status != PROXY_STATUS_ACTIVE
-            or await self._repo.bot_count(proxy_id) >= self._settings.proxy_max_bots_per_ip
-        ):
-            raise NoProxyAvailableError
+    async def _assign_validated_proxy(self, assignment: ValidatedProxyAssignment) -> Bot:
+        # Reject races before touching the bot; rollback of the savepoint releases
+        # the rejected proxy lock before the caller tries getMe on another candidate.
+        async with self._session.begin_nested():
+            proxy = await self._repo.get(assignment.proxy_id, for_update=True)
+            if (
+                proxy is None
+                or proxy.status != PROXY_STATUS_ACTIVE
+                or await self._repo.bot_count(proxy.id) >= self._settings.proxy_max_bots_per_ip
+            ):
+                raise NoProxyAvailableError
+            if proxy.url != assignment.url:
+                raise ProxyUrlChangedError
+            bot = await assignment.save_bot()
+            bot.proxy_id = proxy.id
+            await self._session.flush()
+        return bot
 
     async def _try_bind(
         self, bot_id: UUID, proxy_id: UUID, *, expected: UUID | None, keep: bool
@@ -281,16 +311,24 @@ class ProxyPoolService:
                 raise NoProxyAvailableError
         raise DomainError("Bot proxy changed concurrently", code=CONFLICT)
 
-    async def assign_proxy(self, bot_id: UUID) -> UUID:
-        """Bind the bot to a proxy and commit (standalone operation)."""
+    @overload
+    async def assign_proxy(self, bot_id: UUID) -> UUID: ...
+
+    @overload
+    async def assign_proxy(self, bot_id: ValidatedProxyAssignment) -> Bot: ...
+
+    async def assign_proxy(self, bot_id: UUID | ValidatedProxyAssignment) -> UUID | Bot:
+        """Assign a proxy; only the standalone UUID mode commits."""
+        if isinstance(bot_id, ValidatedProxyAssignment):
+            return await self._assign_validated_proxy(bot_id)
         async with self._transaction():
             return await self._assign_proxy(bot_id)
 
     async def assign_proxy_in_transaction(self, bot_id: UUID) -> UUID:
         """Bind without commit so a caller can atomically save related changes.
 
-        The caller owns rollback/commit and must not invoke this after a separate transaction
-        has been committed. This is used by bot creation to persist token and proxy together.
+        The caller owns rollback/commit. When the endpoint has already been validated,
+        use ``assign_proxy(ValidatedProxyAssignment(...))`` instead of reselecting it.
         """
         return await self._assign_proxy(bot_id)
 

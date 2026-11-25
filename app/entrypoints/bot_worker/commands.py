@@ -16,7 +16,7 @@ from uuid import uuid4
 import structlog
 from faststream import AckPolicy
 from faststream.exceptions import NackMessage, RejectMessage
-from faststream.rabbit import QueueType, RabbitBroker, RabbitQueue
+from faststream.rabbit import QueueType, RabbitBroker, RabbitMessage, RabbitQueue
 from redis.asyncio import Redis
 
 from app.modules.bot_manager.commands import BOT_COMMAND_EXCHANGE, BOT_COMMAND_FANOUT, BotCommand
@@ -218,7 +218,7 @@ def register_bot_command_consumer(
     deduplicator: RedisCommandDeduplicator | InMemoryCommandDeduplicator,
     *,
     dispatch_timeout_seconds: float | None = None,
-) -> Callable[[dict[str, Any]], Awaitable[None]]:
+) -> Callable[[dict[str, Any], RabbitMessage], Awaitable[None]]:
     """Register one durable competing consumer on the shared broker.
 
     Invalid payloads and adapter failures are raised so FastStream's
@@ -232,7 +232,7 @@ def register_bot_command_consumer(
     ):
         raise ValueError("dispatch timeout must be strictly below dedupe TTL with margin")
 
-    async def handle(body: dict[str, Any], **kwargs: Any) -> None:
+    async def handle(body: dict[str, Any], message: RabbitMessage) -> None:
         try:
             command = BotCommand.model_validate(body)
         except Exception as exc:
@@ -351,7 +351,9 @@ def register_bot_command_consumer(
             deadline.cancel()
             renewal.cancel()
             await asyncio.gather(renewal, return_exceptions=True)
-        _log.info("bot_command_done", command=command.kind, traceparent=kwargs.get("traceparent"))
+        _log.info(
+            "bot_command_done", command=command.kind, traceparent=message.headers.get("traceparent")
+        )
 
     broker.subscriber(
         _command_queue(),

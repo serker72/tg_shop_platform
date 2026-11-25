@@ -9,11 +9,13 @@ from aiogram.fsm.state import State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram_dialog.api.entities import AccessSettings, Data, ShowMode, StartMode
 from aiogram_dialog.manager.manager import ManagerImpl
+from aiogram_dialog.utils import remove_intent_id
 
+from app.entrypoints.master_bot.texts import Texts
 from app.modules.bot_manager.models import Bot
 from app.modules.bot_manager.presentation.tg_master.states import BotsSG
 from app.modules.bot_manager.service import BotPage
-from app.modules.iam.permissions import BOTS_MANAGE
+from app.modules.iam.permissions import BOTS_MANAGE, SEED_ROLE_PERMISSIONS, SEED_ROLES
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.shared_kernel.domain.exceptions import EntityNotFoundError
 from tests.unit._master_bot_env import ACTOR, SUPER, VIEWER, Env, Forged, _tenant
@@ -41,6 +43,44 @@ def _service(bots: list[Bot], *, read_only: bool = False) -> AsyncMock:
     return service
 
 
+@pytest.mark.parametrize(
+    "role",
+    ["superuser", *(slug for slug, _ in SEED_ROLES), "viewer", "no_permissions"],
+)
+async def test_main_menu_has_no_bots_button_for_any_role(role: str) -> None:
+    tenant = _tenant("My shop", "my-shop")
+    if role == "superuser":
+        snapshot = SUPER
+    elif role == "viewer":
+        snapshot = VIEWER
+    elif role == "no_permissions":
+        snapshot = PermissionSnapshot(user_id=uuid4())
+    else:
+        snapshot = PermissionSnapshot(
+            user_id=uuid4(),
+            role_permissions={slug: frozenset({role}) for slug in SEED_ROLE_PERMISSIONS[role]},
+            tenants=frozenset({tenant.id}),
+        )
+    env = Env(snapshot, [tenant])
+    await env.start()
+    assert env.text() == Texts.main_menu_title()
+    buttons = env.buttons()
+    assert not any("Боты" in label for label in buttons)
+    markup = env.messages.last_message().reply_markup
+    for row in markup.inline_keyboard if markup else []:
+        for button in row:
+            if button.callback_data is not None:
+                _, data = remove_intent_id(button.callback_data)
+                widget_id, _, _ = data.partition(":")
+                assert widget_id != "bots"
+    if role == "no_permissions":
+        assert buttons == []
+    elif role == "viewer":
+        assert Texts.btn_logs() in buttons
+    else:
+        assert Texts.btn_shops() in buttons
+
+
 async def test_bot_rows_actions_and_instructions() -> None:
     tenant = _tenant("My shop", "my-shop")
     bot = Bot(
@@ -58,7 +98,6 @@ async def test_bot_rows_actions_and_instructions() -> None:
     service.stop.side_effect = lambda *a, **kw: setattr(bot, "is_active", False)
     env = Env(SUPER, [tenant], bot_control_service=service)
     await env.start()
-    assert not any("Боты" in label for label in env.buttons())
     await env.press("Магазины")
     await env.press("My shop (my-shop)")
     await env.press("🤖 Боты")
@@ -371,6 +410,54 @@ async def test_multi_bot_rows_keep_action_callback_with_same_bot() -> None:
     assert "Bot 0" in env.buttons()[0]
     assert not ({"<", ">"} & set(env.buttons()))
     service.list_for_tenant.assert_not_awaited()
+
+
+async def test_bot_list_displays_starting_invalid_token_and_error_icons() -> None:
+    statuses = {"starting": "🟡", "invalid_token": "🔑", "error": "🔴"}
+    bots = [
+        Bot(
+            id=uuid4(),
+            status=status,
+            is_active=status == "starting",
+            name=f"Bot {i}",
+            username=f"sample{i}_bot",
+            telegram_bot_id=i,
+        )
+        for i, status in enumerate(statuses, start=1)
+    ]
+    env = Env(SUPER, [_tenant("My shop", "my-shop")], bot_control_service=_service(bots))
+    await env.start()
+    await env.press("Магазины")
+    await env.press("My shop (my-shop)")
+    await env.press("🤖 Боты")
+    for bot in bots:
+        active = "вкл" if bot.is_active else "выкл"
+        assert f"{statuses[bot.status]} {bot.name} @{bot.username} · {active}" in env.buttons()
+
+
+async def test_empty_bot_list_has_no_pager() -> None:
+    tenant = _tenant("My shop", "my-shop")
+    service = _service([])
+    env = Env(SUPER, [tenant], bot_control_service=service)
+    await env.start()
+    await env.press("Магазины")
+    await env.press("My shop (my-shop)")
+    await env.press("🤖 Боты")
+    service.page_for_tenant.assert_awaited_once_with(ACTOR, tenant.id, page=0)
+    assert set(env.buttons()) == {"➕ Добавить бота", "Назад"}
+
+
+async def test_shop_card_hides_bot_button_without_bots_manage() -> None:
+    tenant = _tenant("My shop", "my-shop")
+    service = _service([])
+    snapshot = PermissionSnapshot(user_id=uuid4(), tenants=frozenset({tenant.id}))
+    env = Env(snapshot, [tenant], bot_control_service=service)
+    await env.start()
+    await env.press("Магазины")
+    await env.press("My shop (my-shop)")
+    assert "« Назад" in env.buttons()
+    assert "🤖 Боты" not in env.buttons()
+    service.page_for_tenant.assert_not_awaited()
 
 
 async def test_read_only_bot_list_and_hidden_shop_entry() -> None:
