@@ -266,6 +266,7 @@ class Env:
             list_tenants=lambda actor: visible if visible is not None else live,
             create=self._create,
             update=self._rename,
+            set_timezone=lambda actor, tenant_id, timezone: self._set(tenant_id, timezone=timezone),
             restore=lambda actor, tenant_id: self._set(tenant_id, is_deleted=False),
             deactivate=lambda actor, tenant_id: self._set(tenant_id, is_active=False),
             update_settings=self._update_settings,
@@ -357,13 +358,8 @@ class Env:
         self.settings[tenant.id] = self._settings()
         return tenant
 
-    def _rename(
-        self, actor: int, tenant_id: UUID, *, name: str, timezone: str | None = None
-    ) -> SimpleNamespace:
-        values: dict[str, Any] = {"name": name}
-        if timezone is not None:
-            values["timezone"] = timezone
-        return self._set(tenant_id, **values)
+    def _rename(self, actor: int, tenant_id: UUID, *, name: str) -> SimpleNamespace:
+        return self._set(tenant_id, name=name)
 
     def _set(self, tenant_id: UUID, **values: Any) -> SimpleNamespace:
         tenant = self.store[tenant_id]

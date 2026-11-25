@@ -79,6 +79,7 @@ from app.shared_kernel.domain.exceptions import (
     ValidationError,
 )
 from app.shared_kernel.infrastructure.base_repository import BaseRepository
+from app.shared_kernel.timezones import validate_timezone
 
 __all__ = [
     "CONFLICT",
@@ -90,6 +91,7 @@ __all__ = [
     "INVALID_SETTINGS",
     "INVALID_TELEGRAM_USER_ID",
     "INVALID_TENANT_SLUG",
+    "INVALID_TIMEZONE",
     "LANGUAGE_NOT_FOUND",
     "MODERATOR_ALREADY_ASSIGNED",
     "MODERATOR_HAS_GLOBAL_ACCESS",
@@ -141,6 +143,7 @@ INVALID_ROLE_SLUG: Final = "invalid_role_slug"
 INVALID_SETTINGS: Final = "invalid_settings"
 INVALID_TELEGRAM_USER_ID: Final = "invalid_telegram_user_id"
 INVALID_TENANT_SLUG: Final = "invalid_tenant_slug"
+INVALID_TIMEZONE: Final = "invalid_timezone"
 LANGUAGE_NOT_FOUND: Final = "language_not_found"
 MODERATOR_ALREADY_ASSIGNED: Final = "moderator_already_assigned"
 MODERATOR_NOT_FOUND: Final = "moderator_not_found"
@@ -210,6 +213,15 @@ class _NoChange(Exception):  # noqa: N818 - internal control-flow signal
 
 
 # --- pure business rules (unit-tested) -------------------------------------------------
+
+
+def _validate_timezone(value: str | None) -> str:
+    if value is not None:
+        try:
+            return validate_timezone(value)
+        except ValueError as error:
+            raise ValidationError("Invalid IANA timezone", code=INVALID_TIMEZONE) from error
+    raise ValidationError("A tenant must have an IANA timezone", code=INVALID_TIMEZONE)
 
 
 def validate_name(name: str) -> str:
@@ -614,18 +626,29 @@ class TenantAdminService(_AdminService):
         self, actor_telegram_id: int, tenant_id: UUID, *, name: str, timezone: str | None = None
     ) -> Tenant:
         """Rename a live tenant (the slug is immutable: it is never reused)."""
+        return await self._update(actor_telegram_id, tenant_id, name=name, timezone=timezone)
+
+    async def set_timezone(self, actor_telegram_id: int, tenant_id: UUID, timezone: str) -> Tenant:
+        """Set the required zone without reading or writing the name outside the lock."""
+        return await self._update(actor_telegram_id, tenant_id, name=None, timezone=timezone)
+
+    async def _update(
+        self, actor_telegram_id: int, tenant_id: UUID, *, name: str | None, timezone: str | None
+    ) -> Tenant:
         async with self._transaction():
             await self._authorize(actor_telegram_id, TENANTS_MANAGE)
+            if timezone is not None or name is None:
+                snapshot = await self._permissions.get_snapshot(actor_telegram_id)
+                if not (snapshot.is_superuser or snapshot.has_tenant_access(tenant_id)):
+                    raise PermissionDeniedError("Tenant outside scope", code=PERMISSION_DENIED)
+                timezone = _validate_timezone(timezone)
             tenant = await self._live_tenant(tenant_id, for_update=True)
-            new_name = validate_name(name)
-            if timezone is not None:
-                from app.shared_kernel.timezones import validate_timezone
-
-                timezone = validate_timezone(timezone)
+            new_name = validate_name(name) if name is not None else tenant.name
             if tenant.name == new_name and (timezone is None or tenant.timezone == timezone):
                 raise _NoChange
             before = _tenant_state(tenant)
-            tenant.name = new_name
+            if name is not None:
+                tenant.name = new_name
             if timezone is not None:
                 tenant.timezone = timezone
             await self._session.flush()
@@ -757,10 +780,8 @@ class UserAdminService(_AdminService):
 
     async def set_timezone(self, actor_telegram_id: int, timezone: str | None) -> User:
         """Change only the caller's nullable staff timezone."""
-        from app.shared_kernel.timezones import validate_timezone
-
         if timezone is not None:
-            validate_timezone(timezone)
+            timezone = _validate_timezone(timezone)
         async with self._transaction():
             user = await self._repo.get_user_by_telegram_id(actor_telegram_id, for_update=True)
             if user is None or not user.is_active or user.is_deleted:

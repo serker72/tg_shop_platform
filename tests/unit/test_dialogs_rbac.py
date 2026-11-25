@@ -315,7 +315,9 @@ async def test_assign_global_role_reports_dropped_shops() -> None:
 
 @R4
 async def test_own_card_has_no_roles_and_overrides_buttons() -> None:
-    env = Env(SUPER, users=[_user(ACTOR)])
+    staff = _user(ACTOR)
+    staff.timezone = "UTC"
+    env = Env(SUPER, users=[staff])
     await env.start()
     await env.press("Сотрудники")
     await env.press(f"— \\({ACTOR}\\)", regex=True)
@@ -719,6 +721,7 @@ async def test_forged_checkbox_toggle_without_roles_manage_closes_dialog() -> No
 async def test_forged_staff_roles_of_protected_target_show_nothing(kind: str) -> None:
     target = _user(ACTOR if kind == "self" else STAFF, deleted=kind == "deleted")
     target.is_superuser = kind == "superuser"
+    target.timezone = "UTC"
     env = Env(SUPER, users=[target], roles=[make_role("Custom", "custom")])
     await env.start()
     await env.press("Сотрудники")

@@ -617,9 +617,6 @@ msgstr ""
 msgid "Пропустить"
 msgstr ""
 
-msgid "Пропустить (оставить UTC)"
-msgstr ""
-
 msgid "Раздел в разработке"
 msgstr ""
 

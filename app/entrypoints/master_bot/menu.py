@@ -18,6 +18,7 @@ from aiogram_dialog.api.internal import CONTEXT_KEY
 from aiogram_dialog.widgets.kbd import Button, Column
 from aiogram_dialog.widgets.text import Format
 
+from app.core.i18n import gettext as _
 from app.entrypoints.master_bot.texts import Texts
 from app.modules.bot_manager.presentation.tg_master import bots_dialog
 from app.modules.bot_manager.presentation.tg_master.states import BotsSG
@@ -38,11 +39,10 @@ from app.modules.iam.presentation.tg_master import (
     tenants_dialog,
 )
 from app.modules.iam.presentation.tg_master.common import STAFF_VIEW_PERMISSIONS
-from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
+from app.modules.iam.presentation.tg_master.staff import open_self_timezone, self_timezone_user
 from app.modules.iam.snapshot import PermissionSnapshot
 from app.modules.logging.presentation.tg_master import LogsSG, logs_dialog
 from app.modules.system.presentation.tg_master import SettingsSG, settings_dialog
-from app.shared_kernel.presentation.tg_master.common import actor_id, resolve
 
 __all__ = ["MENU_PERMISSIONS", "MainMenu", "build_menu_router", "main_menu_getter"]
 
@@ -81,8 +81,8 @@ def visible_sections(snapshot: PermissionSnapshot) -> dict[str, bool]:
     return result
 
 
-async def main_menu_getter(dialog_manager: DialogManager, **_: Any) -> dict[str, Any]:
-    from app.entrypoints.master_bot.middlewares import SNAPSHOT_KEY
+async def main_menu_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    from app.entrypoints.master_bot.middlewares import SNAPSHOT_KEY, has_panel_access
 
     snapshot: PermissionSnapshot = dialog_manager.middleware_data[SNAPSHOT_KEY]
     data: dict[str, Any] = {f"can_{k}": v for k, v in visible_sections(snapshot).items()}
@@ -93,6 +93,8 @@ async def main_menu_getter(dialog_manager: DialogManager, **_: Any) -> dict[str,
         btn_roles=Texts.btn_roles(),
         btn_settings=Texts.btn_settings(),
         btn_logs=Texts.btn_logs(),
+        btn_timezone=_("Мой часовой пояс"),
+        can_timezone=has_panel_access(snapshot),
     )
     return data
 
@@ -122,7 +124,15 @@ def build_main_menu_dialog() -> Dialog:
     return Dialog(
         Window(
             Format("{title}"),
-            Column(*(_button(section) for section in SECTION_PERMISSIONS)),
+            Column(
+                *(_button(section) for section in SECTION_PERMISSIONS),
+                Button(
+                    Format("{btn_timezone}"),
+                    id="my_tz",
+                    on_click=open_self_timezone,
+                    when="can_timezone",
+                ),
+            ),
             state=MainMenu.main,
             getter=main_menu_getter,
         )
@@ -130,9 +140,9 @@ def build_main_menu_dialog() -> Dialog:
 
 
 async def _start(message: Message, dialog_manager: DialogManager) -> None:
-    """Open mandatory staff timezone onboarding once, without adding a customer step."""
-    user = await (await resolve(dialog_manager, IamAdminQueries)).user(actor_id(dialog_manager))
-    if user is not None and hasattr(user, "timezone") and user.timezone is None:
+    """Offer staff onboarding on each /start until a timezone is saved."""
+    user = await self_timezone_user(dialog_manager)
+    if user is not None and getattr(user, "timezone", None) is None:
         await dialog_manager.start(StaffSG.onboarding, mode=StartMode.RESET_STACK)
         return
     await dialog_manager.start(MainMenu.main, mode=StartMode.RESET_STACK)

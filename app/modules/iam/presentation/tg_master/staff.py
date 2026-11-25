@@ -463,21 +463,31 @@ def _parse_onboarding_query(value: str) -> str:
     return value
 
 
+async def self_timezone_user(manager: DialogManager) -> Any:
+    from app.entrypoints.master_bot.middlewares import has_panel_access
+
+    if not has_panel_access(snapshot_of(manager)):
+        return None
+    user = await (await resolve(manager, IamAdminQueries)).user(actor_id(manager))
+    return user if user is not None and user.is_active and not user.is_deleted else None
+
+
 async def on_onboarding_skip(
     callback: CallbackQuery, button: Button, manager: DialogManager
 ) -> None:
     from app.entrypoints.master_bot.menu import MainMenu
 
-    outcome = await mutate(
-        manager, UserAdminService, lambda s: s.set_timezone(actor_id(manager), "UTC")
-    )
-    if outcome.ok:
-        await manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
+    if await self_timezone_user(manager) is None:
+        await callback.answer(denied_text())
+        return
+    await manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
 
 
 async def on_onboarding_query(
     message: Message, widget: Any, manager: DialogManager, value: str
 ) -> None:
+    if await self_timezone_user(manager) is None:
+        return
     query = _parse_onboarding_query(value)
     if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", query):
         zones = suggest_timezones_by_time(query, datetime.now(UTC))
@@ -488,30 +498,42 @@ async def on_onboarding_query(
 
 
 async def onboarding_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    dialog_manager.dialog_data.pop("onboarding_zones", None)
+    if await self_timezone_user(dialog_manager) is None:
+        return _denied(dialog_manager, zones=[], btn_skip=_("Пропустить"))
     return {
         "text": compose(
-            dialog_manager, _("Настройте часовой пояс. Выберите зону или введите HH:MM / город.")
+            dialog_manager,
+            _("Настройте часовой пояс. Выберите зону или введите HH:MM / город."),
+            _("Часовой пояс: {timezone}").format(timezone=await _default_timezone(dialog_manager)),
         ),
         "zones": [(zone, zone) for zone in TIMEZONE_PRESETS],
-        "btn_skip": _("Пропустить (оставить UTC)"),
+        "btn_skip": _("Пропустить"),
     }
 
 
 async def onboarding_results_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
-    zones = list(dialog_manager.dialog_data.get("onboarding_zones", []))
+    zones = dialog_manager.dialog_data.get("onboarding_zones", [])
+    if await self_timezone_user(dialog_manager) is None:
+        return _denied(dialog_manager, zones=[], btn_skip=_("Пропустить"))
     return {
         "text": compose(dialog_manager, _("Выберите часовой пояс")),
         "zones": [(z, z) for z in zones],
-        "btn_skip": _("Пропустить (оставить UTC)"),
-        "btn_back": _("Назад"),
+        "btn_skip": _("Пропустить"),
+        **nav_texts(),
     }
 
 
 async def on_onboarding_zone(
     callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
 ) -> None:
-    zones = manager.dialog_data.get("onboarding_zones", TIMEZONE_PRESETS)
-    if item not in zones:
+    state = manager.current_context().state
+    zones: tuple[str, ...] = ()
+    if state == StaffSG.onboarding:
+        zones = TIMEZONE_PRESETS
+    elif state == StaffSG.onboarding_results:
+        zones = manager.dialog_data.get("onboarding_zones", ())
+    if item not in zones or await self_timezone_user(manager) is None:
         await callback.answer(denied_text())
         return
     try:
@@ -528,30 +550,71 @@ async def on_onboarding_zone(
         await manager.start(MainMenu.main, mode=StartMode.RESET_STACK)
 
 
-async def on_timezone(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
-    target = await _target_or_back(callback, manager)
-    if target != actor_id(manager):
+async def open_self_timezone(
+    callback: CallbackQuery, button: Button, manager: DialogManager
+) -> None:
+    if await self_timezone_user(manager) is None:
         await callback.answer(denied_text())
         return
-    await manager.switch_to(StaffSG.timezone_presets)
+    await manager.start(StaffSG.timezone_presets)
+
+
+async def on_timezone(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
+    if await _target_or_back(callback, manager) != actor_id(manager):
+        await callback.answer(denied_text())
+        return
+    await open_self_timezone(callback, button, manager)
+
+
+async def _timezone_getter(manager: DialogManager, zones: Any) -> dict[str, Any]:
+    user = await self_timezone_user(manager)
+    if user is None:
+        return _denied(manager, zones=[])
+    effective = effective_staff_timezone(
+        getattr(user, "timezone", None), await _default_timezone(manager)
+    )
+    return {
+        "text": compose(
+            manager,
+            _("Часовой пояс: {timezone}").format(timezone=effective),
+            _("Введите город, IANA zone или смещение (например +2)"),
+        ),
+        "zones": [(z, z) for z in zones],
+        **nav_texts(),
+    }
 
 
 async def timezone_presets_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
-    target = _target(dialog_manager)
-    user = await (await resolve(dialog_manager, IamAdminQueries)).user(target) if target else None
-    if user is None or target != actor_id(dialog_manager):
-        return _denied(dialog_manager, zones=[])
-    return {
-        "text": compose(dialog_manager, _("Выберите мой часовой пояс")),
-        "zones": [(z, z) for z in TIMEZONE_PRESETS],
-        **nav_texts(),
-    }
+    dialog_manager.dialog_data.pop("self_timezone_zones", None)
+    return await _timezone_getter(dialog_manager, TIMEZONE_PRESETS)
+
+
+async def timezone_results_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[str, Any]:
+    return await _timezone_getter(
+        dialog_manager, dialog_manager.dialog_data.get("self_timezone_zones", [])
+    )
+
+
+async def on_timezone_query(
+    message: Message, widget: Any, manager: DialogManager, value: str
+) -> None:
+    if await self_timezone_user(manager) is None:
+        return
+    manager.dialog_data["self_timezone_zones"] = [z for z, _ in search_timezones(value)[:10]]
+    await manager.switch_to(StaffSG.timezone_results)
 
 
 async def on_timezone_value(
     callback: CallbackQuery, widget: Any, manager: DialogManager, item: str
 ) -> None:
-    if await _target_or_back(callback, manager) != actor_id(manager):
+    state = manager.current_context().state
+    zones: tuple[str, ...] = ()
+    if state == StaffSG.timezone_presets:
+        zones = TIMEZONE_PRESETS
+    elif state == StaffSG.timezone_results:
+        zones = manager.dialog_data.get("self_timezone_zones", ())
+    if item not in zones or await self_timezone_user(manager) is None:
+        await callback.answer(denied_text())
         return
     try:
         value = validate_timezone(item)
@@ -562,7 +625,7 @@ async def on_timezone_value(
         manager, UserAdminService, lambda s: s.set_timezone(actor_id(manager), value)
     )
     if outcome.ok:
-        await manager.switch_to(StaffSG.card)
+        await manager.done()
 
 
 async def on_effective(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
@@ -739,8 +802,17 @@ def staff_dialog() -> Dialog:
             ScrollingGroup(
                 _select("u_tz", "zones", on_timezone_value), id="u_tz_scroll", width=1, height=10
             ),
-            _back(StaffSG.card, "u_tz_back"),
+            TextInput(id="u_tz_query", on_success=on_timezone_query),
+            Cancel(Format("{btn_back}"), id="u_tz_back"),
             state=StaffSG.timezone_presets,
             getter=timezone_presets_getter,
+        ),
+        Window(
+            text,
+            Column(_select("u_tz_result", "zones", on_timezone_value)),
+            TextInput(id="u_tz_retry", on_success=on_timezone_query),
+            _back(StaffSG.timezone_presets, "u_tz_results_back"),
+            state=StaffSG.timezone_results,
+            getter=timezone_results_getter,
         ),
     )

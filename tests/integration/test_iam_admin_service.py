@@ -23,6 +23,7 @@ from app.modules.iam.cache import PermissionCache
 from app.modules.iam.models import (
     Permission,
     Role,
+    Tenant,
     TenantModerator,
     TenantSettings,
     User,
@@ -39,7 +40,9 @@ from app.modules.iam.permissions import (
     ROLE_SENIOR_MODERATOR,
     ROLES_MANAGE,
     SETTINGS_MANAGE,
+    TENANTS_MANAGE,
     TENANTS_VIEW_ALL,
+    USERS_VIEW,
 )
 from app.modules.iam.service import PERMISSION_DENIED, PermissionService
 from app.modules.logging.models import AuditLog
@@ -559,6 +562,84 @@ async def _custom_role(services: dict[str, Any], admin: Ref, *slugs: str) -> uui
     role_uuid: uuid.UUID = role.id
     await services["role"].set_permissions(admin.telegram_user_id, role_uuid, list(slugs))
     return role_uuid
+
+
+@pytest.mark.req("R-II.17")
+async def test_staff_timezone_validates_and_audits_self_without_users_view(
+    session: AsyncSession, services: dict[str, Any], perms: PermissionService
+) -> None:
+    staff = await make_user(session, role=ROLE_MODERATOR)
+    tg, action = staff.telegram_user_id, "iam.user.timezone_update"
+    assert not (await perms.check(tg, USERS_VIEW)).allowed
+    timezone = select(User.timezone).where(User.id == staff.id)
+    assert (await session.execute(timezone)).one() == (None,)
+
+    with pytest.raises(ValidationError) as info:
+        await services["user"].set_timezone(tg, "Invalid/Zone")
+    assert info.value.code == svc.INVALID_TIMEZONE
+    assert (await session.execute(timezone)).one() == (None,)
+    assert await audit_count(session, action, tg) == 0
+
+    await services["user"].set_timezone(tg, "America/New_York")
+    assert (await session.execute(timezone)).one() == ("America/New_York",)
+    audit = (
+        await session.scalars(
+            select(AuditLog).where(AuditLog.action == action, AuditLog.actor_id == tg)
+        )
+    ).one()
+    assert audit.result == "success" and audit.payload is not None
+    assert audit.payload["before"]["telegram_user_id"] == tg
+    assert audit.payload["before"]["timezone"] is None
+    assert audit.payload["after"] == {**audit.payload["before"], "timezone": "America/New_York"}
+
+
+@pytest.mark.req("R-II.17")
+async def test_tenant_timezone_requires_manage_and_scope_and_preserves_renamed_name(
+    session: AsyncSession, services: dict[str, Any], perms: PermissionService
+) -> None:
+    admin = await make_user(session, role=ROLE_ADMIN)
+    manager, shop = await _moderated(session, services, admin)
+    foreign = await _shop(services, admin)
+    tg, action = manager.telegram_user_id, "iam.tenant.update"
+    tenant_service = services["tenant"]
+    shop_state = select(Tenant.name, Tenant.timezone).where(Tenant.id == shop.id)
+    foreign_zone = select(Tenant.timezone).where(Tenant.id == foreign.id)
+    original_name, original_zone = (await session.execute(shop_state)).one()
+    original_foreign_zone = (await session.execute(foreign_zone)).one()
+
+    assert (await perms.get_snapshot(tg)).has_tenant_access(shop.id)
+    with pytest.raises(PermissionDeniedError) as info:
+        await tenant_service.set_timezone(tg, shop.id, "Asia/Tokyo")
+    assert info.value.code == PERMISSION_DENIED
+
+    await services["access"].upsert_override(
+        admin.telegram_user_id, tg, TENANTS_MANAGE, is_granted=True
+    )
+    assert (await perms.check(tg, TENANTS_MANAGE)).allowed
+    assert not (await perms.get_snapshot(tg)).has_tenant_access(foreign.id)
+    with pytest.raises(PermissionDeniedError) as info:
+        await tenant_service.set_timezone(tg, foreign.id, "Asia/Tokyo")
+    assert info.value.code == PERMISSION_DENIED
+    for invalid in ("Invalid/Zone", None):
+        with pytest.raises(ValidationError) as invalid_info:
+            await tenant_service.set_timezone(tg, shop.id, invalid)
+        assert invalid_info.value.code == svc.INVALID_TIMEZONE
+    assert (await session.execute(shop_state)).one() == (original_name, original_zone)
+    assert (await session.execute(foreign_zone)).one() == original_foreign_zone
+    assert await audit_count(session, action, tg) == 0
+
+    await tenant_service.update(admin.telegram_user_id, shop.id, name="Renamed Shop")
+    await tenant_service.set_timezone(tg, shop.id, "Asia/Tokyo")
+    assert (await session.execute(shop_state)).one() == ("Renamed Shop", "Asia/Tokyo")
+    audit = (
+        await session.scalars(
+            select(AuditLog).where(AuditLog.action == action, AuditLog.actor_id == tg)
+        )
+    ).one()
+    assert audit.tenant_id == shop.id and audit.result == "success" and audit.payload is not None
+    assert audit.payload["before"]["name"] == "Renamed Shop"
+    assert audit.payload["before"]["timezone"] == original_zone
+    assert audit.payload["after"] == {**audit.payload["before"], "timezone": "Asia/Tokyo"}
 
 
 @pytest.mark.req("R-II.2", "R-II.4")

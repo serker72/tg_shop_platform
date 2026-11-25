@@ -26,6 +26,7 @@ class TenantsSG(StatesGroup):
 class StaffSG(StatesGroup):
     list = State()
     timezone_presets = State()
+    timezone_results = State()
     onboarding = State()
     onboarding_results = State()
     add = State()
