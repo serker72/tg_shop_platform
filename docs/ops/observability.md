@@ -137,7 +137,7 @@ SQLite в `OBS_URGENTRY_DATA_DIR` (`/data`, владелец uid 10001), пор�
 | `SENTRY_DSN` | вычисляется: `http://<key>@<хост URGENTRY_INTERNAL_URL>/1` |
 
 - `make obs-bootstrap` (вызывается из `make obs-up`) дописывает пустые `URGENTRY_BOOTSTRAP_*` и
-  `SENTRY_DSN` в `ENV_FILE` (копия `ENV_FILE.bak`), идемпотентно. Для `PROJECT_ENVIRONMENT=test`
+  `SENTRY_DSN` в `ENV_FILE`, идемпотентно. Для `PROJECT_ENVIRONMENT=test`
   `SENTRY_DSN` не пишется.
 - **DSN и числовой project id.** `sentry_sdk` требует числовой id проекта, urgentry работает со
   slug. Внутренний listener Caddy `:8081` переписывает `/api/1/*` → `/api/default-project/*`

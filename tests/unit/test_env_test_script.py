@@ -240,14 +240,9 @@ def test_make_env_skip_and_force(tmp_path: Path) -> None:
 
     forced = make("FORCE=1")
     assert forced.returncode == 0, forced.stderr
-    backups = list(tmp_path.glob("x.env.bak.*"))
-    assert len(backups) == 1
-    assert re.fullmatch(r"x\.env\.bak\.\d{14}(\.\d+)?", backups[0].name)
-    assert backups[0].read_text(encoding="utf-8") == old
-    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert _values(target)["POSTGRES_PASSWORD"] != old_pw
-    assert not (tmp_path / "x.env.new").exists()
+    assert list(tmp_path.iterdir()) == [target]
     for proc in (first, skip, forced):
         assert old_pw not in proc.stdout + proc.stderr
 

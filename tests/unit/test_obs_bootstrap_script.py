@@ -136,6 +136,7 @@ def test_prepare_only_generates_secrets(tmp_path: Path) -> None:
     assert written["URGENTRY_BOOTSTRAP_PAT"]
     assert "SENTRY_DSN" not in written
     assert not env_out.exists()
+    assert set(tmp_path.iterdir()) == {env_file, tmp_path / "fakebin"}
 
 
 def test_rerun_reports_dsn_up_to_date(tmp_path: Path) -> None:

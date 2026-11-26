@@ -7,7 +7,6 @@
 #    urgentry creates the owner + PAT from them on the first start (no bootstrap-credentials.txt),
 #    so make obs-up runs `--prepare` (this step only) BEFORE `docker compose up`.
 #    Only these keys and SENTRY_DSN are touched; other lines, order and comments are kept.
-#    Before the first change the env file is copied to <env file>.bak.
 # 2. Waits for /healthz of the running urgentry, reads the default project and its key via the
 #    API (GET /api/0/projects/, /api/0/projects/<org>/<project>/keys/, Bearer PAT; requests run
 #    inside the container, the PAT never appears in host argv) and writes
@@ -34,7 +33,6 @@ if [[ ${1:-} == --prepare ]]; then prepare_only=1; shift; fi
 env_file=${1:?usage: obs_bootstrap.sh [--prepare] <env file>}
 [[ -f $env_file ]] || { echo "ERROR: $env_file not found (cp .env.example .env)" >&2; exit 1; }
 
-backed_up=0
 get_env() {  # last value of KEY in env file, quotes stripped
     tr -d '\r' <"$env_file" \
         | sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1=//p" | tail -n1 \
@@ -46,10 +44,6 @@ set_env() {  # set_env KEY VALUE: replace existing line(s) or append; value prin
     case $value in *'$'* | *'`'* | *'"'* | *"'"* | *$'\n'*)
         echo "ERROR: value of $key must not contain \$, backticks, quotes or newlines" >&2; exit 1;;
     esac
-    if [[ $backed_up == 0 ]]; then
-        cp -p "$env_file" "$env_file.bak"; backed_up=1
-        echo "Backup: $env_file.bak"
-    fi
     if has_key "$key"; then
         tmp=$(mktemp "${env_file}.XXXXXX")
         K="$key" V="$value" awk '

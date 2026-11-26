@@ -121,7 +121,7 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    Копирует `.env.example`, подставляет случайные пароли (права `600`), генерирует Basic Auth для
    Caddy: `OBS_AUTH_USER=admin` и пароль — **он печатается один раз (блок `SAVE THIS PASSWORD`),
    сохраните его**. Потеряли — `make obs-auth` задаст новый. Существующий `.env` не трогается;
-   `make env FORCE=1` перегенерирует все секреты (бэкап `.env.bak.<ts>`) — на рабочих данных не
+   `make env FORCE=1` перегенерирует все секреты, заменяя текущий файл — на рабочих данных не
    использовать: БД, Redis, RabbitMQ продолжат требовать старые пароли, а новый
    `ENCRYPTION_KEY` не расшифрует сохранённые секреты.
 
@@ -192,9 +192,8 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
 защищены только адресом в VPN; связывает хосты одна строка `SENTRY_DSN`. VPS 2 публичный
 (Caddy на 80/443), поэтому на нём не должно оставаться `MASTER_BOT_TOKEN`, `ENCRYPTION_KEY`,
 паролей БД — а на VPS 1 не нужны пароли Grafana/urgentry/Caddy. Это делает
-`make env-role ROLE=app|obs`: очищает значения секретов чужого хоста в `.env` и в `.env.bak`
-(бэкап `make obs-up`); ключи остаются, `SENTRY_DSN` не трогается. Исходный файл сохраняется в
-`.env.bak.<ts>` (права 600) — он нужен для отката ошибочной роли и удаляется на шаге 7.
+`make env-role ROLE=app|obs`: очищает значения секретов чужого хоста в `.env`; ключи остаются,
+`SENTRY_DSN` не трогается. Перед запуском проверьте роль: команда заменяет исходный файл.
 
 0. **Оба хоста**: WireGuard, firewall, chrony, swap — [docs/ops/network.md](docs/ops/network.md);
    [подготовка хоста](#подготовка-хоста-от-root-один-раз) (выделенный пользователь, каталоги `/opt`).
@@ -256,24 +255,15 @@ install -d -o tgshop -g tgshop /opt/tg_shop_platform /opt/tg_shop_platform_data 
    ```bash
    make env-role ROLE=obs
    make obs-config          # проверка .env и compose после очистки
-   grep -E '^(MASTER_BOT_TOKEN|ENCRYPTION_KEY|POSTGRES_PASSWORD)=.' .env .env.bak 2>/dev/null   # пусто
+   if grep -qE '^(MASTER_BOT_TOKEN|ENCRYPTION_KEY|POSTGRES_PASSWORD)=.' .env; then
+       echo 'В .env остались секреты приложения' >&2
+   fi
    ```
 
 6. **Проверки** с обеих сторон — [Проверка результата](#проверка-результата).
 
-7. **Удалить бэкапы с секретами** (после успешных проверок, на VPS 1 и VPS 2):
-
-   ```bash
-   for f in .env.bak.*; do [ -f "$f" ] && shred -u "$f"; done   # без ошибки, если бэкапов нет
-   ```
-
-**Ошиблись ролью** (например, `ROLE=obs` на VPS 1): восстановите файл из бэкапа, который
-напечатала команда, и повторите с верной ролью:
-
-```bash
-install -m 600 .env.bak.<YYYYmmddHHMMSS> .env
-make env-role ROLE=app
-```
+**Ошиблись ролью** (например, `ROLE=obs` на VPS 1): восстановите удалённые значения
+из доверенного хранилища секретов и повторите команду с верной ролью.
 
 **Изменение `SENTRY_DSN`**: если после повторного `make obs-up`/`make obs-bootstrap` на VPS 2
 изменился `SENTRY_DSN`, перенесите на VPS 1 **только его значение** (весь файл копировать нельзя:

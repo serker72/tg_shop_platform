@@ -171,9 +171,8 @@ install: ## Install dependencies (uv sync) and pre-commit hooks
 	uv sync
 	uv run pre-commit install
 
-# FORCE=1: the new file is generated into <file>.new first; only after success the old one is
-# backed up to <file>.bak.<timestamp> (mode 600, never overwritten) and replaced.
-env: ## Generate ENV_FILE from .env.example with random secrets (SKIP if exists; FORCE=1 regenerates, backup .bak.<ts>)
+# FORCE=1: generate the new file first, then replace the old one only on success.
+env: ## Generate ENV_FILE from .env.example with random secrets (SKIP if exists; FORCE=1 replaces it)
 	@$(root_guard)
 	@set -e; f="$(ENV_FILE)"; \
 	if [ -e "$$f" ] && [ "$(FORCE)" != "1" ]; then echo "SKIP: $$f exists (FORCE=1 to regenerate)"; exit 0; fi; \
@@ -182,11 +181,8 @@ env: ## Generate ENV_FILE from .env.example with random secrets (SKIP if exists;
 			bash ops/scripts/env_test.sh --init .env.example "$$f"; exit 0; fi; \
 	rm -f "$$f.new"; \
 	bash ops/scripts/env_test.sh --init .env.example "$$f.new"; \
-	bak="$$f.bak.$$(date +%Y%m%d%H%M%S)"; \
-	if [ -e "$$bak" ]; then bak="$$bak.$$$$"; fi; \
-	install -m 600 "$$f" "$$bak"; \
 	mv -f "$$f.new" "$$f"; \
-	echo "Backup: $$bak; $$f replaced (old passwords stay in existing PG/Redis/RabbitMQ data)"
+	echo "$$f replaced (old passwords stay in existing PG/Redis/RabbitMQ data)"
 
 # The main env file is generated automatically on a fresh clone (only for ENV_FILE=.env;
 # .env.test comes from make env-test).
@@ -266,8 +262,8 @@ env-check: ## Check ENV_FILE and TEST_ENV_FILE have all keys of .env.example (na
 	@bash ops/scripts/env_check.sh .env.example "$(ENV_FILE)" "$(TEST_ENV_FILE)"
 
 # Two-host deploy: one .env is made on VPS 2 and copied to VPS 1 (README.md); each host clears
-# the secrets of the other one (values only, keys stay; backup <file>.bak.<ts>, mode 600).
-env-role: ## Clear secrets of the other host in ENV_FILE: ROLE=app (VPS 1) | ROLE=obs (VPS 2), backup .bak.<ts>
+# the secrets of the other one (values only, keys stay; mode 600).
+env-role: ## Clear secrets of the other host in ENV_FILE: ROLE=app (VPS 1) | ROLE=obs (VPS 2)
 	@case "$(ROLE)" in app|obs) ;; *) echo "ERROR: ROLE=app|obs required: make env-role ROLE=app (VPS 1, application) or ROLE=obs (VPS 2, monitoring)" >&2; exit 2;; esac; \
 	sh ops/scripts/env_role.sh "$(ROLE)" "$(ENV_FILE)"
 
@@ -460,7 +456,7 @@ obs-up: init-dirs ## Start observability stack (ENV_FILE=.env.test for test copy
 	$(OBS_COMPOSE) up -d --build --wait --wait-timeout $(WAIT_TIMEOUT)
 	@$(MAKE) --no-print-directory obs-bootstrap ENV_FILE=$(ENV_FILE)
 
-obs-bootstrap: ## Idempotent: urgentry project key via API -> SENTRY_DSN in ENV_FILE (backup .bak)
+obs-bootstrap: ## Idempotent: urgentry project key via API -> SENTRY_DSN in ENV_FILE
 	@$(call obs_env); \
 	bash ops/scripts/obs_bootstrap.sh "$(ENV_FILE)"
 

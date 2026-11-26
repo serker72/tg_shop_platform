@@ -28,6 +28,7 @@
 #   *_DATA_DIR are written as literal paths under the test PROJECT_DATA_DIR (order-independent);
 #   *_PORT_HOST are shifted by PORT_OFFSET (default 20000), result must be within 1..65535;
 #   MASTER_BOT_TOKEN -> mock; MASTER_BOT_PROXY_URL -> empty, MASTER_BOT_USE_PROXY=false;
+#   BOT_WORKER_MAX_BOTS is retained as a non-secret runtime limit;
 #   ENCRYPTION_KEYS_OLD -> empty;
 #   ENCRYPTION_KEY is kept from an existing target file if valid, otherwise a new one is generated;
 #   URGENTRY_BOOTSTRAP_PASSWORD / URGENTRY_BOOTSTRAP_PAT of the test obs stack are own values

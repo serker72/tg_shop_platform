@@ -87,10 +87,6 @@ def _values(env: Path) -> dict[str, str]:
     return result
 
 
-def _ts_backups(env: Path) -> list[Path]:
-    return sorted(env.parent.glob(f"{env.name}.bak.*"))
-
-
 @pytest.mark.parametrize(
     ("role", "cleared", "kept"),
     [("app", OBS_SECRETS, APP_SECRETS), ("obs", APP_SECRETS, OBS_SECRETS)],
@@ -117,48 +113,9 @@ def test_role_clears_other_host_secrets(
         ln.split("=", 1)[0] for ln in before.splitlines()
     ]
     assert stat.S_IMODE(env.stat().st_mode) == 0o600
-    backups = _ts_backups(env)
-    assert len(backups) == 1
-    assert re.fullmatch(r"\.env\.bak\.\d{14}(\.\d+)?", backups[0].name)
-    assert backups[0].read_text(encoding="utf-8") == before
-    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
-    assert f"shred -u {backups[0]}" in result.stderr
-    assert not list(tmp_path.glob(".*.role.*"))
+    assert list(tmp_path.iterdir()) == [env]
     for k in cleared:
         assert old_values[k] not in result.stdout + result.stderr
-
-
-def test_obs_role_clears_obs_bootstrap_backup(tmp_path: Path) -> None:
-    """After ROLE=obs only the own .env.bak.<ts> still holds the app secrets."""
-    env = _write_env(tmp_path)
-    bak = _write_env(tmp_path, ".env.bak")  # cp -p .env .env.bak of obs_bootstrap.sh
-
-    result = _run("obs", str(env))
-
-    assert result.returncode == 0, result.stderr
-    assert all(_values(bak)[k] == "" for k in APP_SECRETS)
-    assert _values(bak)["URGENTRY_BOOTSTRAP_PAT"] == _secret_value("URGENTRY_BOOTSTRAP_PAT")
-    assert stat.S_IMODE(bak.stat().st_mode) == 0o600
-    ts_backups = _ts_backups(env)
-    assert len(ts_backups) == 1
-    holders = {
-        p.name
-        for p in tmp_path.iterdir()
-        if any(_secret_value(k) in p.read_text(encoding="utf-8") for k in APP_SECRETS)
-    }
-    assert holders == {ts_backups[0].name}
-
-
-def test_obs_bootstrap_backup_cleared_even_if_env_is_clean(tmp_path: Path) -> None:
-    env = _write_env(tmp_path)
-    assert _run("obs", str(env)).returncode == 0
-    bak = _write_env(tmp_path, ".env.bak")
-
-    result = _run("obs", str(env))
-
-    assert result.returncode == 0, result.stderr
-    assert "unchanged" in result.stdout
-    assert all(_values(bak)[k] == "" for k in APP_SECRETS)
 
 
 def test_idempotent(tmp_path: Path) -> None:
@@ -171,7 +128,7 @@ def test_idempotent(tmp_path: Path) -> None:
     assert second.returncode == 0, second.stderr
     assert "unchanged" in second.stdout
     assert env.read_text(encoding="utf-8") == after_first
-    assert len(_ts_backups(env)) == 1
+    assert list(tmp_path.iterdir()) == [env]
 
 
 @pytest.mark.parametrize(
@@ -217,19 +174,14 @@ def test_nothing_to_clear_keeps_file(tmp_path: Path, content: str) -> None:
     assert result.returncode == 0, result.stderr
     assert "unchanged" in result.stdout
     assert env.read_text(encoding="utf-8") == content
-    assert _ts_backups(env) == []
+    assert list(tmp_path.iterdir()) == [env]
 
 
-@pytest.mark.parametrize("name", [".env", ".env.bak"])
-def test_symlink_is_refused(tmp_path: Path, name: str) -> None:
+def test_symlink_is_refused(tmp_path: Path) -> None:
     real = _write_env(tmp_path, "real.env")
     before = real.read_text(encoding="utf-8")
     env = tmp_path / ".env"
-    if name == ".env":
-        env.symlink_to(real)
-    else:
-        _write_env(tmp_path)
-        (tmp_path / ".env.bak").symlink_to(real)
+    env.symlink_to(real)
 
     result = _run("obs", str(env))
 
@@ -248,7 +200,7 @@ def test_bad_role_is_rejected(tmp_path: Path, role: str) -> None:
     assert result.returncode != 0
     assert "ROLE=app|obs" in result.stderr
     assert env.read_text(encoding="utf-8") == before
-    assert _ts_backups(env) == []
+    assert list(tmp_path.iterdir()) == [env]
 
 
 def test_missing_file_is_an_error(tmp_path: Path) -> None:
@@ -291,4 +243,3 @@ def test_make_env_role_requires_role(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "ROLE=app|obs" in result.stderr
-    assert _ts_backups(env) == []

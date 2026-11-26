@@ -7,17 +7,15 @@
 # (SENTRY_DSN, URGENTRY_BOOTSTRAP_*) and copied to VPS 1. Then:
 #   ROLE=app (VPS 1, application): clears the observability secrets (OBS_SECRETS);
 #   ROLE=obs (VPS 2, monitoring):  clears the application secrets (APP_SECRETS).
-# SENTRY_DSN and non-secret values (including DEFAULT_TIMEZONE) are kept.
+# SENTRY_DSN and non-secret values are kept on both hosts. BOT_WORKER_MAX_BOTS
+# is a non-secret app setting, not part of APP_SECRETS (same as DEFAULT_TIMEZONE).
 # Secret values are cleared, keys stay (`KEY=`), so
 # env_check.sh finds every key of .env.example; comments, order and other lines are unchanged.
 # Every `[export ]KEY=...` line of a listed key is cleared (duplicates, quoted values, `KEY= value`);
 # such a line is written as `[export ]KEY=` without a trailing CR (other CRLF lines stay as is).
-# Before a change the file is backed up to <file>.bak.<YYYYmmddHHMMSS> (mode 600) and replaced
-# atomically (temp file in the same dir + mv, mode 600). The same clearing is applied to <file>.bak
-# (backup of obs_bootstrap.sh made by make obs-up), without a further backup.
-# <file>.bak.<ts> keeps the secrets (rollback of a wrong role): the script prints a warning to
-# remove them with shred -u after checking. Symlinked env files are refused (mv would replace
-# the link). Idempotent: nothing to clear -> files untouched. Secret values are never printed.
+# The file is replaced atomically (temp file in the same dir + mv, mode 600).
+# Symlinked env files are refused (mv would replace the link).
+# Idempotent: nothing to clear -> file untouched. Secret values are never printed.
 set -eu
 
 APP_SECRETS="POSTGRES_PASSWORD POSTGRES_MONITORING_PASSWORD REDIS_PASSWORD RABBITMQ_PASSWORD
@@ -49,12 +47,10 @@ case $role in
     obs) clear=$APP_SECRETS; other=app ;;
     *) usage ;;
 esac
-for f in "$file" "$file.bak"; do
-    if [ -L "$f" ]; then
-        echo "ERROR: $f is a symlink; run env-role on the real file (ENV_FILE=<target>)" >&2
-        exit 1
-    fi
-done
+if [ -L "$file" ]; then
+    echo "ERROR: $file is a symlink; run env-role on the real file (ENV_FILE=<target>)" >&2
+    exit 1
+fi
 [ -f "$file" ] || { echo "ERROR: $file not found" >&2; exit 1; }
 
 tmp=""
@@ -91,26 +87,6 @@ if cmp -s "$file" "$tmp"; then
     rm -f -- "$tmp"; tmp=""
     echo "OK: $file has no $other secrets (ROLE=$role), unchanged"
 else
-    bak="$file.bak.$(date +%Y%m%d%H%M%S)"
-    [ -e "$bak" ] && bak="$bak.$$"
-    (umask 077 && cp -- "$file" "$bak")
-    chmod 600 "$bak"
     replace "$file"
-    echo "Backup: $bak (mode 600)"
     echo "Cleared $other secrets in $file (ROLE=$role)"
 fi
-
-if [ -f "$file.bak" ]; then
-    clean_to "$file.bak"
-    if cmp -s "$file.bak" "$tmp"; then
-        rm -f -- "$tmp"; tmp=""
-    else
-        replace "$file.bak"
-        echo "Cleared $other secrets in $file.bak (backup of obs_bootstrap.sh)"
-    fi
-fi
-
-for b in "$file".bak.[0-9]*; do
-    [ -f "$b" ] || continue
-    echo "WARNING: $b may contain secrets of the other host; after checking remove it: shred -u $b" >&2
-done
