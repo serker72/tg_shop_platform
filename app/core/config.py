@@ -531,6 +531,15 @@ class TelegramSettings(BaseSettings):
         return value
 
 
+class BotWorkerSettings(BaseSettings):
+    """Limits for the in-process polling supervisor."""
+
+    model_config = _base_config("")
+    # Resolve an explicit field name in the init source before merging the env alias.
+    model_config["validate_by_name"] = True
+    max_bots: int = Field(default=100, ge=1, validation_alias="BOT_WORKER_MAX_BOTS")
+
+
 class SchedulerSettings(BaseSettings):
     """Background scheduler of ``bot_worker`` (``app/core/scheduler``), no env prefix.
 
@@ -565,6 +574,7 @@ _NESTED_SECTIONS: Final[dict[str, type[BaseSettings]]] = {
     "observability": ObservabilitySettings,
     "proxy": ProxySettings,
     "scheduler": SchedulerSettings,
+    "bot_worker": BotWorkerSettings,
     "telegram": TelegramSettings,
 }
 
@@ -595,6 +605,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     proxy: ProxySettings = Field(default_factory=ProxySettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
+    bot_worker: BotWorkerSettings = Field(default_factory=BotWorkerSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
 
     @field_validator("default_timezone")

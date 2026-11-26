@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -72,6 +73,27 @@ def make_settings(env_file: str | None = None, **overrides: Any) -> Settings:
     the pydantic-settings stubs, hence the single targeted ``type: ignore``.
     """
     return Settings(_env_file=env_file, **overrides)
+
+
+def test_bot_worker_max_bots_init_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_WORKER_MAX_BOTS", "8")
+
+    assert Settings(_env_file=None).bot_worker.max_bots == 8
+    assert Settings(_env_file=None, bot_worker={"max_bots": 2}).bot_worker.max_bots == 2
+
+
+def test_bot_worker_max_bots_precedence_with_default_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BOT_WORKER_MAX_BOTS", raising=False)
+    (tmp_path / ".env").write_text("BOT_WORKER_MAX_BOTS=5\n", encoding="utf-8")
+
+    assert Settings().bot_worker.max_bots == 5
+
+    monkeypatch.setenv("BOT_WORKER_MAX_BOTS", "8")
+    assert Settings().bot_worker.max_bots == 8
+    assert Settings(bot_worker={"max_bots": 2}).bot_worker.max_bots == 2
 
 
 def write_env_file(tmp_path: Any, content: str) -> str:
