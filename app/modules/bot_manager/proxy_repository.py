@@ -6,7 +6,9 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, false, func, select, update
+from sqlalchemy import ColumnElement, Select, any_, bindparam, false, func, select, update
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.bot_manager.models import PROXY_STATUS_ACTIVE, PROXY_STATUS_QUARANTINE, Bot, Proxy
@@ -114,10 +116,18 @@ class ProxyRepository:
         return int(await self._session.scalar(stmt) or 0)
 
     async def release_bots(self, proxy_id: UUID) -> tuple[UUID, ...]:
-        """``proxy_id = NULL`` for every bot of the proxy; ids of the released bots."""
+        """With the proxy locked, clear its bindings and return the released bot ids."""
+        # Match stop_tenant's lock order rather than letting UPDATE's plan choose it.
+        lock_stmt = (
+            select(Bot.id).where(Bot.proxy_id == proxy_id).order_by(Bot.id).with_for_update()
+        )
+        bot_ids = (await self._session.scalars(lock_stmt)).all()
+        if not bot_ids:
+            return ()
+        locked_ids = bindparam("locked_bot_ids", bot_ids, type_=ARRAY(PG_UUID(as_uuid=True)))
         stmt = (
             update(Bot)
-            .where(Bot.proxy_id == proxy_id)
+            .where(Bot.proxy_id == proxy_id, Bot.id == any_(locked_ids))
             .values(proxy_id=None, updated_at=func.now())
             .returning(Bot.id)
             .execution_options(synchronize_session=False)

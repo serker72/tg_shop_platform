@@ -55,6 +55,7 @@ def _error(error: DomainError) -> str:
         "invalid_token": _("Telegram отклонил токен."),
         "bot_identity_mismatch": _("Токен принадлежит другому боту."),
         "bot_already_exists": _("Бот уже добавлен."),
+        "bot_in_deleted_tenant": _("Бот уже добавлен и привязан к удалённому магазину."),
         "no_proxy_available": _("Нет свободного прокси."),
         "telegram_unavailable": _("Telegram недоступен. Попробуйте ещё раз."),
         "tenant_inactive": _("Магазин доступен только для просмотра."),
@@ -65,6 +66,20 @@ def _label(bot: Any) -> str:
     return " ".join(filter(None, (bot.name, f"@{bot.username}" if bot.username else None))) or str(
         bot.telegram_bot_id
     )
+
+
+def _tenant_stop_reason(error: str | None) -> str | None:
+    if error == "tenant_inactive":
+        return _("Магазин деактивирован.")
+    if error == "tenant_deleted":
+        return _("Магазин удалён.")
+    return None
+
+
+def _list_label(bot: Bot, *, read_only: bool) -> str:
+    label = f"{ICONS[bot.status]} {_label(bot)} · " + (_("вкл") if bot.is_active else _("выкл"))
+    reason = _tenant_stop_reason(bot.last_error) if read_only else None
+    return f"{label} · {reason}" if reason else label
 
 
 async def list_getter(dialog_manager: DialogManager, **_kwargs: Any) -> dict[str, Any]:
@@ -79,7 +94,7 @@ async def list_getter(dialog_manager: DialogManager, **_kwargs: Any) -> dict[str
     items = [
         (
             bot.id.hex,
-            f"{ICONS[bot.status]} {_label(bot)} · " + (_("вкл") if bot.is_active else _("выкл")),
+            _list_label(bot, read_only=page.read_only),
             bot.is_active,
         )
         for bot in page.items
@@ -155,7 +170,9 @@ async def card_getter(dialog_manager: DialogManager, **_kwargs: Any) -> dict[str
             _label(bot),
             f"Telegram ID: {bot.telegram_bot_id}",
             f"{ICONS[bot.status]} {bot.status} · " + (_("вкл") if bot.is_active else _("выкл")),
-            _("Ошибка: {error}").format(error=bot.last_error or "—"),
+            _("Ошибка: {error}").format(
+                error=_tenant_stop_reason(bot.last_error) or bot.last_error or "—"
+            ),
             _("Прокси: {proxy}").format(proxy=proxy or "—"),
         ),
         "card_items": [bot.id.hex],

@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from operator import itemgetter
-from typing import Any, Final
+from typing import Any, Final, Literal
+from uuid import UUID
 
+import structlog
 from aiogram.types import CallbackQuery, Message
 from aiogram_dialog import Dialog, DialogManager, Window
 from aiogram_dialog.widgets.input import TextInput
@@ -19,7 +21,9 @@ from aiogram_dialog.widgets.kbd import Button, Cancel, Column, ScrollingGroup, S
 from aiogram_dialog.widgets.text import Format
 
 from app.core.i18n import gettext as _
+from app.modules.bot_manager.metrics import tenant_bots_stop_failures_total
 from app.modules.bot_manager.presentation.tg_master.states import BotsSG
+from app.modules.bot_manager.service import BotControlService
 from app.modules.iam.admin_service import TENANT_SETTINGS_FIELDS, TenantAdminService
 from app.modules.iam.models import TENANT_SLUG_MAX_LENGTH, TENANT_SLUG_PATTERN
 from app.modules.iam.permissions import TENANTS_MANAGE
@@ -35,6 +39,7 @@ from app.modules.iam.presentation.tg_master.queries import IamAdminQueries
 from app.modules.iam.presentation.tg_master.states import TenantsSG
 from app.shared_kernel.presentation.tg_master.common import (
     actor_id,
+    add_notice,
     compose,
     denied_text,
     error_text,
@@ -47,6 +52,8 @@ from app.shared_kernel.presentation.tg_master.common import (
 from app.shared_kernel.timezones import TIMEZONE_PRESETS, timezone_page, validate_timezone
 
 __all__ = ["NAME_MAX_LENGTH", "parse_chat_id", "parse_name", "parse_slug", "tenants_dialog"]
+
+_log = structlog.get_logger(__name__)
 
 PAGE_SIZE = 10
 NAME_MAX_LENGTH: Final = 128
@@ -268,7 +275,26 @@ async def confirm_getter(dialog_manager: DialogManager, **kwargs: Any) -> dict[s
         "deactivate": _("Деактивировать магазин?"),
     }
     action = str(dialog_manager.dialog_data.get("confirm", ""))
-    return {"text": compose(dialog_manager, questions.get(action, "")), **nav_texts()}
+    if not _can_manage(dialog_manager):
+        return {"text": compose(dialog_manager, denied_text()), **nav_texts()}
+    if action not in questions:
+        return _not_found(dialog_manager)
+    text = questions[action]
+    found = await _current(dialog_manager)
+    if found is None or found[0].is_deleted or (action == "deactivate" and not found[0].is_active):
+        return _not_found(dialog_manager)
+    service = await resolve(dialog_manager, BotControlService)
+    count = await service.count_for_tenant(found[0].id)
+    if count and action == "delete":
+        text = _(
+            "Удалить магазин? Его можно будет восстановить. "
+            "Боты магазина ({count}) будут остановлены, прокси освобождены."
+        ).format(count=count)
+    elif count:
+        text = _("Деактивировать магазин? Боты магазина ({count}) будут остановлены.").format(
+            count=count
+        )
+    return {"text": compose(dialog_manager, text), **nav_texts()}
 
 
 # --- handlers --------------------------------------------------------------------------
@@ -347,18 +373,30 @@ async def on_rename(message: Message, widget: Any, manager: DialogManager, value
         await manager.switch_to(TenantsSG.card)
 
 
+async def _notify_autostart(manager: DialogManager, tenant_id: UUID) -> None:
+    service = await resolve(manager, BotControlService)
+    if await service.count_enabled_for_tenant(tenant_id):
+        add_notice(manager, _("Боты магазина будут запущены автоматически."))
+
+
 async def on_activate(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
     found = await _with_tenant(manager)
     if found is not None:
         actor, tenant_id = actor_id(manager), found[0].id
-        await mutate(manager, TenantAdminService, lambda s: s.activate(actor, tenant_id))
+        outcome = await mutate(manager, TenantAdminService, lambda s: s.activate(actor, tenant_id))
+        tenant = outcome.value
+        if outcome.ok and tenant is not None and tenant.is_active and not tenant.is_deleted:
+            await _notify_autostart(manager, tenant.id)
 
 
 async def on_restore(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
     found = await _with_tenant(manager)
     if found is not None:
         actor, tenant_id = actor_id(manager), found[0].id
-        await mutate(manager, TenantAdminService, lambda s: s.restore(actor, tenant_id))
+        outcome = await mutate(manager, TenantAdminService, lambda s: s.restore(actor, tenant_id))
+        tenant = outcome.value
+        if outcome.ok and tenant is not None and tenant.is_active and not tenant.is_deleted:
+            await _notify_autostart(manager, tenant.id)
 
 
 async def on_ask(callback: CallbackQuery, button: Button, manager: DialogManager) -> None:
@@ -372,10 +410,43 @@ async def on_confirm(callback: CallbackQuery, button: Button, manager: DialogMan
     if found is None:
         return
     actor, tenant_id = actor_id(manager), found[0].id
+    reason: Literal["tenant_inactive", "tenant_deleted"] = (
+        "tenant_deleted" if action == "delete" else "tenant_inactive"
+    )
     if action == "delete":
-        await mutate(manager, TenantAdminService, lambda s: s.soft_delete(actor, tenant_id))
+        ok = (
+            await mutate(manager, TenantAdminService, lambda s: s.soft_delete(actor, tenant_id))
+        ).ok
     elif action == "deactivate":
-        await mutate(manager, TenantAdminService, lambda s: s.deactivate(actor, tenant_id))
+        ok = (
+            await mutate(manager, TenantAdminService, lambda s: s.deactivate(actor, tenant_id))
+        ).ok
+    else:
+        ok = False
+    if ok:
+        try:
+            service = await resolve(manager, BotControlService)
+            await service.stop_tenant(tenant_id, reason=reason, actor=actor)
+        except Exception as exc:
+            tenant_bots_stop_failures_total.inc("failure")
+            _log.warning(
+                "tenant_bots_stop_failed",
+                tenant_id=str(tenant_id),
+                reason=reason,
+                error_type=type(exc).__name__,
+            )
+            warning = (
+                _(
+                    "Магазин удалён, но остановка ботов не подтверждена — "
+                    "боты будут остановлены воркером автоматически."
+                )
+                if action == "delete"
+                else _(
+                    "Магазин деактивирован, но остановка ботов не подтверждена — "
+                    "боты будут остановлены воркером автоматически."
+                )
+            )
+            add_notice(manager, warning)
     await manager.switch_to(TenantsSG.card)
 
 

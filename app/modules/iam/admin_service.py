@@ -717,6 +717,8 @@ class TenantAdminService(_AdminService):
                 raise _NoChange
             before = _tenant_state(tenant)
             await BaseRepository(self._session, Tenant).restore(tenant)
+            # Agreed restore exception: restoring a tenant also activates it atomically.
+            tenant.is_active = True
             await self._audit(
                 actor_telegram_id,
                 "iam.tenant.restore",

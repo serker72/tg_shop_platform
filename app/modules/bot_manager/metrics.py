@@ -31,6 +31,7 @@ __all__ = [
     "OutageState",
     "proxy_failure_verdicts_total",
     "proxy_probe_total",
+    "tenant_bots_stop_failures_total",
 ]
 
 FAILURE_VERDICTS: tuple[str, ...] = ("strike", "outage", "single_proxy", "deduplicated", "error")
@@ -99,3 +100,5 @@ class OutageState:
 
 proxy_failure_verdicts_total = LabeledCounter(FAILURE_VERDICTS)
 proxy_probe_total = LabeledCounter(PROBE_RESULTS)
+# Incremented when the IAM mutation succeeded but the bot stop transaction failed.
+tenant_bots_stop_failures_total = LabeledCounter(("failure",))

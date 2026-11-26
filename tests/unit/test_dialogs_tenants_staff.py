@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -389,7 +390,8 @@ async def test_service_error_is_localized() -> None:
 @SCENARIO
 async def test_deactivate_with_confirmation_and_stale_cache_warning() -> None:
     shop = _tenant("Shop A", "shop-a")
-    env = Env(SUPER, [shop])
+    bots = SimpleNamespace(count_for_tenant=AsyncMock(return_value=0), stop_tenant=AsyncMock())
+    env = Env(SUPER, [shop], bot_control_service=bots)
     env.tenants.cache_invalidated = False
     await env.start()
     await env.press("Магазины")
@@ -399,6 +401,163 @@ async def test_deactivate_with_confirmation_and_stale_cache_warning() -> None:
     await env.press("Да")
     assert env.tenants.calls[-1] == ("deactivate", ACTOR, shop.id)
     assert "кэш прав обновится с задержкой" in env.text()
+
+
+@pytest.mark.req("R-II.16")
+@pytest.mark.parametrize("count", [0, 2])
+@pytest.mark.parametrize(
+    ("button", "operation", "reason", "question", "suffix"),
+    [
+        ("Деактивировать", "deactivate", "tenant_inactive", "Деактивировать магазин?", "."),
+        (
+            "Удалить",
+            "soft_delete",
+            "tenant_deleted",
+            "Удалить магазин? Его можно будет восстановить.",
+            ", прокси освобождены.",
+        ),
+    ],
+)
+async def test_tenant_autostop_confirmation(
+    count: int, button: str, operation: str, reason: str, question: str, suffix: str
+) -> None:
+    shop = _tenant("Shop", "shop")
+
+    async def stop(*args: Any, **kwargs: Any) -> None:
+        assert env.tenants.calls[-1] == (operation, ACTOR, shop.id)
+        if operation == "soft_delete":
+            assert shop.is_deleted
+        else:
+            assert not shop.is_active
+
+    bots = SimpleNamespace(
+        count_for_tenant=AsyncMock(return_value=count), stop_tenant=AsyncMock(side_effect=stop)
+    )
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        tenants=frozenset({shop.id}),
+        role_permissions={TENANTS_MANAGE: frozenset({"manager"})},
+    )
+    env = Env(snapshot, [shop], bot_control_service=bots)
+    env.tenants.handlers["soft_delete"] = lambda actor, tenant_id: env._set(
+        tenant_id, is_deleted=True
+    )
+    await env.start()
+    await env.press("Магазины")
+    await env.press("Shop (shop)")
+    await env.press(button)
+    expected = question + (f" Боты магазина ({count}) будут остановлены{suffix}" if count else "")
+    assert expected in env.text()
+    if not count:
+        assert "Боты магазина (" not in env.text()
+    bots.count_for_tenant.assert_awaited_once_with(shop.id)
+    bots.stop_tenant.assert_not_awaited()
+    await env.press("Да")
+    bots.stop_tenant.assert_awaited_once_with(shop.id, reason=reason, actor=ACTOR)
+    assert "остановка ботов не подтверждена" not in env.text()
+
+
+@pytest.mark.req("R-II.16")
+async def test_tenant_autostop_cannot_count_or_stop_outside_scope() -> None:
+    own = _tenant("Own", "own")
+    foreign = _tenant("Foreign", "foreign")
+    snapshot = PermissionSnapshot(
+        user_id=uuid4(),
+        tenants=frozenset({own.id}),
+        role_permissions={TENANTS_MANAGE: frozenset({"manager"})},
+    )
+    bots = SimpleNamespace(count_for_tenant=AsyncMock(return_value=2), stop_tenant=AsyncMock())
+    env = Env(snapshot, [own, foreign], visible=[own], bot_control_service=bots)
+    await env.start()
+    await env.press("Магазины")
+    await env.forge("t_sel", str(own.id), str(foreign.id))
+    assert "Магазин не найден" in env.text()
+    bots.count_for_tenant.assert_not_awaited()
+    bots.stop_tenant.assert_not_awaited()
+
+
+@pytest.mark.req("R-II.16")
+@pytest.mark.parametrize("denied", [False, True])
+async def test_tenant_autostop_rejected_or_failed(
+    denied: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shop = _tenant("Shop", "shop")
+    secret = "synthetic-secret"
+    bots = SimpleNamespace(
+        count_for_tenant=AsyncMock(return_value=2),
+        stop_tenant=AsyncMock(side_effect=RuntimeError(secret)),
+    )
+    metric = SimpleNamespace(inc=Mock())
+    monkeypatch.setattr(tenants_presentation, "tenant_bots_stop_failures_total", metric)
+    env = Env(SUPER, [shop], bot_control_service=bots)
+    if denied:
+        env.tenants.errors["deactivate"] = DomainError("Denied", code="permission_denied")
+    await env.start()
+    await env.press("Магазины")
+    await env.press("Shop (shop)")
+    await env.press("Деактивировать")
+    await env.press("Да")
+    if denied:
+        assert shop.is_active and error_text("permission_denied") in env.text()
+        bots.stop_tenant.assert_not_awaited()
+        metric.inc.assert_not_called()
+    else:
+        assert not shop.is_active
+        assert "Магазин деактивирован, но остановка ботов не подтверждена" in env.text()
+        assert secret not in env.text()
+        bots.stop_tenant.assert_awaited_once_with(shop.id, reason="tenant_inactive", actor=ACTOR)
+        metric.inc.assert_called_once_with("failure")
+
+
+@pytest.mark.req("R-II.16")
+@pytest.mark.parametrize("restore", [False, True])
+@pytest.mark.parametrize("enabled", [0, 2])
+async def test_tenant_autostart_notice(restore: bool, enabled: int) -> None:
+    shop = _tenant("Shop", "shop", deleted=restore)
+    shop.is_active = False
+    bots = SimpleNamespace(
+        count_enabled_for_tenant=AsyncMock(return_value=enabled), stop_tenant=AsyncMock()
+    )
+    env = Env(SUPER, [shop], bot_control_service=bots)
+    operation = "restore" if restore else "activate"
+    env.tenants.handlers[operation] = lambda actor, tenant_id: env._set(
+        tenant_id, is_deleted=False, is_active=True
+    )
+    await env.start()
+    await env.press("Магазины")
+    if restore:
+        await env.press("Удалённые магазины")
+    await env.press(r"Shop \(shop\).*", regex=True)
+    await env.press("Восстановить" if restore else "Активировать")
+    assert env.tenants.calls[-1] == (operation, ACTOR, shop.id)
+    assert "Статус: активен" in env.text()
+    assert ("Боты магазина будут запущены автоматически" in env.text()) == bool(enabled)
+    bots.count_enabled_for_tenant.assert_awaited_once_with(shop.id)
+    bots.stop_tenant.assert_not_awaited()
+
+
+@pytest.mark.req("R-II.16")
+async def test_stale_restore_of_inactive_tenant_does_not_advertise_autostart() -> None:
+    """A stale Restore button stays harmless after another admin restores and pauses the shop."""
+    shop = _tenant("Shop", "shop", deleted=True)
+    shop.is_active = False
+    bots = SimpleNamespace(count_enabled_for_tenant=AsyncMock(return_value=2))
+    env = Env(SUPER, [shop], bot_control_service=bots)
+    await env.start()
+    await env.press("Магазины")
+    await env.press("Удалённые магазины")
+    await env.press("Shop (shop)")
+
+    # Between rendering and the click, another admin restores and deactivates the shop.
+    shop.is_deleted = False
+    env.tenants._noop = True
+    env.tenants.handlers["restore"] = lambda actor, tenant_id: env.store[tenant_id]
+    await env.press("Восстановить")
+
+    assert env.tenants.calls[-1] == ("restore", ACTOR, shop.id)
+    assert "Без изменений." in env.text()
+    assert "Боты магазина будут запущены автоматически" not in env.text()
+    bots.count_enabled_for_tenant.assert_not_awaited()
 
 
 @SCENARIO
@@ -435,7 +594,8 @@ async def test_rename_and_settings_flag_language_chats() -> None:
 @SCENARIO
 async def test_restore_from_deleted() -> None:
     gone = _tenant("Shop D", "shop-d", deleted=True)
-    env = Env(SUPER, [gone])
+    bots = SimpleNamespace(count_enabled_for_tenant=AsyncMock(return_value=0))
+    env = Env(SUPER, [gone], bot_control_service=bots)
     await env.start()
     await env.press("Магазины")
     await env.press("Удалённые магазины")

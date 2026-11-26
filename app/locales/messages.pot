@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-25 20:08+0300\n"
+"POT-Creation-Date: 2026-11-26 11:23+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -86,6 +86,9 @@ msgstr ""
 msgid "Бот магазина"
 msgstr ""
 
+msgid "Бот уже добавлен и привязан к удалённому магазину."
+msgstr ""
+
 msgid "Бот уже добавлен."
 msgstr ""
 
@@ -93,6 +96,9 @@ msgid "Боты"
 msgstr ""
 
 msgid "Боты (только просмотр)"
+msgstr ""
+
+msgid "Боты магазина будут запущены автоматически."
 msgstr ""
 
 msgid "Бухгалтерия"
@@ -233,6 +239,10 @@ msgstr ""
 msgid "Деактивировать магазин?"
 msgstr ""
 
+#, python-brace-format
+msgid "Деактивировать магазин? Боты магазина ({count}) будут остановлены."
+msgstr ""
+
 msgid "Деактивировать роль? Её права перестанут действовать."
 msgstr ""
 
@@ -321,6 +331,14 @@ msgstr ""
 msgid "Магазин"
 msgstr ""
 
+msgid ""
+"Магазин деактивирован, но остановка ботов не подтверждена — боты будут "
+"остановлены воркером автоматически."
+msgstr ""
+
+msgid "Магазин деактивирован."
+msgstr ""
+
 msgid "Магазин доступен только для просмотра."
 msgstr ""
 
@@ -331,6 +349,14 @@ msgid "Магазин открыт"
 msgstr ""
 
 msgid "Магазин посетителя"
+msgstr ""
+
+msgid ""
+"Магазин удалён, но остановка ботов не подтверждена — боты будут "
+"остановлены воркером автоматически."
+msgstr ""
+
+msgid "Магазин удалён."
 msgstr ""
 
 #, python-brace-format
@@ -850,6 +876,12 @@ msgid "Удалить бота?"
 msgstr ""
 
 msgid "Удалить магазин? Его можно будет восстановить."
+msgstr ""
+
+#, python-brace-format
+msgid ""
+"Удалить магазин? Его можно будет восстановить. Боты магазина ({count}) "
+"будут остановлены, прокси освобождены."
 msgstr ""
 
 msgid "Удалить персональное право?"

@@ -358,9 +358,9 @@ class ProxyPoolService:
         """
         return await self._assign_proxy(bot_id)
 
-    async def release_proxy(self, bot_id: UUID) -> UUID | None:
-        """``bots.proxy_id = NULL``; returns the previous proxy id."""
-        async with self._transaction():
+    async def release_proxy(self, bot_id: UUID, *, commit: bool = True) -> UUID | None:
+        """Release a bot proxy; ``commit=False`` uses the caller transaction."""
+        if not commit:
             bot = await self._bots.get(bot_id, for_update=True)
             if bot is None:
                 raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
@@ -368,7 +368,9 @@ class ProxyPoolService:
             if previous is not None:
                 bot.proxy_id = None
                 await self._session.flush()
-        return previous
+            return previous
+        async with self._transaction():
+            return await self.release_proxy(bot_id, commit=False)
 
     # --- failures ---------------------------------------------------------------------
     async def report_failure(

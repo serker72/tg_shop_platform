@@ -22,6 +22,7 @@ from app.modules.bot_manager.metrics import (
     OutageState,
     proxy_failure_verdicts_total,
     proxy_probe_total,
+    tenant_bots_stop_failures_total,
 )
 from app.modules.iam.metrics import (
     INVALIDATION_SCOPES,
@@ -132,6 +133,18 @@ class ProxyFailureCollector(Collector):
         return []
 
 
+class TenantBotsStopFailuresCollector(Collector):
+    def collect(self) -> Iterable[Metric]:
+        yield CounterMetricFamily(
+            "tenant_bots_stop_failures",
+            "Failed bot stop transactions after a committed shop change.",
+            value=tenant_bots_stop_failures_total.snapshot()["failure"],
+        )
+
+    def describe(self) -> Iterable[Metric]:
+        return []
+
+
 class TelegramOutageCollector(Collector):
     """``telegram_outage`` (0/1) from :class:`OutageState` (``master_bot`` only).
 
@@ -231,8 +244,10 @@ def register_component_metrics(
         metrics.registry.register(
             ProxyFailureCollector(proxy_failure_verdicts_total, proxy_probe_total)
         )
-    elif component == "master_bot" and outage_state is not None:
-        metrics.registry.register(TelegramOutageCollector(outage_state))
+    elif component == "master_bot":
+        metrics.registry.register(TenantBotsStopFailuresCollector())
+        if outage_state is not None:
+            metrics.registry.register(TelegramOutageCollector(outage_state))
 
 
 def render_metrics(registry: CollectorRegistry) -> bytes:
