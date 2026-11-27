@@ -41,8 +41,10 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
                                  ▲                                     │
                                  └──PR── bugfix/milestone-N ◀── замечания
 
-заказчик принял веху N ──▶ development ──PR──▶ master ──CI/CD──▶ Production (VPS1, VPS2)
+заказчик принял веху N ──▶ development ──PR──▶ master ──CI/CD──▶ Production (VPS1, VPS2)*
 ```
+
+\* Первая выкладка в Production допускается только в финале [Вехи IV](../delivery-milestones.md#этап-iv-расширенные-модули-и-готовность-к-промышленной-эксплуатации), после успешного переноса и сверки данных старого бота на финальной схеме.
 
 1. Веха N закрыта в `feature/milestone-{N}` → PR в `development` → слияние → ветка удаляется.
 2. Слияние PR в `development` запускает CI/CD, который обновляет Staging.
@@ -50,8 +52,8 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
 4. Найденные ошибки исправляются в `bugfix/milestone-{N}` (от `development`) → PR в
    `development` → Staging обновляется → повторное тестирование.
 5. Шаги 3–4 повторяются, пока не устранены все замечания.
-6. Заказчик принял веху N → PR `development` → `master` → слияние запускает CI/CD, который
-   обновляет Production (VPS1, VPS2).
+6. Заказчик принял веху N → PR `development` → `master` → слияние остаётся триггером CI/CD для
+   Production (VPS1, VPS2). Для первой выкладки действует условие под схемой.
 
 Параллельно с устранением замечаний по вехе N идёт работа над вехой N+1 в
 `feature/milestone-{N+1}` (создаётся от `development` после слияния PR вехи N).
@@ -70,7 +72,7 @@ feature/milestone-N ──PR──▶ development ──CI/CD──▶ Staging �
 | Событие | Окружение | Когда реализуется |
 |---|---|---|
 | слияние PR в `development` (push в `development` на GitHub) | Staging | веха II, GitHub Actions (см. [delivery-milestones.md](../delivery-milestones.md), Этап II); до этого Staging обновляется вручную |
-| слияние PR в `master` (push в `master` на GitHub) | Production (VPS1, VPS2) | когда появятся серверы Production; до этого — только описание |
+| слияние PR в `master` (push в `master` на GitHub) | Production (VPS1, VPS2) | когда появятся серверы Production; до этого — только описание. Для первой выкладки действует условие [под схемой](#цикл-сдачи-вехи) |
 
 ## Теги и версия
 
