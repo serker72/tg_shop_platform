@@ -122,15 +122,39 @@ async def serve_components(context: ServiceContext, components: Sequence[Service
     """
     supervisor = context.supervisor
     async with AsyncExitStack() as stack:
-        # Safety net only: registered first, so on LIFO exit it runs LAST - covers an
-        # exception while entering components, not the regular shutdown below.
-        stack.callback(supervisor.begin_shutdown)
-        for component_factory in components:
-            await stack.enter_async_context(component_factory(context))
-        print(f"{context.name} started", flush=True)
-        sig = await wait_for_shutdown(supervisor.stop_requested)
-        # Before the components exit: the tasks they cancel and await are expected to end.
-        supervisor.begin_shutdown()
+
+        async def startup() -> None:
+            for component_factory in components:
+                await stack.enter_async_context(component_factory(context))
+
+        # Start the signal waiter first: it installs the handlers before any component I/O.
+        stopping = asyncio.create_task(wait_for_shutdown(supervisor.stop_requested))
+        starting = asyncio.create_task(startup())
+        startup_observed = False
+        stopping_observed = False
+        try:
+            await asyncio.wait((starting, stopping), return_when=asyncio.FIRST_COMPLETED)
+            if starting.done():
+                startup_observed = True
+                starting.result()
+                if not stopping.done():
+                    print(f"{context.name} started", flush=True)
+            stopping_observed = True
+            sig = await asyncio.shield(stopping)
+        finally:
+            supervisor.begin_shutdown()
+            teardown_errors: list[BaseException] = []
+            for task, observed in ((starting, startup_observed), (stopping, stopping_observed)):
+                cancelled_here = task.cancel()
+                (result,) = await asyncio.gather(task, return_exceptions=True)
+                if not observed and isinstance(result, BaseException):
+                    if not (cancelled_here and isinstance(result, asyncio.CancelledError)):
+                        teardown_errors.append(result)
+            if len(teardown_errors) == 1:
+                raise teardown_errors[0]
+            if teardown_errors:
+                raise BaseExceptionGroup("Component startup shutdown failed", teardown_errors)
+        # The startup task has unwound any partial enter before the stack exits.
         if sig is not None:
             print(f"{context.name} received {sig.name}, shutting down", flush=True)
         else:

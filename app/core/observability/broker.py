@@ -9,6 +9,7 @@ FastStream's default ``faststream.access.rabbit`` logger (own stdout handler,
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from faststream.rabbit import Channel, RabbitBroker
 from faststream.rabbit.opentelemetry import RabbitTelemetryMiddleware
@@ -34,7 +35,12 @@ def broker_logger() -> logging.Logger:
 BROKER_GRACEFUL_TIMEOUT_SECONDS = 15.0
 
 
-def build_rabbit_broker(settings: Settings) -> RabbitBroker:
+def build_rabbit_broker(
+    settings: Settings,
+    *,
+    on_close: Callable[[object, BaseException | None], Awaitable[None] | None] | None = None,
+    on_reconnected: Callable[[object], None] | None = None,
+) -> RabbitBroker:
     """Broker on ``settings.rabbitmq_url`` with OTel spans and the JSON logger.
 
     ``RabbitTelemetryMiddleware`` (``faststream[otel]``) creates publish/process spans and
@@ -47,6 +53,8 @@ def build_rabbit_broker(settings: Settings) -> RabbitBroker:
         logger=broker_logger(),
         default_channel=Channel(publisher_confirms=True, on_return_raises=True),
         graceful_timeout=BROKER_GRACEFUL_TIMEOUT_SECONDS,
+        on_close=(on_close,) if on_close is not None else None,
+        on_reconnected=(on_reconnected,) if on_reconnected is not None else None,
         middlewares=[
             RabbitTelemetryMiddleware(tracer_provider=get_tracer_provider()),
             # Only when tracing is off: trace_id header for log correlation.

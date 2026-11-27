@@ -1,13 +1,10 @@
-"""Durable ``bot.commands`` consumer for the worker transport boundary.
-
-Runtime ownership remains in task-10/11.  This module only validates envelopes,
-performs durable duplicate suppression, and delegates to an explicit adapter.
-"""
+"""Per-replica ``bot.commands`` consumer and delivery settlement."""
 
 from __future__ import annotations
 
 import asyncio
 import random
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any, Protocol, cast
@@ -20,6 +17,7 @@ from faststream.rabbit import QueueType, RabbitBroker, RabbitMessage, RabbitQueu
 from redis.asyncio import Redis
 
 from app.modules.bot_manager.commands import BOT_COMMAND_EXCHANGE, BOT_COMMAND_FANOUT, BotCommand
+from app.modules.bot_manager.worker import WorkerUnavailableError
 
 COMMAND_QUEUE = BOT_COMMAND_EXCHANGE
 COMMAND_DLQ = "bot.commands.dlq"
@@ -61,7 +59,7 @@ def is_transient_adapter_error(exc: BaseException) -> bool:
     A generic ``RuntimeError`` is deliberately terminal: the worker must not
     create an unbounded Rabbit requeue loop for an unavailable runtime seam.
     """
-    return isinstance(exc, (TransientAdapterError, TransientTransportError))
+    return isinstance(exc, (TransientAdapterError, TransientTransportError, WorkerUnavailableError))
 
 
 def _dispatch_timeout_for(ttl_seconds: int) -> float:
@@ -125,11 +123,11 @@ class RedisCommandDeduplicator:
 
 
 class InMemoryCommandDeduplicator:
-    """Small deterministic adapter for unit tests; production uses Redis."""
+    """In-flight claims and bounded completed history local to one subscriber."""
 
     def __init__(self, *, ttl_seconds: int = DEDUPE_TTL_SECONDS) -> None:
         self._keys: dict[str, str] = {}
-        self._completed: set[str] = set()
+        self._completed: OrderedDict[str, None] = OrderedDict()
         self.ttl_seconds = ttl_seconds
 
     async def claim(self, key: str) -> str | ClaimState:
@@ -145,7 +143,9 @@ class InMemoryCommandDeduplicator:
         if self._keys.get(key) != owner:
             return False
         self._keys.pop(key, None)
-        self._completed.add(key)
+        self._completed[key] = None
+        if len(self._completed) > 8192:
+            self._completed.popitem(last=False)
         return True
 
     async def release(self, key: str, owner: str) -> None:
@@ -219,7 +219,10 @@ def register_bot_command_consumer(
     *,
     dispatch_timeout_seconds: float | None = None,
 ) -> Callable[[dict[str, Any], RabbitMessage], Awaitable[None]]:
-    """Register one durable competing consumer on the shared broker.
+    """Register one exclusive fanout subscriber on the shared broker.
+
+    The supplied deduplicator must be scoped to this subscriber; production uses
+    local state so another replica's successful no-op cannot suppress this copy.
 
     Invalid payloads and adapter failures are raised so FastStream's
     ``REJECT_ON_ERROR`` applies its configured safe error semantics. Failed
@@ -364,16 +367,20 @@ def register_bot_command_consumer(
 
 
 def _command_queue() -> RabbitQueue:
-    return RabbitQueue(COMMAND_QUEUE, durable=True, arguments=cast(Any, COMMAND_QUEUE_ARGUMENTS))
+    return RabbitQueue(
+        f"{COMMAND_QUEUE}.{uuid4().hex}",
+        queue_type=QueueType.CLASSIC,
+        durable=False,
+        exclusive=True,
+        auto_delete=True,
+        arguments=cast(Any, COMMAND_QUEUE_ARGUMENTS),
+    )
 
 
 async def declare_bot_command_topology(broker: RabbitBroker) -> None:
-    """Declare the same durable queue and binding used by the optional subscriber."""
+    """Declare only the fanout and its DLQ; subscribers own replica bindings."""
     await declare_bot_command_dlq(broker)
-    schema = _command_queue()
-    queue = await broker.declare_queue(schema)
-    exchange = await broker.declare_exchange(BOT_COMMAND_FANOUT)
-    await queue.bind(exchange, routing_key=schema.routing(), arguments=schema.bind_arguments)
+    await broker.declare_exchange(BOT_COMMAND_FANOUT)
 
 
 async def declare_bot_command_dlq(broker: RabbitBroker) -> None:

@@ -23,6 +23,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import ProxySettings
+from app.modules.bot_manager.lease import BotLease
 from app.modules.bot_manager.metrics import FAILURE_VERDICTS, LabeledCounter
 from app.modules.bot_manager.models import Bot, Proxy
 from app.modules.bot_manager.proxy_health import ProxyHealthTracker, strike_key
@@ -356,7 +357,9 @@ async def test_report_failure_strike_without_redis_fallback(factory: Any, redis:
     await pool.tracker.mark_ok(b)
 
     class _NoStrikeKey(ProxyHealthTracker):
-        async def try_acquire_strike(self, proxy_id: uuid.UUID) -> str | None:
+        async def try_acquire_strike(
+            self, proxy_id: uuid.UUID, *, lease: BotLease | None = None
+        ) -> str | None:
             raise RedisConnectionError("down")
 
     tracker = _NoStrikeKey(redis, window_seconds=3600)

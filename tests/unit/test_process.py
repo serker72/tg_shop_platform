@@ -126,6 +126,36 @@ async def test_components_exit_lifo_on_signal_without_failure() -> None:
     assert events == ["enter:a", "enter:b", "exit:b", "exit:a"]
 
 
+async def test_sigterm_during_startup_propagates_partial_cleanup_failure() -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def started(_: ServiceContext) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            events.append("outer cleanup")
+
+    @asynccontextmanager
+    async def partial(_: ServiceContext) -> AsyncIterator[None]:
+        try:
+            events.append("partial startup")
+            await asyncio.Future()
+            yield
+        finally:
+            await asyncio.sleep(0)
+            events.append("partial cleanup")
+            raise RuntimeError("partial cleanup failed")
+
+    killer = sigterm_when(lambda: bool(events))
+    try:
+        with pytest.raises(RuntimeError, match="partial cleanup failed"):
+            await asyncio.wait_for(serve_components(_context(), [started, partial]), WAIT_TIMEOUT)
+    finally:
+        await killer
+    assert events == ["partial startup", "partial cleanup", "outer cleanup"]
+
+
 @pytest.mark.parametrize("outcome", ["return", "cancel"])
 async def test_supervisor_flags_returned_or_foreign_cancelled_task(outcome: str) -> None:
     supervisor = TaskSupervisor()

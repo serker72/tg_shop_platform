@@ -72,6 +72,7 @@ class HealthCheck:
     name: str
     probe: Probe
     critical: bool = True
+    live_gate: ReadinessGate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +165,7 @@ class HealthReportCache:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._checker = checker
+        self._gates = {check.name: check.live_gate for check in checker.checks if check.live_gate}
         self._ttl = ttl
         self._clock = clock
         self._lock = asyncio.Lock()
@@ -171,6 +173,24 @@ class HealthReportCache:
         self._expires_at = 0.0
 
     async def get(self) -> HealthReport:
+        report = await self._get_cached()
+        if not self._gates:
+            return report
+        checks = []
+        for result in report.checks:
+            gate = self._gates.get(result.name)
+            if gate is not None:
+                result = CheckResult(
+                    result.name,
+                    "ok" if gate.ready else "fail",
+                    True,
+                    0.0,
+                    None if gate.ready else ComponentNotReadyError.__name__,
+                )
+            checks.append(result)
+        return HealthReport(all(check.ok for check in checks if check.critical), tuple(checks))
+
+    async def _get_cached(self) -> HealthReport:
         if self._report is not None and self._clock() < self._expires_at:
             return self._report
         async with self._lock:
@@ -332,7 +352,7 @@ class HeartbeatRegistry:
             for name, required in sorted(self.components.items())
         ]
         checks.extend(
-            HealthCheck(name, gate.probe, critical=True)
+            HealthCheck(name, gate.probe, critical=True, live_gate=gate)
             for name, gate in sorted(self.readiness.items())
         )
         return checks

@@ -7,8 +7,9 @@
 # (SENTRY_DSN, URGENTRY_BOOTSTRAP_*) and copied to VPS 1. Then:
 #   ROLE=app (VPS 1, application): clears the observability secrets (OBS_SECRETS);
 #   ROLE=obs (VPS 2, monitoring):  clears the application secrets (APP_SECRETS).
-# SENTRY_DSN and non-secret values are kept on both hosts. BOT_WORKER_MAX_BOTS
-# is a non-secret app setting, not part of APP_SECRETS (same as DEFAULT_TIMEZONE).
+# SENTRY_DSN and non-secret values are kept on both hosts. BOT_WORKER_MAX_BOTS,
+# BOT_LEASE_TTL_SECONDS and BOT_RECONCILE_INTERVAL_SECONDS are non-secret app settings,
+# not part of APP_SECRETS (same as DEFAULT_TIMEZONE).
 # Secret values are cleared, keys stay (`KEY=`), so
 # env_check.sh finds every key of .env.example; comments, order and other lines are unchanged.
 # Every `[export ]KEY=...` line of a listed key is cleared (duplicates, quoted values, `KEY= value`);

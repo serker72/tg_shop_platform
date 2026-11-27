@@ -19,6 +19,7 @@ from python_socks import ProxyTimeoutError as RawProxyTimeoutError
 
 from app.core.config import Settings
 from app.core.observability.metrics import AppMetrics
+from app.modules.bot_manager.lease import BotLease
 from app.modules.bot_manager.models import (
     BOT_STATUS_ERROR,
     BOT_STATUS_INVALID_TOKEN,
@@ -32,7 +33,7 @@ from app.modules.bot_manager.proxy_health import ProxyHealthTracker, probe_hands
 from app.modules.bot_manager.sessions import build_bot_session
 
 log = logging.getLogger(__name__)
-StatusSink = Callable[[str, str | None], Awaitable[None]]
+StatusSink = Callable[[str, str | None], Awaitable[bool | None]]
 ProxyFailureCallback = Callable[[UUID, UUID, Exception], Awaitable[None]]
 _P = ParamSpec("_P")
 _NETWORK_ERRORS = (
@@ -73,12 +74,18 @@ class BotRunner:
         failure_threshold: int = 5,
         session: BaseSession | None = None,
         metrics: AppMetrics | None = None,
+        can_poll: Callable[[], bool] | None = None,
+        lease: BotLease | None = None,
     ) -> None:
         self.bot_id, self.telegram_bot_id, self.tenant_id = bot_id, telegram_bot_id, tenant_id
         self._token, self.proxy_id, self.proxy_url = token, proxy_id, proxy_url
         self.dispatcher, self.status_sink, self.health = dispatcher, status_sink, health
         self.on_proxy_failure, self.failure_threshold = on_proxy_failure, failure_threshold
         self._session, self._metrics = session, metrics
+        self._can_poll = can_poll or (lambda: True)
+        self.polling_succeeded = False
+        self._lease = lease
+        self._startup_accepted = False
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
@@ -103,7 +110,16 @@ class BotRunner:
         await self._call("status sink", self.status_sink, status, error)
 
     async def _poll(self) -> None:
-        await self._status(BOT_STATUS_STARTING)
+        try:
+            accepted = await self.status_sink(BOT_STATUS_STARTING, None)
+        except Exception as exc:
+            log.warning("bot status sink failed: %s", type(exc).__name__)
+            if self._lease is not None:
+                return
+            accepted = None
+        if accepted is False:
+            return
+        self._startup_accepted = True
         try:
             if self._session is None:
                 self._session = build_bot_session(self.proxy_url)
@@ -115,19 +131,25 @@ class BotRunner:
         offset: int | None = None
         retries = proxy_failures = 0
         running = False
-        while not self._stop.is_set():
+        while not self._stop.is_set() and self._can_poll():
             try:
                 updates = await bot.get_updates(
                     offset=offset, timeout=30, request_timeout=40, allowed_updates=[]
                 )
             except TelegramUnauthorizedError as exc:
+                if self._stop.is_set() or not self._can_poll():
+                    return
                 self._terminal_status = (BOT_STATUS_INVALID_TOKEN, type(exc).__name__)
                 return
             except TelegramRetryAfter as exc:
+                if self._stop.is_set() or not self._can_poll():
+                    return
                 proxy_failures = 0
                 await self._sleep(float(exc.retry_after))
                 continue
             except Exception as exc:
+                if self._stop.is_set() or not self._can_poll():
+                    return
                 if self.proxy_id is not None and isinstance(exc, _NETWORK_ERRORS):
                     proxy_failures += 1
                     if proxy_failures == self.failure_threshold:
@@ -140,14 +162,22 @@ class BotRunner:
                 await self._sleep(random.uniform(ceiling / 2, ceiling))  # noqa: S311
                 continue
 
+            if self._stop.is_set() or not self._can_poll():
+                return
+            self.polling_succeeded = True
             retries = proxy_failures = 0
             if self.proxy_id is not None and self.health is not None:
-                await self._call("proxy mark_ok", self.health.mark_ok, self.proxy_id)
+                if self._lease is None:
+                    await self._call("proxy mark_ok", self.health.mark_ok, self.proxy_id)
+                else:
+                    await self._call(
+                        "proxy mark_ok", self.health.mark_ok, self.proxy_id, lease=self._lease
+                    )
             if not running:
                 await self._status(BOT_STATUS_RUNNING)
                 running = True
             for update in updates:
-                if self._stop.is_set():
+                if self._stop.is_set() or not self._can_poll():
                     break
                 offset = update.update_id + 1
                 try:
@@ -164,11 +194,18 @@ class BotRunner:
                     log.error("bot update handler failed: %s", type(exc).__name__)
 
     async def _report_proxy_failure(self, proxy_id: UUID, exc: Exception) -> None:
+        if self._stop.is_set() or not self._can_poll():
+            return
         if self.health is not None:
-            await self._call("proxy mark_fail", self.health.mark_fail, proxy_id)
-        if self.proxy_url:
+            if self._lease is None:
+                await self._call("proxy mark_fail", self.health.mark_fail, proxy_id)
+            else:
+                await self._call(
+                    "proxy mark_fail", self.health.mark_fail, proxy_id, lease=self._lease
+                )
+        if self.proxy_url and not self._stop.is_set() and self._can_poll():
             await self._call("proxy probe", probe_handshake, self.proxy_url)
-        if self.on_proxy_failure is not None:
+        if self.on_proxy_failure is not None and not self._stop.is_set() and self._can_poll():
             await self._call(
                 "proxy failure callback", self.on_proxy_failure, self.bot_id, proxy_id, exc
             )
@@ -205,7 +242,7 @@ class BotRunner:
                 except asyncio.CancelledError as exc:
                     # Do not mask a status failure already propagating through finally.
                     close_cancelled = exc
-        if self._stop.is_set() and self._terminal_status is None:
+        if self._startup_accepted and self._stop.is_set() and self._terminal_status is None:
             await self._write_final_status(BOT_STATUS_STOPPED, None)
         if close_cancelled is not None:
             raise close_cancelled
@@ -237,6 +274,10 @@ class BotRunner:
 
     async def run(self) -> None:
         await self.start()
+
+    def request_stop(self) -> None:
+        """Stop admission to polling immediately, without waiting for cleanup."""
+        self._request_stop()
 
     def _request_stop(self) -> None:
         if not self._stop.is_set():
@@ -348,6 +389,8 @@ class BotSupervisor:
         on_proxy_failure: ProxyFailureCallback | None = None,
         failure_threshold: int | None = None,
         session: BaseSession | None = None,
+        can_poll: Callable[[], bool] | None = None,
+        lease: BotLease | None = None,
     ) -> BotRunner:
         if (existing := self._runners.get(bot.id)) is not None:
             if not existing._completion_signal.done():
@@ -373,6 +416,8 @@ class BotSupervisor:
             else failure_threshold,
             session=session,
             metrics=self._metrics,
+            can_poll=can_poll,
+            lease=lease,
         )
         self._runners[bot.id] = runner
         runner._completion_signal.add_done_callback(lambda _: self._finished(runner))

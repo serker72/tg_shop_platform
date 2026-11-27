@@ -538,6 +538,10 @@ class BotWorkerSettings(BaseSettings):
     # Resolve an explicit field name in the init source before merging the env alias.
     model_config["validate_by_name"] = True
     max_bots: int = Field(default=100, ge=1, validation_alias="BOT_WORKER_MAX_BOTS")
+    lease_ttl_seconds: int = Field(default=30, ge=1, validation_alias="BOT_LEASE_TTL_SECONDS")
+    reconcile_interval_seconds: int = Field(
+        default=10, ge=1, validation_alias="BOT_RECONCILE_INTERVAL_SECONDS"
+    )
 
 
 class SchedulerSettings(BaseSettings):

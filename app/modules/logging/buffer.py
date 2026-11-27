@@ -24,6 +24,8 @@ File pruning/compression runs in a separate background task (at start, then ever
 
 Delivery is at-most-once to each sink: if ``stop`` times out while a batch is being
 written, that batch is printed to ``stderr`` even if part of it may already be stored.
+The shutdown budget bounds async waits, not OS I/O or executor shutdown: a file write
+already in a thread may finish later, then the buffer attempts one descriptor close.
 """
 
 from __future__ import annotations
@@ -114,6 +116,7 @@ class LogBuffer(ActivityLogger):
         self._session_factory = session_factory
         self._writer = writer
         self._queue: asyncio.Queue[ActivityEvent] = asyncio.Queue(maxsize=queue_size)
+        self._wake = asyncio.Event()
         self._batch_size = batch_size
         self._flush_interval = flush_interval_seconds
         self._db_attempts = db_retry_attempts
@@ -127,6 +130,8 @@ class LogBuffer(ActivityLogger):
         self._task: asyncio.Task[None] | None = None
         self._inflight: list[ActivityEvent] = []
         self._prune_task: asyncio.Task[None] | None = None
+        self._file_write: asyncio.Future[list[ActivityEvent]] | None = None
+        self._file_close: asyncio.Task[None] | None = None
 
     @classmethod
     def from_settings(
@@ -175,6 +180,7 @@ class LogBuffer(ActivityLogger):
             return
         try:
             self._queue.put_nowait(event)
+            self._wake.set()
         except asyncio.QueueFull:
             self._drop([event], "queue_full")
 
@@ -199,6 +205,9 @@ class LogBuffer(ActivityLogger):
         """Start the background consumer (idempotent)."""
         if self._task is not None:
             return
+        if self._file_close is not None:
+            await asyncio.shield(self._file_close)
+            self._file_close = None
         self._loop = asyncio.get_running_loop()
         self._thread_id = threading.get_ident()
         self._closing = False
@@ -215,18 +224,20 @@ class LogBuffer(ActivityLogger):
         task = self._task
         if task is None:
             return
+        deadline = asyncio.get_running_loop().time() + timeout
         self._closing = True
+        self._wake.set()
         prune_task, self._prune_task = self._prune_task, None
         if prune_task is not None:
             prune_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await prune_task
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout)
+            async with asyncio.timeout_at(deadline):
+                await asyncio.shield(task)
+                if prune_task is not None:
+                    await asyncio.gather(prune_task, return_exceptions=True)
+                await asyncio.shield(self._schedule_file_close())
         except TimeoutError:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
             leftover = list(self._inflight)
             while True:
                 try:
@@ -241,10 +252,22 @@ class LogBuffer(ActivityLogger):
             self._task = None
             self._loop = None
             self._thread_id = None
-            try:
-                await asyncio.to_thread(self._writer.close_all)
-            except Exception as error:
-                _log.warning("log_files_close_failed", error=repr(error))
+            self._schedule_file_close()
+
+    def _schedule_file_close(self) -> asyncio.Task[None]:
+        if self._file_close is None:
+            self._file_close = asyncio.create_task(self._close_files(), name="log-files-close")
+        return self._file_close
+
+    async def _close_files(self) -> None:
+        # Thread I/O cannot be cancelled. On timeout this task runs unawaited,
+        # and only asks for the writer lock after our pending write has ended.
+        if self._file_write is not None:
+            await asyncio.gather(self._file_write, return_exceptions=True)
+        try:
+            await asyncio.to_thread(self._writer.close_all)
+        except Exception as error:
+            _log.warning("log_files_close_failed", error=repr(error))
 
     # -- consumer side -------------------------------------------------------------------
 
@@ -253,7 +276,6 @@ class LogBuffer(ActivityLogger):
             try:
                 batch = await self._collect()
                 if batch:
-                    self._inflight = batch
                     await self._flush(batch)
                     self._inflight = []
             except Exception as error:  # the consumer must survive any batch
@@ -266,18 +288,23 @@ class LogBuffer(ActivityLogger):
     async def _collect(self) -> list[ActivityEvent]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._flush_interval
+        # Own dequeued entries before awaiting, including a partially collected batch.
         batch: list[ActivityEvent] = []
+        self._inflight = batch
         while len(batch) < self._batch_size:
             try:
                 batch.append(self._queue.get_nowait())
                 continue
             except asyncio.QueueEmpty:
                 pass
-            remaining = deadline - loop.time()
-            if self._closing or remaining <= 0:
+            if self._closing or loop.time() >= deadline:
                 break
+            # Producers and stop() run on this loop: no await between observing
+            # an empty queue and clearing the wakeup, so no signal is lost.
+            self._wake.clear()
             try:
-                batch.append(await asyncio.wait_for(self._queue.get(), remaining))
+                async with asyncio.timeout_at(deadline):
+                    await self._wake.wait()
             except TimeoutError:
                 break
         return batch
@@ -320,7 +347,11 @@ class LogBuffer(ActivityLogger):
 
     async def _write_files(self, batch: list[ActivityEvent]) -> None:
         try:
-            failed = await asyncio.to_thread(self._writer.write_events, batch)
+            self._file_write = asyncio.get_running_loop().run_in_executor(
+                None, self._writer.write_events, batch
+            )
+            failed = await asyncio.shield(self._file_write)
+            self._file_write = None
         except Exception as error:
             _log.warning("log_buffer_file_write_failed", error=repr(error))
             failed = batch

@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import ProxySettings
 from app.core.proxy_url import mask_proxy_url, validate_proxy_url
+from app.modules.bot_manager.lease import BotLease
 from app.modules.bot_manager.metrics import LabeledCounter, proxy_failure_verdicts_total
 from app.modules.bot_manager.models import (
     PROXY_STATUS_ACTIVE,
@@ -37,7 +38,7 @@ from app.modules.bot_manager.models import (
     Bot,
     Proxy,
 )
-from app.modules.bot_manager.proxy_health import ProxyHealthTracker
+from app.modules.bot_manager.proxy_health import ProxyHealthTracker, StrikeLeaseLostError
 from app.modules.bot_manager.proxy_repository import ProxyRepository
 from app.modules.bot_manager.repository import BotRepository
 from app.modules.iam.admin_service import CONFLICT, SESSION_NOT_CLEAN, map_integrity_error
@@ -284,7 +285,13 @@ class ProxyPoolService:
         return bot
 
     async def _try_bind(
-        self, bot_id: UUID, proxy_id: UUID, *, expected: UUID | None, keep: bool
+        self,
+        bot_id: UUID,
+        proxy_id: UUID,
+        *,
+        expected: UUID | None,
+        keep: bool,
+        before_bind: Callable[[Bot], Awaitable[None]] | None = None,
     ) -> _Bind:
         """In a savepoint: lock the proxy, recount, lock the bot, re-check its proxy and
         bind. A rejected proxy releases its lock (savepoint rollback)."""
@@ -303,6 +310,8 @@ class ProxyPoolService:
                     raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
                 if bot.proxy_id != expected:
                     raise _Abort(_Bind.CHANGED)
+                if before_bind is not None:
+                    await before_bind(bot)
                 if not keep:
                     bot.proxy_id = proxy_id
                     await self._session.flush()
@@ -310,7 +319,9 @@ class ProxyPoolService:
             return abort.outcome
         return _Bind.BOUND
 
-    async def _assign_proxy(self, bot_id: UUID) -> UUID:
+    async def _assign_proxy(
+        self, bot_id: UUID, *, before_bind: Callable[[Bot], Awaitable[None]] | None = None
+    ) -> UUID:
         """Assign without starting or committing a transaction."""
         limit = self._settings.proxy_max_bots_per_ip
         for _ in range(_ASSIGN_ATTEMPTS):
@@ -319,14 +330,18 @@ class ProxyPoolService:
                 raise EntityNotFoundError("Bot not found", code=BOT_NOT_FOUND)
             (current,) = row
             if current is not None:
-                outcome = await self._try_bind(bot_id, current, expected=current, keep=True)
+                outcome = await self._try_bind(
+                    bot_id, current, expected=current, keep=True, before_bind=before_bind
+                )
                 if outcome is _Bind.BOUND:
                     return current
                 if outcome is _Bind.CHANGED:
                     continue
             changed = False
             for candidate in await self._repo.available_ids(limit, exclude=current):
-                outcome = await self._try_bind(bot_id, candidate, expected=current, keep=False)
+                outcome = await self._try_bind(
+                    bot_id, candidate, expected=current, keep=False, before_bind=before_bind
+                )
                 if outcome is _Bind.BOUND:
                     _log.info("proxy_assigned", bot_id=str(bot_id), proxy_id=str(candidate))
                     return candidate
@@ -350,13 +365,15 @@ class ProxyPoolService:
         async with self._transaction():
             return await self._assign_proxy(bot_id)
 
-    async def assign_proxy_in_transaction(self, bot_id: UUID) -> UUID:
+    async def assign_proxy_in_transaction(
+        self, bot_id: UUID, *, before_bind: Callable[[Bot], Awaitable[None]] | None = None
+    ) -> UUID:
         """Bind without commit so a caller can atomically save related changes.
 
         The caller owns rollback/commit. When the endpoint has already been validated,
         use ``assign_proxy(ValidatedProxyAssignment(...))`` instead of reselecting it.
         """
-        return await self._assign_proxy(bot_id)
+        return await self._assign_proxy(bot_id, before_bind=before_bind)
 
     async def release_proxy(self, bot_id: UUID, *, commit: bool = True) -> UUID | None:
         """Release a bot proxy; ``commit=False`` uses the caller transaction."""
@@ -374,7 +391,12 @@ class ProxyPoolService:
 
     # --- failures ---------------------------------------------------------------------
     async def report_failure(
-        self, proxy_id: UUID, exc: BaseException | None = None
+        self,
+        proxy_id: UUID,
+        exc: BaseException | None = None,
+        *,
+        fence: Callable[[], Awaitable[None]] | None = None,
+        lease: BotLease | None = None,
     ) -> FailureVerdict:
         """Strike only when the other ACTIVE proxies work (pool correlation).
 
@@ -383,8 +405,10 @@ class ProxyPoolService:
         """
         reason = type(exc).__name__ if exc is not None else "failure"
         try:
-            verdict = await self._decide(proxy_id, reason)
-        except (*REDIS_ERRORS, SQLAlchemyError) as error:
+            if fence is not None:
+                await fence()
+            verdict = await self._decide(proxy_id, reason, fence=fence, lease=lease)
+        except (*REDIS_ERRORS, SQLAlchemyError, StrikeLeaseLostError) as error:
             _log.warning(
                 "proxy_failure_verdict_error", proxy_id=str(proxy_id), error=type(error).__name__
             )
@@ -392,7 +416,14 @@ class ProxyPoolService:
         self._verdicts.inc(verdict.verdict)
         return verdict
 
-    async def _decide(self, proxy_id: UUID, reason: str) -> FailureVerdict:
+    async def _decide(
+        self,
+        proxy_id: UUID,
+        reason: str,
+        *,
+        fence: Callable[[], Awaitable[None]] | None = None,
+        lease: BotLease | None = None,
+    ) -> FailureVerdict:
         async with self._transaction():
             active = await self._repo.active_ids()
         if proxy_id not in active:
@@ -403,7 +434,12 @@ class ProxyPoolService:
         others = [item for item in active if item != proxy_id]
         health = await self._tracker.pool_health(others)
         if health.ok == 0 or health.failed / health.total >= self._settings.proxy_outage_ratio:
-            await self._tracker.set_outage()
+            if fence is not None:
+                await fence()
+            if lease is None:
+                await self._tracker.set_outage()
+            elif not await self._tracker.set_outage(lease=lease):
+                return FailureVerdict("deduplicated")
             _log.warning(
                 "telegram_outage_suspected",
                 proxy_id=str(proxy_id),
@@ -412,13 +448,21 @@ class ProxyPoolService:
                 others=health.total,
             )
             return FailureVerdict("outage")
-        strike = await self.register_strike(proxy_id, reason, allow_fallback=False)
+        strike = await self.register_strike(
+            proxy_id, reason, allow_fallback=False, fence=fence, lease=lease
+        )
         if not strike.applied:
             return FailureVerdict("deduplicated")
         return FailureVerdict("strike", strike.released_bot_ids)
 
     async def register_strike(
-        self, proxy_id: UUID, reason: str, *, allow_fallback: bool = True
+        self,
+        proxy_id: UUID,
+        reason: str,
+        *,
+        allow_fallback: bool = True,
+        fence: Callable[[], Awaitable[None]] | None = None,
+        lease: BotLease | None = None,
     ) -> StrikeResult:
         """At most one strike per window (Redis ``SET NX EX``); ``>=
         PROXY_STRIKES_TO_QUARANTINE`` -> quarantine + all bots unbound.
@@ -430,22 +474,29 @@ class ProxyPoolService:
         fallback = False
         token: str | None = None
         try:
-            token = await self._tracker.try_acquire_strike(proxy_id)
+            token = await self._tracker.try_acquire_strike(proxy_id, lease=lease)
         except REDIS_ERRORS as error:
-            if not allow_fallback:
+            if not allow_fallback or lease is not None:
                 raise
             _log.warning("proxy_strike_dedup_fallback", error=type(error).__name__)
             fallback = True
         if token is None and not fallback:
             return StrikeResult(applied=False)
         try:
-            return await self._apply_strike(proxy_id, reason, pg_dedup=fallback)
+            return await self._apply_strike(proxy_id, reason, pg_dedup=fallback, fence=fence)
         except BaseException:
             if token is not None:
                 await self._tracker.release_strike(proxy_id, token)
             raise
 
-    async def _apply_strike(self, proxy_id: UUID, reason: str, *, pg_dedup: bool) -> StrikeResult:
+    async def _apply_strike(
+        self,
+        proxy_id: UUID,
+        reason: str,
+        *,
+        pg_dedup: bool,
+        fence: Callable[[], Awaitable[None]] | None = None,
+    ) -> StrikeResult:
         window = timedelta(seconds=self._settings.proxy_strike_window_seconds)
         async with self._transaction():
             proxy = await self._repo.get(proxy_id, for_update=True)
@@ -455,6 +506,8 @@ class ProxyPoolService:
             if pg_dedup and proxy.last_strike_at is not None:
                 if now - proxy.last_strike_at < window:
                     return StrikeResult(applied=False)
+            if fence is not None:
+                await fence()
             proxy.strike_count += 1
             proxy.last_strike_at = now
             proxy.last_error = reason[:_LAST_ERROR_MAX]
@@ -474,6 +527,8 @@ class ProxyPoolService:
                     "released_bots": [str(item) for item in released],
                 },
             )
+            if fence is not None:
+                await fence()
         _log.warning(
             "proxy_strike",
             proxy_id=str(proxy_id),

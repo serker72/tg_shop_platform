@@ -23,6 +23,7 @@ from uuid import UUID
 
 import structlog
 
+from app.modules.bot_manager.lease import BotLease
 from app.modules.bot_manager.metrics import (
     OUTAGE_KEY,
     OUTAGE_POLL_INTERVAL_SECONDS,
@@ -86,6 +87,10 @@ class PoolHealth:
     total: int
 
 
+class StrikeLeaseLostError(RuntimeError):
+    """The reporting runner no longer owns the lease."""
+
+
 class ProxyHealthTracker:
     """Redis marks of proxy success/failure and of a Telegram outage."""
 
@@ -103,7 +108,7 @@ class ProxyHealthTracker:
         self._clock = clock
         self._last_ok: dict[UUID, float] = {}
 
-    async def mark_ok(self, proxy_id: UUID) -> bool:
+    async def mark_ok(self, proxy_id: UUID, *, lease: BotLease | None = None) -> bool:
         """Mark a successful request and clear the outage key (one ``SET`` + one ``DEL``
         per throttle period); ``False`` - throttled or Redis failed (logged)."""
         now = self._clock()
@@ -111,8 +116,17 @@ class ProxyHealthTracker:
         if last is not None and now - last < self._throttle:
             return False
         try:
-            await self._redis.set(ok_key(proxy_id), f"{now:.6f}", ex=self._window)
-            if await self._redis.delete(OUTAGE_KEY):
+            if lease is None:
+                await self._redis.set(ok_key(proxy_id), f"{now:.6f}", ex=self._window)
+                cleared = bool(await self._redis.delete(OUTAGE_KEY))
+            else:
+                result = await lease.set_mark(
+                    ok_key(proxy_id), f"{now:.6f}", ttl=self._window, clear=OUTAGE_KEY
+                )
+                if not result:
+                    return False
+                cleared = result == 2
+            if cleared:
                 _log.info("telegram_outage_cleared", proxy_id=str(proxy_id))
         except REDIS_ERRORS as error:
             _log.warning("proxy_mark_ok_failed", proxy_id=str(proxy_id), error=type(error).__name__)
@@ -120,12 +134,18 @@ class ProxyHealthTracker:
         self._last_ok[proxy_id] = now
         return True
 
-    async def mark_fail(self, proxy_id: UUID) -> bool:
+    async def mark_fail(self, proxy_id: UUID, *, lease: BotLease | None = None) -> bool:
         """Mark a failed proxy (the next ``mark_ok`` is not throttled)."""
         now = self._clock()
-        self._last_ok.pop(proxy_id, None)
+        if lease is None:
+            self._last_ok.pop(proxy_id, None)
         try:
-            await self._redis.set(fail_key(proxy_id), f"{now:.6f}", ex=self._window)
+            if lease is None:
+                await self._redis.set(fail_key(proxy_id), f"{now:.6f}", ex=self._window)
+            elif not await lease.set_mark(fail_key(proxy_id), f"{now:.6f}", ttl=self._window):
+                return False
+            else:
+                self._last_ok.pop(proxy_id, None)
         except REDIS_ERRORS as error:
             _log.warning(
                 "proxy_mark_fail_failed", proxy_id=str(proxy_id), error=type(error).__name__
@@ -148,17 +168,28 @@ class ProxyHealthTracker:
                 failed += 1
         return PoolHealth(ok=ok, failed=failed, total=len(ids))
 
-    async def set_outage(self) -> None:
-        """``SET proxy:outage <ts> EX window``; Redis errors propagate."""
-        await self._redis.set(OUTAGE_KEY, f"{self._clock():.6f}", ex=self._window)
+    async def set_outage(self, *, lease: BotLease | None = None) -> bool | None:
+        """Mark an outage; return false for a stale lease. Redis errors propagate."""
+        value = f"{self._clock():.6f}"
+        if lease is not None:
+            return bool(await lease.set_mark(OUTAGE_KEY, value, ttl=self._window))
+        await self._redis.set(OUTAGE_KEY, value, ex=self._window)
+        return None
 
     async def outage_active(self) -> bool:
         return bool(await self._redis.exists(OUTAGE_KEY))
 
-    async def try_acquire_strike(self, proxy_id: UUID) -> str | None:
+    async def try_acquire_strike(
+        self, proxy_id: UUID, *, lease: BotLease | None = None
+    ) -> str | None:
         """``SET proxy:strike:{id} <token> NX EX window``: the owner token of the first
         strike in the window, ``None`` - already taken. Redis errors propagate."""
         token = uuid.uuid4().hex
+        if lease is not None:
+            result = await lease.take_mark(strike_key(proxy_id), token, ttl=self._window)
+            if result == 0:
+                raise StrikeLeaseLostError
+            return token if result == 1 else None
         acquired = await self._redis.set(strike_key(proxy_id), token, nx=True, ex=self._window)
         return token if acquired else None
 

@@ -171,6 +171,24 @@ async def test_stop_drains_queue(tmp_path: Path, counter: LogsDroppedCounter) ->
     assert not buffer.running
 
 
+@pytest.mark.parametrize("count", [0, 1], ids=["empty", "partial"])
+async def test_stop_wakes_waiting_collector(
+    tmp_path: Path, counter: LogsDroppedCounter, count: int
+) -> None:
+    factory = FakeFactory()
+    buffer = make_buffer(tmp_path, factory, counter, batch_size=10, flush_interval_seconds=300)
+    await buffer.start()
+    for _ in range(count):
+        buffer.log(ev())
+    # Let the consumer enter the wait with an empty queue or a partial batch.
+    await asyncio.sleep(0)
+    assert factory.rows == []
+    await asyncio.wait_for(buffer.stop(5), timeout=1)
+    assert len(factory.rows) == count
+    assert counter.value == 0
+    assert not buffer.running
+
+
 @pytest.mark.req("S5")
 async def test_stop_timeout_dumps_rest(
     tmp_path: Path, counter: LogsDroppedCounter, capsys: pytest.CaptureFixture[str]
@@ -184,6 +202,37 @@ async def test_stop_timeout_dumps_rest(
     await buffer.stop(0.2)
     assert counter.by_reason == {"shutdown_timeout": 5}
     assert capsys.readouterr().err.count("reason=shutdown_timeout") == 5
+
+
+async def test_stop_budget_includes_blocked_file_writer(
+    tmp_path: Path, counter: LogsDroppedCounter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    buffer = make_buffer(tmp_path, FakeFactory(), counter, batch_size=1)
+    started, release, closed = threading.Event(), threading.Event(), threading.Event()
+    write_line, close_all = buffer._writer._write_line, buffer._writer.close_all
+
+    def blocked_write(path: Path, line: str) -> None:
+        started.set()
+        if not release.wait(5):
+            raise OSError("test writer did not unblock")
+        write_line(path, line)
+
+    def track_close() -> None:
+        close_all()
+        closed.set()
+
+    monkeypatch.setattr(buffer._writer, "_write_line", blocked_write)
+    monkeypatch.setattr(buffer._writer, "close_all", track_close)
+    await buffer.start()
+    buffer.log(ev())
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        await asyncio.wait_for(buffer.stop(0.05), timeout=1)
+        assert not closed.is_set()
+        assert counter.by_reason == {"shutdown_timeout": 1}
+    finally:
+        release.set()
+    assert await asyncio.to_thread(closed.wait, 1)
 
 
 async def test_log_from_other_thread(tmp_path: Path, counter: LogsDroppedCounter) -> None:

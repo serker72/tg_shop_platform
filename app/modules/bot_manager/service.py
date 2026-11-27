@@ -307,6 +307,8 @@ class BotControlService:
             ):
                 return bot
             bot.is_active = kind != "STOP_BOT"
+            if kind == "RESTART_BOT":
+                bot.restart_revision += 1
             await self.repo.set_status(
                 bot, BOT_STATUS_STARTING if bot.is_active else BOT_STATUS_STOPPED
             )
@@ -334,6 +336,7 @@ class BotControlService:
             if me.id != bot.telegram_bot_id:
                 raise DomainError("Bot identity mismatch", code="bot_identity_mismatch")
             bot.encrypted_token, bot.token_hash = token, token_hash(token)
+            bot.restart_revision += 1
             bot.username, bot.name = me.username, me.first_name
             await self.repo.set_status(
                 bot, BOT_STATUS_STARTING if bot.is_active else BOT_STATUS_STOPPED

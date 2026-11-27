@@ -95,6 +95,9 @@ class Bot(BusinessEntity, Base):
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     encrypted_token: Mapped[str] = mapped_column(EncryptedString(), nullable=False)
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    restart_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=BOT_STATUS_STOPPED, index=True
     )

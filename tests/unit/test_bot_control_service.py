@@ -53,7 +53,7 @@ async def test_repeat_start_is_noop_but_restart_publishes(
 ) -> None:
     service = BotControlService(AsyncMock())
     tenant_id, bot_id = uuid4(), uuid4()
-    bot = Bot(id=bot_id, is_active=True, status=status)
+    bot = Bot(id=bot_id, is_active=True, status=status, restart_revision=0)
     lock, command, audit = AsyncMock(return_value=bot), AsyncMock(), AsyncMock()
     monkeypatch.setattr(service, "_locked_bot", lock)
     monkeypatch.setattr(service, "_command", command)

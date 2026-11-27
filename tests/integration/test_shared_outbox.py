@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from contextlib import suppress
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from faststream.rabbit import ExchangeType, RabbitExchange, RabbitMessage, RabbitQueue
+from aio_pika.exceptions import ChannelNotFoundEntity
+from faststream.rabbit import ExchangeType, RabbitBroker, RabbitExchange, RabbitMessage, RabbitQueue
 from faststream_outbox.client import OutboxClient
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -26,11 +28,12 @@ from app.shared_kernel.infrastructure.outbox import (
     outbox_dlq,
     outbox_messages,
 )
+from tests.integration._guards import guarded_rabbit_broker, guarded_rabbit_url
 
 pytestmark = pytest.mark.integration
 
 
-async def test_worker_relays_to_durable_queue_without_adapter(
+async def test_worker_retries_unroutable_commands_without_adapter(
     engine: AsyncEngine, settings: Settings, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 
@@ -43,8 +46,18 @@ async def test_worker_relays_to_durable_queue_without_adapter(
     from app.core.observability.metrics import build_metrics
     from app.core.process import ServiceContext
     from app.entrypoints.bot_worker import commands, scheduler
+    from app.modules.bot_manager import tasks
 
+    test_settings = settings
+    url = guarded_rabbit_url(test_settings)
+
+    def build_scheduler_broker(config: Settings) -> RabbitBroker:
+        return guarded_rabbit_broker(build_rabbit_broker(config), test_settings)
+
+    monkeypatch.setattr(scheduler, "build_rabbit_broker", build_scheduler_broker)
     name = f"test.worker.{uuid4().hex}"
+    scheduler_queue = f"{name}.proxy.rehabilitate"
+    monkeypatch.setattr(tasks, "task_queue", lambda _: scheduler_queue)
     dlq = f"{name}.dlq"
     exchange = RabbitExchange(name, type=ExchangeType.FANOUT, durable=True)
     monkeypatch.setattr(commands, "COMMAND_QUEUE", name)
@@ -64,8 +77,13 @@ async def test_worker_relays_to_durable_queue_without_adapter(
     monkeypatch.setattr(
         scheduler, "SharedOutboxRelay", lambda **kw: SharedOutboxRelay(**kw, queues=(name,))
     )
-    assert settings.project_environment == "test"
-    settings = settings.model_copy(update={"project_environment": "prod"})
+    # The UUID queue isolates delivery, not the scheduler's shared Redis lock.
+    settings = settings.model_copy(
+        update={
+            "project_environment": "prod",
+            "scheduler": settings.scheduler.model_copy(update={"scheduler_enabled": False}),
+        }
+    )
     outbox = build_outbox_broker(engine)
 
     dependencies: dict[object, object] = {
@@ -86,10 +104,13 @@ async def test_worker_relays_to_durable_queue_without_adapter(
         readiness_registry=readiness,
     )
     traceparent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-    async with await aio_pika.connect(settings.rabbitmq_url) as connection:
+    async with await aio_pika.connect(url) as connection:
         channel = await connection.channel()
         try:
             async with scheduler.scheduler_component(ctx):
+                subscriber_queue = await channel.declare_queue(scheduler_queue, passive=True)
+                assert subscriber_queue.declaration_result.consumer_count == 1
+                assert not ctx.settings.scheduler.scheduler_enabled
                 assert not readiness.readiness[scheduler.BOT_RUNTIME_READINESS].ready
                 async with AsyncSession(engine) as session:
                     await append_outbox(
@@ -103,25 +124,33 @@ async def test_worker_relays_to_durable_queue_without_adapter(
                     await session.commit()
                 async with asyncio.timeout(5):
                     while True:
-                        queue = await channel.declare_queue(name, passive=True)
-                        assert queue.declaration_result.consumer_count == 0
-                        if queue.declaration_result.message_count == 1:
+                        async with engine.connect() as conn:
+                            attempts = await conn.scalar(
+                                select(outbox_messages.c.deliveries_count).where(
+                                    outbox_messages.c.queue == name
+                                )
+                            )
+                        if attempts and attempts > 0:
                             break
                         await asyncio.sleep(0.05)
-                message = await queue.get()
-                header = message.headers["traceparent"]
-                assert isinstance(header, str)
-                assert header.split("-")[1] == traceparent.split("-")[1]
-                assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
-                await message.ack()
                 dead = await channel.declare_queue(dlq, passive=True)
                 assert dead.declaration_result.message_count == 0
         finally:
-            await channel.queue_delete(name)
-            await channel.queue_delete(dlq)
-            await channel.exchange_delete(name)
-            async with engine.begin() as conn:
-                await conn.execute(outbox_messages.delete().where(outbox_messages.c.queue == name))
+            # Rabbit can close a channel if a resource was never declared during startup.
+            # Give each deletion its own channel and always clean the SQL row as well.
+            try:
+                for queue in (scheduler_queue, dlq):
+                    with suppress(ChannelNotFoundEntity):
+                        async with connection.channel() as cleanup:
+                            await cleanup.queue_delete(queue)
+                with suppress(ChannelNotFoundEntity):
+                    async with connection.channel() as cleanup:
+                        await cleanup.exchange_delete(name)
+            finally:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        outbox_messages.delete().where(outbox_messages.c.queue == name)
+                    )
 
 
 async def test_shared_outbox_commit_relay_rabbit_trace_and_precommit_visibility(
@@ -131,13 +160,14 @@ async def test_shared_outbox_commit_relay_rabbit_trace_and_precommit_visibility(
 ) -> None:
     from app.core.observability import broker as broker_module
 
+    guarded_rabbit_url(settings)
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(broker_module, "get_tracer_provider", lambda: provider)
     queue_name = f"test.outbox.{uuid4().hex}"
     exchange = RabbitExchange(queue_name, type=ExchangeType.FANOUT, auto_delete=True)
-    broker = build_rabbit_broker(settings)
+    broker = guarded_rabbit_broker(build_rabbit_broker(settings), settings)
     received: asyncio.Future[tuple[dict[str, str], str]] = (
         asyncio.get_running_loop().create_future()
     )
@@ -193,9 +223,10 @@ async def test_shared_outbox_commit_relay_rabbit_trace_and_precommit_visibility(
 async def test_shared_outbox_unroutable_fanout_keeps_row_for_retry(
     engine: AsyncEngine, settings: Settings
 ) -> None:
+    guarded_rabbit_url(settings)
     name = f"test.unroutable.{uuid4().hex}"
     exchange = RabbitExchange(name, type=ExchangeType.FANOUT, auto_delete=True)
-    broker = build_rabbit_broker(settings)
+    broker = guarded_rabbit_broker(build_rabbit_broker(settings), settings)
     outbox = build_outbox_broker(engine)
     relay = SharedOutboxRelay(
         outbox_broker=outbox,

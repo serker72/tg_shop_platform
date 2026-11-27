@@ -274,8 +274,9 @@ services:
     <<: *app
     command: ["python", "-m", "app.entrypoints.bot_worker"]
     healthcheck: *bot-healthcheck
-    # > broker graceful_timeout (15 s) + telemetry/Sentry flush.
-    stop_grace_period: 30s
+    # Runtime (12 s) + scheduler/relay (up to 6 s) + broker (18 s)
+    # + default LogBuffer (10 s) + observability/telemetry and cancellation margin.
+    stop_grace_period: 65s
     depends_on:
       db_update:
         condition: service_completed_successfully

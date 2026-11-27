@@ -223,7 +223,7 @@ async def _get_json(app: Application, path: str) -> tuple[int, Any]:
 def test_version_endpoint() -> None:
     info = VersionInfo("0.1.1.5", "abc1234", "2025-01-01T00:00:00Z")
     app = create_app(
-        cast(HealthChecker, object()),
+        HealthChecker(checks=(), timeout=1.0),
         CollectorRegistry(),
         component="master_bot",
         environment="dev",
